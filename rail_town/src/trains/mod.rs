@@ -5,8 +5,10 @@ mod visuals;
 
 use bevy::prelude::*;
 
-use tools::{train_tool_input, TrainToolState};
+use tools::train_tool_input;
 use visuals::sync_train_sprites;
+
+pub use tools::{TrainPlaceKind, TrainToolState};
 
 pub struct TrainsPlugin;
 

@@ -14,7 +14,7 @@ use crate::map::camera::{
 };
 use crate::palette::{BG1, OUTLINE};
 use crate::track::TrackToolState;
-use crate::ui::kit::{micro_font, text_accent, SPACE_2, SPACE_3};
+use crate::ui::kit::{micro_font, text_accent, SPACE_2, STATUS_H};
 use crate::ui::UiBlocksWorld;
 
 /// Screen texels per map tile in Map View (design: 4).
@@ -52,7 +52,10 @@ pub fn setup_map_view_banner(mut commands: Commands) {
             MapViewBanner,
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(SPACE_3 + 28.0),
+                // Below the whole top chrome block, not a guess at its height —
+                // the old literal predated the menu and health rows and left the
+                // banner overlapping the status strip.
+                top: Val::Px(STATUS_H + SPACE_2),
                 left: Val::Percent(50.0),
                 margin: UiRect::left(Val::Px(-110.0)),
                 padding: UiRect::axes(Val::Px(SPACE_2), Val::Px(SPACE_2)),

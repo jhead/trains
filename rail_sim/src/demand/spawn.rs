@@ -13,10 +13,26 @@ use crate::trains::track_for_station;
 
 use super::sites::pick_demand_site;
 
-/// Felt rhythm: first new demand after this many sim-minutes.
-pub const DEMAND_FIRST_DELAY_SIM_MINUTES: u32 = 8;
-/// Subsequent opportunities every this many sim-minutes.
-pub const DEMAND_INTERVAL_SIM_MINUTES: u32 = 4;
+// # Reading these numbers
+//
+// A sim-minute is **not** a real minute, and the gap is enormous. One tick is
+// [`SIM_SECONDS_PER_TICK`] (10) sim-seconds, and `FixedUpdate` runs at 64 Hz,
+// so the world lives about **640x faster than the clock on the wall**:
+//
+//     real_seconds = sim_minutes * 60 / SIM_SECONDS_PER_TICK / 64
+//                  = sim_minutes * 0.09375
+//
+// So a value that reads like a comfortable few minutes is under half a second
+// of play. Brief 08 §4.2 asks for "roughly one meaningful new opportunity
+// every few minutes early on"; at the old four sim-minutes that was one every
+// 0.375 s, and the whole session's budget was spent inside the first three
+// seconds — which is why a new game opened with eight opportunities already
+// waiting. Convert to real time before changing either of these.
+
+/// Felt rhythm: first new demand after this many sim-minutes (~3 real minutes).
+pub const DEMAND_FIRST_DELAY_SIM_MINUTES: u32 = 1_920;
+/// Subsequent opportunities every this many sim-minutes (~4 real minutes).
+pub const DEMAND_INTERVAL_SIM_MINUTES: u32 = 2_560;
 /// Cap on anchors revealed after the initial seed (stations + industries).
 pub const DEMAND_MAX_NEW_PER_SESSION: u32 = 8;
 /// Minimum Manhattan spacing from existing anchors.
@@ -241,6 +257,37 @@ pub fn spawn_new_demand(
 
 #[cfg(test)]
 mod tests {
+    /// Ticks per real second at the fixed timestep. Only used to state the
+    /// pacing claim in the units a player actually experiences.
+    const TICKS_PER_REAL_SECOND: f32 = 64.0;
+
+    fn real_minutes(sim_minutes: u32) -> f32 {
+        minutes_to_ticks(sim_minutes) as f32 / TICKS_PER_REAL_SECOND / 60.0
+    }
+
+    #[test]
+    fn opportunities_arrive_minutes_apart_in_real_time_not_seconds() {
+        // A new game must not open with the session's whole demand budget
+        // already on the board (brief 08 §4.2).
+        let first = real_minutes(DEMAND_FIRST_DELAY_SIM_MINUTES);
+        let gap = real_minutes(DEMAND_INTERVAL_SIM_MINUTES);
+        assert!(
+            (2.0..6.0).contains(&first),
+            "first opportunity at {first:.1} real minutes"
+        );
+        assert!(
+            (2.0..8.0).contains(&gap),
+            "opportunities {gap:.1} real minutes apart"
+        );
+
+        let session = first + gap * (DEMAND_MAX_NEW_PER_SESSION - 1) as f32;
+        assert!(
+            session > 20.0,
+            "the session's opportunities should span {session:.0} real minutes, \
+             not arrive all at once"
+        );
+    }
+
     use super::*;
     use bevy_app::{App, FixedUpdate};
 
@@ -258,9 +305,10 @@ mod tests {
         assert_eq!(s.ticks_until_next, minutes_to_ticks(DEMAND_FIRST_DELAY_SIM_MINUTES));
         assert_eq!(s.interval_ticks, minutes_to_ticks(DEMAND_INTERVAL_SIM_MINUTES));
         assert_eq!(s.max_new, DEMAND_MAX_NEW_PER_SESSION);
-        // 8 sim-min ≈ 48 ticks at 10s/tick; 4 min ≈ 24 ticks.
-        assert_eq!(s.ticks_until_next, 48);
-        assert_eq!(s.interval_ticks, 24);
+        // Pinned in ticks so a careless edit to either constant has to look at
+        // the real-time cost. See the module header: 6 ticks per sim-minute.
+        assert_eq!(s.ticks_until_next, 11_520);
+        assert_eq!(s.interval_ticks, 15_360);
     }
 
     #[test]

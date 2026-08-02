@@ -128,4 +128,39 @@ mod tests {
             CommandKind::PlaceTrack(_)
         ));
     }
+
+    #[test]
+    fn track_apply_places_when_terrain_present() {
+        use crate::track::{TrackEdit, TrackNetwork, TrackTerrain, TRACK_COST_CENTS};
+        use bevy_ecs::message::Messages;
+        use crate::money::Money;
+
+        let mut app = App::new();
+        app.add_plugins(SimPlugin);
+        app.insert_resource(TrackTerrain::new(8, 8, (0..64).map(|_| (false, 0i8))));
+
+        {
+            let mut buf = app.world_mut().resource_mut::<CommandBuffer>();
+            buf.push(CommandKind::PlaceTrack(PlaceTrack {
+                tile: TileCoord { x: 3, y: 3 },
+                layer: 0,
+            }));
+        }
+
+        app.world_mut().run_schedule(FixedUpdate);
+
+        assert_eq!(app.world().resource::<TrackNetwork>().len(), 1);
+        assert_eq!(
+            app.world().resource::<Money>().cents(),
+            crate::money::STARTING_CASH_CENTS - TRACK_COST_CENTS
+        );
+
+        let edits: Vec<TrackEdit> = app
+            .world_mut()
+            .resource_mut::<Messages<TrackEdit>>()
+            .drain()
+            .collect();
+        assert_eq!(edits.len(), 1);
+        assert!(matches!(edits[0], TrackEdit::Placed { .. }));
+    }
 }

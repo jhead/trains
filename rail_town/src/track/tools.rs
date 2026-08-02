@@ -1,10 +1,10 @@
 //! Click-to-build / demolish → sim [`CommandBuffer`].
 //!
 //! ## Autofill (two-click anchors)
-//! In **Build** mode, the first click sets an anchor; the second click pushes
-//! [`AutoFillTrack`] on an orthogonal or 45° diagonal. Esc / right-click clears
-//! the pending anchor. Hold **Shift** while clicking to place a single tile
-//! without using/clearing the autofill anchor.
+//! In **Build** mode, the first click places an anchor tile; the second click
+//! pushes [`AutoFillTrack`] on an orthogonal or 45° diagonal. Esc / right-click
+//! clears the pending anchor. Hold **Shift** while clicking to place a single
+//! tile without starting an autofill pair.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;

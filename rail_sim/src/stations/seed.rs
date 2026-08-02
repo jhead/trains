@@ -1,8 +1,8 @@
 //! Auto-seed named stations + industries on land after map gen.
 //!
 //! Call once at startup with a land predicate (typically from [`crate::track::TrackTerrain`]
-//! or `rail_map::MapGrid`). Picks spaced land tiles so the player has clear
-//! destinations to connect with track.
+//! or `rail_map::MapGrid`). Picks spaced land tiles on the **largest connected
+//! landmass** so the player can always rail-connect the MVP anchors.
 
 use crate::ids::TileCoord;
 use crate::track::GROUND_LAYER;
@@ -37,6 +37,12 @@ pub fn seed_stations_and_industries(
             }
         }
     }
+    if land.is_empty() {
+        return;
+    }
+
+    // Prefer the largest 4-connected landmass so autofill/pathing can link them.
+    let land = largest_landmass(&land);
     if land.is_empty() {
         return;
     }
@@ -83,6 +89,41 @@ pub fn seed_stations_and_industries(
             );
         }
     }
+}
+
+/// Keep only tiles in the largest 4-connected component of `land`.
+fn largest_landmass(land: &[TileCoord]) -> Vec<TileCoord> {
+    use std::collections::{HashSet, VecDeque};
+
+    if land.is_empty() {
+        return Vec::new();
+    }
+    let set: HashSet<(i32, i32)> = land.iter().map(|c| (c.x, c.y)).collect();
+    let mut seen: HashSet<(i32, i32)> = HashSet::new();
+    let mut best: Vec<TileCoord> = Vec::new();
+
+    for &start in land {
+        let key = (start.x, start.y);
+        if !seen.insert(key) {
+            continue;
+        }
+        let mut component = Vec::new();
+        let mut q = VecDeque::new();
+        q.push_back(start);
+        while let Some(cur) = q.pop_front() {
+            component.push(cur);
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let n = (cur.x + dx, cur.y + dy);
+                if set.contains(&n) && seen.insert(n) {
+                    q.push_back(TileCoord { x: n.0, y: n.1 });
+                }
+            }
+        }
+        if component.len() > best.len() {
+            best = component;
+        }
+    }
+    best
 }
 
 /// Greedy farthest-point sampling for roughly even coverage.
@@ -153,5 +194,43 @@ mod tests {
         assert!(stations.iter().any(|s| s.name == "Eastgate"));
         assert!(industries.producer_of(GoodKind::Lumber).is_some());
         assert!(industries.consumer_of(GoodKind::Lumber).is_some());
+    }
+
+    #[test]
+    fn seeds_only_on_largest_landmass() {
+        // Two islands: a small 2-tile and a large 3×3 — anchors must stay on the 3×3.
+        let mut stations = StationRegistry::new();
+        let mut industries = IndustryRegistry::new();
+        let mut service = StationService::default();
+        let is_land = |c: TileCoord| {
+            // Large mass around (10,10)
+            (c.x >= 8 && c.x <= 14 && c.y >= 8 && c.y <= 14)
+                // Tiny island
+                || (c.x == 2 && (c.y == 2 || c.y == 3))
+        };
+        seed_stations_and_industries(
+            &mut stations,
+            &mut industries,
+            &mut service,
+            32,
+            32,
+            is_land,
+        );
+        for s in stations.iter() {
+            assert!(
+                s.tile.x >= 8 && s.tile.x <= 14 && s.tile.y >= 8 && s.tile.y <= 14,
+                "station {} on tiny island {:?}",
+                s.name,
+                s.tile
+            );
+        }
+        for i in industries.iter() {
+            assert!(
+                i.tile.x >= 8 && i.tile.x <= 14 && i.tile.y >= 8 && i.tile.y <= 14,
+                "industry {} on tiny island {:?}",
+                i.name,
+                i.tile
+            );
+        }
     }
 }

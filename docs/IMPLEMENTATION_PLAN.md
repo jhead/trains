@@ -99,16 +99,18 @@ Agents may parallelize by crate / slice ownership below. Integrate on `main` fre
 
 ## Acceptance checklist (MVP done when)
 
-- [ ] New game → seeded map with land/water/elevation
-- [ ] Lay track, auto-fill a straight, demolish with full refund
-- [ ] Buy/place at least one transit and one transport train
-- [ ] Complete a passenger trip and a goods delivery; money changes
-- [ ] Served station area grows buildings over time; neglected area stagnates or shrinks
-- [ ] Complaint feed shows at least one peep wait complaint
-- [ ] Pause and speed controls work
-- [ ] `cargo run -p rail_town` works on desktop
-- [ ] WASM target documented; `cargo check --target wasm32-unknown-unknown -p rail_town` passes (or equivalent)
-- [ ] `rail_net::NullNeighbor` compiled in; portals present on edges
+- [x] New game → seeded map with land/water/elevation
+- [x] Lay track, auto-fill a straight, demolish with full refund
+- [x] Buy/place at least one transit and one transport train
+- [x] Complete a passenger trip and a goods delivery; money changes
+- [x] Served station area grows buildings over time; neglected area stagnates or shrinks
+- [x] Complaint feed shows at least one peep wait complaint
+- [x] Pause and speed controls work
+- [x] `cargo run -p rail_town` works on desktop
+- [x] WASM target documented; `cargo check --target wasm32-unknown-unknown -p rail_town` passes (or equivalent)
+- [x] `rail_net::NullNeighbor` compiled in; portals present on edges
+
+Verified: `cargo test -p rail_town --test mvp_playable_loop`; native + WASM boot screenshots in `docs/screenshots/`.
 
 ## Decision freedom
 

@@ -49,18 +49,19 @@ fn fill_elevation(out: &mut [f32], width: u32, height: u32, rng: &mut StdRng) {
         }
     }
 
-    // Gentle continent bias: pull edges slightly down so coasts are common.
+    // Mild coast bias: pull map edges down so shorelines appear without drowning
+    // the interior (MVP needs one large playable landmass for track).
     for y in 0..h {
         for x in 0..w {
             let nx = (x as f32 / (w - 1).max(1) as f32) * 2.0 - 1.0;
             let ny = (y as f32 / (h - 1).max(1) as f32) * 2.0 - 1.0;
-            let edge = (nx.abs().max(ny.abs())).powf(1.6);
-            accum[y * w + x] -= edge * 0.55;
+            let edge = (nx.abs().max(ny.abs())).powf(2.2);
+            accum[y * w + x] -= edge * 0.28;
         }
     }
 
     // Soft blur for contiguous landmasses.
-    for _ in 0..2 {
+    for _ in 0..3 {
         blur_inplace(&mut accum, w, h);
     }
 
@@ -106,8 +107,9 @@ fn blur_inplace(buf: &mut [f32], w: usize, h: usize) {
 fn classify_tiles(grid: &mut MapGrid, heights: &[f32]) {
     let w = grid.width as usize;
     let h = grid.height as usize;
-    // Sea level near the median-ish of the field after continent bias.
-    let sea = -0.05f32;
+    // Sea level below the field mean so seed 42 (and typical seeds) keep a
+    // contiguous interior continent players can rail across.
+    let sea = -0.22f32;
 
     for y in 0..h {
         for x in 0..w {
@@ -256,5 +258,55 @@ mod tests {
         let land = map.tiles().len() - water;
         assert!(water > 0, "expected some water");
         assert!(land > 0, "expected some land");
+    }
+
+    #[test]
+    fn default_map_has_large_connected_landmass() {
+        let map = generate_map(DEFAULT_MAP_WIDTH, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_SEED);
+        let land = map.tiles().iter().filter(|t| !t.water).count();
+        let water = map.tiles().len() - land;
+        assert!(
+            land > water / 2,
+            "expected substantial land for MVP play (land={land} water={water})"
+        );
+
+        // Largest 4-connected land component should fit spaced stations.
+        let mut seen = vec![false; map.tiles().len()];
+        let w = map.width as i32;
+        let h = map.height as i32;
+        let idx = |x: i32, y: i32| (y * w + x) as usize;
+        let mut best = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                let start = idx(x, y);
+                if seen[start] || map.tile(TileCoord { x, y }).water {
+                    continue;
+                }
+                let mut stack = vec![(x, y)];
+                seen[start] = true;
+                let mut size = 0usize;
+                while let Some((cx, cy)) = stack.pop() {
+                    size += 1;
+                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let nx = cx + dx;
+                        let ny = cy + dy;
+                        if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                            continue;
+                        }
+                        let ni = idx(nx, ny);
+                        if seen[ni] || map.tile(TileCoord { x: nx, y: ny }).water {
+                            continue;
+                        }
+                        seen[ni] = true;
+                        stack.push((nx, ny));
+                    }
+                }
+                best = best.max(size);
+            }
+        }
+        assert!(
+            best >= 200,
+            "largest landmass too small for track loop (best={best})"
+        );
     }
 }

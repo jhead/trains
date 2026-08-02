@@ -20,9 +20,11 @@ Tracks work against [`docs/design/11-roadmap.md`](design/11-roadmap.md). Update 
 | Item | Status |
 | --- | --- |
 | Selection + Inspector | done |
-| Station panel / Peep card / Town Talk | Town Talk done (dedupe, praise, age, click-to-fly + select); station/peep panels via inspect |
-| Overlays + Map View | done — service / congestion / density (`Tab`, `F1`–`F3`); Map View `M` @ 4 texels/tile |
+| Station panel / Peep card / Town Talk | done |
+| Overlays + Map View | done |
 | Ledger + alerts | done |
+
+**Done when:** “why is this station bad?” gets a sentence; Town Talk click reaches the peep.
 
 ## Phase C — The Loop
 

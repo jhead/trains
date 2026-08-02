@@ -6,4 +6,7 @@ license.workspace = true
 description = "Rail Town map, terrain, and edge portal stubs"
 
 [dependencies]
+bevy_ecs.workspace = true
+rail_sim = { path = "../rail_sim" }
+rand.workspace = true
 serde.workspace = true

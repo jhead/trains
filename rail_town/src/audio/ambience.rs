@@ -213,7 +213,10 @@ pub fn drive_ambience(
     // Share out one bed's worth of level. When only wind is present the bed is
     // genuinely quieter — silence is a texture, not a gap to fill (§1).
     let total: f32 = weights.iter().map(|(_, w)| w).sum::<f32>().max(1.0);
-    let bus = gain::AMBIENCE_TOTAL * mix.ambience() * mix.ambience_perspective();
+    // The scene's share and the bus are kept apart: the share cross-fades over
+    // seconds as the camera moves, the bus answers a settings slider at once.
+    let bed = gain::AMBIENCE_TOTAL * mix.ambience_perspective();
+    let bus = mix.ambience();
 
     // -- parameters -------------------------------------------------------
     if let Some(v) = beds.voice(VoiceKind::Wind) {
@@ -259,9 +262,9 @@ pub fn drive_ambience(
         } else {
             BED_FADE_SECS
         };
-        let target = bus * (weight / total);
+        let target = bed * (weight / total);
         if let Some(voice) = beds.voice(kind) {
-            voice.apply(target, dt, tau, &mut sinks, &mut spatial);
+            voice.apply(target, bus, dt, tau, &mut sinks, &mut spatial);
         }
     }
 }

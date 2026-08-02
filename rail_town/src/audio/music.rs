@@ -1,19 +1,40 @@
-//! The score (brief §4) — sparse, long, and mostly absent.
+//! When the score plays (brief §4). *What* it plays is [`super::score`].
 //!
-//! There is one music voice, spawned at startup and never stopped. A "cue" is
-//! an envelope on its level: up over fourteen seconds, held for three to five
+//! There is one music voice, spawned at startup and never stopped. A "cue" is an
+//! envelope on its level: up over fourteen seconds, held for three to five
 //! minutes, down over twenty, then three to eight minutes of nothing. The
 //! ambience carries the gaps, which is the point — silence is a texture, not a
 //! bug, and a score you notice arriving is a score you will resent by hour two.
 //!
-//! Nothing about a cue is dramatic. The harmony is chosen while the voice is
-//! silent, it never resolves, it has no percussion and it cannot build. The one
-//! contextual move is the palette: warm and with a third when the network is
-//! thriving, open fifths when the town is thin, and a distinct register at dusk
-//! — the prettiest minute of the day cycle deserves its own piece.
+//! # Every cue opens with the theme
+//!
+//! The score is a fixed four-and-a-half minute composition. If the generator ran
+//! free underneath the envelope, each cue would fade in wherever the piece
+//! happened to be, and the piece would never be recognised. So the director
+//! numbers its cues and writes the number to
+//! [`VoiceParams::set_cue`](super::voice::VoiceParams::set_cue); the audio
+//! thread treats a change as "start at bar one" and a zero as "stop, and cost
+//! nothing until asked again". A player therefore hears the same opening phrase
+//! every time the music comes back, which is the whole of recognisability.
+//!
+//! # The seed
+//!
+//! The map's own seed, so a world has its own tune and always the same one.
+//! Change the map, and the next silence is used to rebuild the voice around the
+//! new seed. Nothing is ever re-seeded while a cue is audible.
+//!
+//! # Context
+//!
+//! Three continuous controls, all chosen while the voice is silent so that
+//! nothing ever sweeps mid-cue: warmth from the town density around the camera,
+//! density (how much of the composition survives) from the same, and a dusk flag
+//! from [`TimeOfDay`]. None of them is dramatic and none is a comment on
+//! failure — a declining town gets a sparser, darker reading of the same piece,
+//! not a sad one.
 
 use bevy::audio::{AudioSink, SpatialAudioSink};
 use bevy::prelude::*;
+use rail_map::MapGrid;
 
 use crate::atmosphere::{DayPhase, TimeOfDay};
 
@@ -40,6 +61,9 @@ const GAP_MAX: f32 = 480.0;
 const FADE_IN: f32 = 14.0;
 const FADE_OUT: f32 = 20.0;
 
+/// Below this the fade is over and the generator may be put back to sleep.
+const SLEEP_BELOW: f32 = 0.0004;
+
 /// What the director is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -57,6 +81,10 @@ pub struct MusicDirector {
     began: f64,
     rng: Rng,
     started: bool,
+    /// Increments once per cue; the audio thread restarts the piece on a change.
+    cue: u32,
+    /// Map seed the current voice was composed from.
+    seed: u64,
 }
 
 impl Default for MusicDirector {
@@ -68,6 +96,8 @@ impl Default for MusicDirector {
             began: 0.0,
             rng: Rng::new(0x006d_7573_6963),
             started: false,
+            cue: 0,
+            seed: u64::MAX,
         }
     }
 }
@@ -81,12 +111,31 @@ impl MusicDirector {
     }
 }
 
+/// The seed a world's tune is composed from.
+///
+/// Mixed rather than used raw so that two maps whose seeds differ by one do not
+/// get two pieces that differ by one decision.
+fn tune_seed(map_seed: u64) -> u64 {
+    map_seed
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .rotate_left(29)
+        ^ 0x0072_6169_6c74_6f77
+}
+
 pub fn spawn_music(
     mut commands: Commands,
+    map: Option<Res<MapGrid>>,
     mut assets: ResMut<Assets<LiveVoice>>,
     mut director: ResMut<MusicDirector>,
 ) {
-    let handle = spawn_bed(&mut commands, &mut assets, VoiceKind::Music, 0x4f_1a_9c_33);
+    let seed = map.map(|m| m.seed).unwrap_or(0);
+    director.seed = seed;
+    let handle = spawn_bed(
+        &mut commands,
+        &mut assets,
+        VoiceKind::Music,
+        tune_seed(seed),
+    );
     director.voice = Some(handle);
 }
 
@@ -97,11 +146,15 @@ fn cue_envelope(elapsed: f32, len: f32) -> f32 {
     (up * down).clamp(0.0, 1.0)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn drive_music(
+    mut commands: Commands,
     clock: Res<AudioClock>,
     mix: Res<AudioMix>,
     tod: Res<TimeOfDay>,
+    map: Option<Res<MapGrid>>,
     beds: Res<AmbienceBeds>,
+    mut assets: ResMut<Assets<LiveVoice>>,
     mut director: ResMut<MusicDirector>,
     mut sinks: Query<&mut AudioSink>,
     mut spatial: Query<&mut SpatialAudioSink>,
@@ -119,35 +172,55 @@ pub fn drive_music(
 
     match director.stage {
         Stage::Silent => {
+            // A new world is a new tune. Rebuilding the voice means rebuilding
+            // its decoder, so it only ever happens between cues, with the sink
+            // already at zero.
+            if let Some(seed) = map.as_ref().map(|m| m.seed) {
+                if seed != director.seed && director.gain() <= SLEEP_BELOW {
+                    if let Some(old) = director.voice.take() {
+                        commands.entity(old.entity).despawn();
+                    }
+                    director.seed = seed;
+                    director.voice = Some(spawn_bed(
+                        &mut commands,
+                        &mut assets,
+                        VoiceKind::Music,
+                        tune_seed(seed),
+                    ));
+                }
+            }
+
             if now >= director.until {
                 let len = director.rng.range(CUE_MIN, CUE_MAX);
                 director.stage = Stage::Playing;
                 director.began = now;
                 director.until = now + len as f64;
+                director.cue = director.cue.wrapping_add(1).max(1);
 
-                // The harmony is chosen here, while the voice is silent, so the
-                // root never sweeps between two keys mid-cue.
+                // The reading is chosen here, while the voice is silent, so no
+                // control ever sweeps under a sounding note.
+                let thriving = smoothstep(0.05, 0.45, beds.town_density);
+                let dusk = f32::from(tod.phase == DayPhase::Dusk);
+                let cue = director.cue;
                 if let Some(voice) = director.voice.as_ref() {
-                    let thriving = smoothstep(0.05, 0.45, beds.town_density);
-                    let dusk = tod.phase == DayPhase::Dusk;
-                    voice.params.set_tone(if dusk {
-                        0.85
-                    } else {
-                        0.25 + 0.65 * thriving
-                    });
-                    voice.params.set_depth(if dusk { 0.75 } else { 0.35 });
-                    voice.params.set_density(0.3 + 0.4 * thriving);
-                }
-                let root = director.rng.unit();
-                if let Some(voice) = director.voice.as_ref() {
-                    voice.params.set_color(root);
+                    // Warmth: brighter strings and a more open instrument when
+                    // the network is doing well.
+                    voice.params.set_tone(0.30 + 0.60 * thriving);
+                    // Density: how much of the composition survives. A thin town
+                    // gets the bass, the chord changes and the tune; a thriving
+                    // one gets the inner voices too.
+                    voice.params.set_density(0.50 + 0.45 * thriving);
+                    // The dusk piece: the same music an octave lower and darker.
+                    voice.params.set_color(dusk);
+                    voice.params.set_depth(0.5);
+                    voice.params.set_cue(cue);
                 }
             }
         }
         Stage::Playing => {
             let len = (director.until - director.began) as f32;
             let elapsed = (now - director.began) as f32;
-            target = gain::MUSIC * cue_envelope(elapsed, len) * mix.music();
+            target = gain::MUSIC * cue_envelope(elapsed, len);
             if now >= director.until {
                 director.stage = Stage::Silent;
                 let gap = director.rng.range(GAP_MIN, GAP_MAX);
@@ -156,10 +229,20 @@ pub fn drive_music(
         }
     }
 
+    // Once the fade-out has actually finished, tell the generator to stop. It
+    // then costs one comparison per sample for the next three to eight minutes,
+    // and the next cue restarts the piece from bar one.
+    if director.stage == Stage::Silent && director.gain() <= SLEEP_BELOW {
+        if let Some(voice) = director.voice.as_ref() {
+            voice.params.set_cue(0);
+        }
+    }
+
+    let bus = mix.music();
     if let Some(voice) = director.voice.as_mut() {
         // A one-second slew on top of the envelope: the duck from laying track
         // arrives as a lean, never as a gate.
-        voice.apply(target, dt, 1.0, &mut sinks, &mut spatial);
+        voice.apply(target, bus, dt, 1.0, &mut sinks, &mut spatial);
     }
 }
 
@@ -180,6 +263,22 @@ mod tests {
         // Over a long session, music is present less than half the time.
         let duty = (CUE_MIN + CUE_MAX) / (CUE_MIN + CUE_MAX + GAP_MIN + GAP_MAX);
         assert!(duty < 0.5, "music plays {:.0}% of the time", duty * 100.0);
+    }
+
+    #[test]
+    fn a_cue_is_never_much_longer_than_the_piece() {
+        // If a cue could run to several times the length of the composition the
+        // loop point would be heard as a loop. One pass, sometimes a little
+        // more, is the target.
+        let piece = super::super::score::Score::new(1).secs();
+        assert!(
+            CUE_MAX < piece * 1.35,
+            "a {CUE_MAX} s cue would go round a {piece:.0} s piece too often"
+        );
+        assert!(
+            CUE_MIN > piece * 0.55,
+            "a {CUE_MIN} s cue would not reach the second theme of a {piece:.0} s piece"
+        );
     }
 
     #[test]
@@ -210,5 +309,20 @@ mod tests {
     #[test]
     fn a_cue_is_long_enough_to_fade_in_and_out_twice_over() {
         assert!(CUE_MIN > (FADE_IN + FADE_OUT) * 3.0);
+    }
+
+    #[test]
+    fn a_world_gets_its_own_tune_and_keeps_it() {
+        assert_eq!(tune_seed(42), tune_seed(42), "the same map, the same music");
+        assert_ne!(tune_seed(42), tune_seed(43));
+        // Adjacent map seeds must not produce adjacent generator seeds, or two
+        // neighbouring worlds would share most of their decisions.
+        let a = tune_seed(42);
+        let b = tune_seed(43);
+        assert!(
+            (a ^ b).count_ones() > 8,
+            "seeds 42 and 43 differ in only {} bits",
+            (a ^ b).count_ones()
+        );
     }
 }

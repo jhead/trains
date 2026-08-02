@@ -14,12 +14,13 @@ use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
 
+use crate::commands::TrainKind;
 use crate::ids::{TrackId, TrainId};
 use crate::track::TrackNetwork;
 
 use super::congestion::{way_round, TrainIntent, Way, YIELD_COOLDOWN_TICKS};
 use super::profile::TrainProfile;
-use super::train::{Train, TrainLocation};
+use super::train::{Train, TrainLocation, TrainYard};
 
 /// Movement ticks a crossing is remembered for (railhead polish / usage).
 pub const POLISH_MEMORY_TICKS: u64 = 512;
@@ -80,12 +81,60 @@ impl TileOccupancy {
     }
 }
 
+/// Trains standing on a tile the network no longer has, in [`TrainId`] order.
+///
+/// **A train must never exist without a valid position on track**, and one that
+/// does is not a cosmetic problem. Every system that works on trains skips it:
+/// it does not move, cannot be routed, and — there being no sell command — the
+/// player cannot get rid of it. It is a permanent zombie standing on open
+/// ground, which is exactly what the orphaned-train report describes.
+///
+/// Nothing *spawns* a train that way: [`super::apply::apply_train_commands`]
+/// refuses to place without a railhead. Two things can leave one that way —
+/// track lifted out from under a standing train, and a train returning from a
+/// border crossing onto the railhead it left from, which the player may have
+/// demolished while it was away.
+///
+/// [`advance_trains`] recalls them. The stock is the player's and they paid for
+/// it, so it goes back to the yard to be placed again rather than deleted.
+fn stranded_trains(
+    network: &TrackNetwork,
+    q: &Query<(Entity, &Train, &mut TrainLocation)>,
+) -> Vec<(TrainId, Entity, TrainKind)> {
+    let mut stranded: Vec<(TrainId, Entity, TrainKind)> = q
+        .iter()
+        .filter(|(_, _, loc)| network.piece(loc.track).is_none())
+        .map(|(entity, train, _)| (train.id, entity, train.kind))
+        .collect();
+    stranded.sort_unstable_by_key(|(id, _, _)| id.0);
+    stranded
+}
+
 /// Move trains one step when progress allows and the next tile is free.
 pub fn advance_trains(
     network: Res<TrackNetwork>,
     mut occupancy: ResMut<TileOccupancy>,
+    mut yard: ResMut<TrainYard>,
+    mut commands: Commands,
     mut q: Query<(Entity, &Train, &mut TrainLocation)>,
 ) {
+    // Before anything is moved, make sure everything *can* be moved. Recalled
+    // entities are despawned through `Commands`, so they are still visible to
+    // the queries below this tick — hence the explicit skip list.
+    //
+    // The yard is only touched when there is something to put in it: taking a
+    // `ResMut` and dereferencing it every tick would mark the resource changed
+    // for every reader, and the panels that watch it would rebuild forever.
+    let stranded = stranded_trains(&network, &q);
+    let recalled: Vec<TrainId> = stranded
+        .iter()
+        .map(|&(id, entity, kind)| {
+            commands.entity(entity).despawn();
+            yard.return_train(id, kind);
+            id
+        })
+        .collect();
+
     occupancy.begin_pass();
 
     // Snapshot before anything moves: live occupancy, service order, and what
@@ -93,6 +142,9 @@ pub fn advance_trains(
     let mut order: Vec<(TrainId, Entity)> = Vec::new();
     let mut intent: HashMap<TrainId, TrainIntent> = HashMap::new();
     for (entity, train, loc) in q.iter() {
+        if recalled.contains(&train.id) {
+            continue;
+        }
         occupancy.by_track.insert(loc.track, train.id);
         order.push((train.id, entity));
         intent.insert(train.id, TrainIntent::of(loc));
@@ -289,6 +341,7 @@ mod tests {
         fn new(network: TrackNetwork) -> Self {
             let mut app = App::new();
             app.init_resource::<TileOccupancy>()
+                .init_resource::<TrainYard>()
                 .insert_resource(network)
                 .add_systems(Update, advance_trains);
             Self {
@@ -347,6 +400,80 @@ mod tests {
         fn occupancy(&self) -> &TileOccupancy {
             self.app.world().resource::<TileOccupancy>()
         }
+    }
+
+    /// The orphaned-train bug: a train whose tile the network has forgotten.
+    ///
+    /// It never moves, cannot be routed, and there is no sell command — so
+    /// without a recall it stands on open ground forever. Both ways a train can
+    /// get there are covered: the track lifted out from under it, and a border
+    /// crossing landing on a `TrackId` that has since been demolished.
+    #[test]
+    fn a_train_whose_track_vanished_goes_back_to_the_yard() {
+        let terrain = land(12, 6);
+        let mut network = TrackNetwork::new();
+        let main = lay(&mut network, &terrain, &[(1, 2), (2, 2), (3, 2)]);
+        let ghost = TrackId(9_999);
+
+        let mut sim = Sim::new(network);
+        let running = sim.spawn(1, TrainKind::Transit, main.clone());
+        // Landed from a border crossing onto a railhead that no longer exists.
+        let stranded = sim.spawn(2, TrainKind::Transport, vec![ghost]);
+        sim.run(1);
+
+        let live: Vec<TrainId> = {
+            let mut q = sim.app.world_mut().query::<&Train>();
+            q.iter(sim.app.world()).map(|t| t.id).collect()
+        };
+        assert_eq!(
+            live,
+            vec![running],
+            "a train with no tile under it must not survive the tick"
+        );
+        assert_eq!(
+            sim.app.world().resource::<TrainYard>().unplaced(),
+            &[(stranded, TrainKind::Transport)],
+            "the player paid for it: recall it to the yard, do not delete it"
+        );
+        // The line it was never on is unaffected.
+        sim.run(40);
+        assert_eq!(sim.at(running), *main.last().unwrap());
+    }
+
+    #[test]
+    fn a_healthy_railway_never_touches_the_yard() {
+        // The recall must not cost a `TrainYard` change every tick: anything
+        // that watches the yard would then rebuild forever. (A live FPS
+        // regression was exactly this shape — see the note in `advance_trains`.)
+        let terrain = land(12, 6);
+        let mut network = TrackNetwork::new();
+        let main = lay(&mut network, &terrain, &[(1, 2), (2, 2), (3, 2)]);
+
+        let mut app = App::new();
+        app.init_resource::<TileOccupancy>()
+            .init_resource::<TrainYard>()
+            .insert_resource(network)
+            .add_systems(Update, advance_trains);
+        let mut loc = TrainLocation::at_track(main[0]);
+        loc.set_path(main);
+        app.world_mut().spawn((
+            Train {
+                id: TrainId(1),
+                kind: TrainKind::Transit,
+            },
+            loc,
+        ));
+
+        app.update();
+        let baseline = app.world().resource_ref::<TrainYard>().last_changed();
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource_ref::<TrainYard>().last_changed(),
+            baseline,
+            "an untouched yard must not report itself changed"
+        );
     }
 
     #[test]

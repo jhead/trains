@@ -80,9 +80,11 @@ use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::input::InputSystems;
 use bevy::prelude::*;
 use rail_sim::{
-    AlertBoard, CommandBuffer, CommandHistory, DemandSpawner, EventDirector, GoalBoard,
-    IndustryRegistry, JobBoard, LineRegistry, Money, MoneyLedger, Peep, StationRegistry,
-    StationService, TileOccupancy, TownDensity, TrackNetwork, TrainYard, WorldAnchorsSeeded,
+    AlertBoard, BorderRegistry, CommandBuffer, CommandHistory, ComplaintFeed, DemandSpawner,
+    DistrictFlow, EventDirector, GoalBoard, HouseholdRegistry, IndustryRegistry, JobBoard,
+    LineRegistry, MaintenanceAccrual, Money, MoneyLedger, Peep, PeepBudget, PeepFocus,
+    StationRegistry, StationService, TileOccupancy, TownDensity, TrackNetwork, Train, TrainYard,
+    WorldAnchorsSeeded,
 };
 
 use crate::inspect::Selection;
@@ -495,12 +497,34 @@ fn dispatch_menu_actions(
 /// clears the sim state the shell can reach so anchors re-seed onto the new
 /// terrain. Presentation sprites are despawned here; respawning terrain is the
 /// app's hook (see the module docs).
+///
+/// # Nothing of the old world may survive
+///
+/// The list below is deliberately the same list [`rail_sim::WorldSnapshot`]
+/// overwrites on a load, because a New Map and a load leave the world in exactly
+/// the same condition and anything either one forgets is a ghost. Three of them
+/// were forgotten and each one was a bug the player could see:
+///
+/// - **Train entities.** A train is *sim state*, not a sprite that reconciles
+///   against a registry, so clearing [`TrainYard`] never touched it. It survived
+///   into the new world still holding a `TrackId` from the old one, which the
+///   new (empty) [`TrackNetwork`] has never heard of — so it never moved, could
+///   not be routed, and with no sell command could not be got rid of. That is
+///   the orphaned train standing on the grass at the start of a new game.
+/// - **[`BorderRegistry`].** Trains mid-crossing live in here as plain data, and
+///   they come home on a due tick regardless of which world is on screen. A
+///   crossing begun in the old world would land rolling stock on the new one.
+/// - **[`rail_sim::peeps::PeepSpawnState`].** It remembers which station ids it
+///   has already populated. A fresh [`StationRegistry`] hands out the same ids
+///   from one again, so every new station read as "already served, nobody is
+///   moving back in" and the new map got no residents at all.
 #[allow(clippy::too_many_arguments)]
 fn apply_pending_world(
     mut commands: Commands,
     mut pending: ResMut<PendingWorld>,
     track_sprites: Query<Entity, With<TrackSprite>>,
     peeps: Query<Entity, With<Peep>>,
+    trains: Query<Entity, With<Train>>,
     mut cameras: Query<&mut Transform, With<MapCamera>>,
 ) {
     if !pending.requested {
@@ -511,12 +535,12 @@ fn apply_pending_world(
     let options = pending.options;
     let map = options.generate();
 
-    // Station, industry, train, building and peep sprites all reconcile against
-    // their registries every frame, so clearing the registries below is enough to
+    // Station, industry, building and peep *sprites* all reconcile against their
+    // registries every frame, so clearing the registries below is enough to
     // clear them. Track sprites are the exception — they are driven by
     // `TrackEdit` messages and have no reconcile pass — so they go by hand.
-    // Peep *entities* are sim state, not presentation, and go with them.
-    for entity in track_sprites.iter().chain(peeps.iter()) {
+    // Peep and train entities are sim state, not presentation, and go with them.
+    for entity in track_sprites.iter().chain(peeps.iter()).chain(trains.iter()) {
         commands.entity(entity).despawn();
     }
 
@@ -533,10 +557,19 @@ fn apply_pending_world(
     commands.insert_resource(TileOccupancy::default());
     commands.insert_resource(JobBoard::default());
     commands.insert_resource(MoneyLedger::default());
+    commands.insert_resource(MaintenanceAccrual::default());
     commands.insert_resource(AlertBoard::default());
     commands.insert_resource(DemandSpawner::default());
     commands.insert_resource(LineRegistry::default());
     commands.insert_resource(TownDensity::default());
+    commands.insert_resource(BorderRegistry::default());
+    // The town's people, what they remember, and what they said about it.
+    commands.insert_resource(rail_sim::peeps::PeepSpawnState::default());
+    commands.insert_resource(HouseholdRegistry::default());
+    commands.insert_resource(DistrictFlow::default());
+    commands.insert_resource(PeepBudget::default());
+    commands.insert_resource(PeepFocus::default());
+    commands.insert_resource(ComplaintFeed::default());
     commands.insert_resource(WorldAnchorsSeeded(false));
     commands.insert_resource(Selection::default());
     // Goals are a lens on the sandbox, so they are installed with the world
@@ -799,6 +832,75 @@ mod tests {
             !app.world().resource::<PendingWorld>().is_rebuilding(),
             "the rebuild flag lasts exactly one frame"
         );
+    }
+
+    /// The orphaned-train bug, at the seam it came from.
+    ///
+    /// A train is sim state, not a sprite that reconciles against a registry, so
+    /// nothing cleared it when the world was replaced. It arrived in the new
+    /// world holding a `TrackId` the new (empty) network had never heard of:
+    /// unable to move, unable to be routed, and — there being no sell command —
+    /// unable to be got rid of.
+    #[test]
+    fn a_new_map_leaves_nothing_of_the_old_world_behind() {
+        let mut app = test_app();
+        app.update();
+        go_to(&mut app, ShellState::Playing);
+
+        // A world that has been played in: rolling stock on the map, a border
+        // ledger, and a peep spawner that remembers which stations it served.
+        app.world_mut().spawn((
+            rail_sim::Train {
+                id: rail_sim::TrainId(1),
+                kind: rail_sim::TrainKind::Transit,
+            },
+            rail_sim::TrainLocation::at_track(rail_sim::TrackId(7)),
+        ));
+        app.world_mut().spawn(rail_sim::Peep::new(
+            rail_sim::PeepId(1),
+            "Mara Aldertone",
+            rail_sim::TileCoord { x: 4, y: 4 },
+            rail_sim::HouseholdId(1),
+            0,
+        ));
+        app.world_mut().insert_resource(BorderRegistry::new(1234));
+        let mut spawn_state = rail_sim::peeps::PeepSpawnState::default();
+        spawn_state.spawned_for.insert(rail_sim::StationId(1));
+        app.world_mut().insert_resource(spawn_state);
+
+        go_to(&mut app, ShellState::NewMap);
+        app.world_mut().resource_mut::<DraftMapOptions>().0.seed = 555;
+        app.world_mut()
+            .write_message(MenuActivated(MenuAction::Begin));
+        app.update();
+        app.update();
+
+        assert_eq!(app.world().resource::<rail_map::MapGrid>().seed, 555);
+        assert_eq!(
+            count::<With<rail_sim::Train>>(&mut app),
+            0,
+            "a train from the old world has no track under it in this one"
+        );
+        assert_eq!(
+            count::<With<Peep>>(&mut app),
+            0,
+            "the old town's residents do not move to the new map"
+        );
+        assert_eq!(
+            *app.world().resource::<BorderRegistry>(),
+            BorderRegistry::default(),
+            "a crossing begun in the old world must not land stock in this one"
+        );
+        assert!(
+            app.world()
+                .resource::<rail_sim::peeps::PeepSpawnState>()
+                .spawned_for
+                .is_empty(),
+            "station ids start again from one: a stale spawn record leaves the \
+             new map with no residents at all"
+        );
+        assert!(app.world().resource::<TownDensity>().is_empty());
+        assert!(app.world().resource::<ComplaintFeed>().is_empty());
     }
 
     #[test]

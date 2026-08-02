@@ -448,9 +448,6 @@ impl SettingId {
             Self::EdgePan => Some("not wired yet"),
             Self::ColourBlindSafe => Some("not wired yet"),
             Self::FlashesAndShake => Some("not wired yet"),
-            Self::VolumeMusic | Self::VolumeAmbience | Self::VolumeEffects | Self::VolumeUi => {
-                Some("no mixer yet")
-            }
             Self::TooltipDelay => Some("not wired yet"),
             Self::ConfirmDestructive => Some("not wired yet"),
             Self::ShowCostWhileBuilding => Some("not wired yet"),

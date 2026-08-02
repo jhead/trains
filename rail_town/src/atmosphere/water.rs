@@ -13,6 +13,18 @@
 //!
 //! Both stay inside the water ramp: a glint is one step up from the band it
 //! sits on, never a new colour and never the `hi` accent (brief §3.1).
+//!
+//! # Baked once *per world*, not once per process
+//!
+//! "Terrain never changes after generation" is true of a world and false of a
+//! session: New Map and Load both replace [`MapGrid`] wholesale. Baking on
+//! `Startup` alone left the *first* world's sea painted over every world after
+//! it — glints and foam standing on dry land, and hanging past the edge of a map
+//! smaller than the one they were baked from. [`rebuild_water_decals`] keys the
+//! rebake on a signature of the water itself, exactly as `map/terrain/chunk.rs`
+//! does: a write to `MapGrid` that does not move any water costs one hash and
+//! nothing else, so the layer can sit in `Update` without ever rebuilding a
+//! frame it did not have to.
 
 use bevy::prelude::*;
 use rail_map::{tile_to_world, MapGrid, TILE_SIZE};
@@ -70,8 +82,48 @@ pub(crate) struct CoastFoam {
     horizontal: bool,
 }
 
-/// Bake every water decal once — terrain is fixed after generation.
-pub(crate) fn bake_water_decals(mut commands: Commands, map: Res<MapGrid>) {
+/// Signature of the water this layer was last baked from.
+///
+/// Bevy change detection answers *did anybody write `MapGrid`*, which is not the
+/// same question as *did the water move*. Hashing is cheap next to respawning a
+/// few thousand sprites, so the change flag is the gate and this is the truth
+/// (the same discipline as [`crate::map::terrain`]'s `TerrainDirty`).
+#[derive(Resource, Default)]
+pub(crate) struct WaterDecals {
+    signature: Option<u64>,
+}
+
+/// FNV-1a over everything the decals are drawn from.
+///
+/// Only water and elevation: a glint's colour comes from the depth band, and
+/// foam comes from which neighbours are dry. The seed, portals and terrain kind
+/// change no decal, so none of them should cost a rebake.
+fn water_signature(map: &MapGrid) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |byte: u8| {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    eat(map.width as u8);
+    eat((map.width >> 8) as u8);
+    eat(map.height as u8);
+    eat((map.height >> 8) as u8);
+    for tile in map.tiles() {
+        eat(tile.water as u8);
+        // Only depth under water matters; dry land contributes nothing but its
+        // dryness, so terraforming a hill never rebakes the sea.
+        eat(if tile.water { tile.height as u8 } else { 0 });
+    }
+    hash
+}
+
+/// Bake every water decal for the world on screen.
+pub(crate) fn bake_water_decals(
+    mut commands: Commands,
+    map: Res<MapGrid>,
+    mut decals: ResMut<WaterDecals>,
+) {
+    decals.signature = Some(water_signature(&map));
     for y in 0..map.height as i32 {
         for x in 0..map.width as i32 {
             let tile = TileCoord { x, y };
@@ -90,6 +142,34 @@ pub(crate) fn bake_water_decals(mut commands: Commands, map: Res<MapGrid>) {
             }
         }
     }
+}
+
+/// Re-bake the sea when the world underneath it is replaced. Idle otherwise.
+///
+/// Swapping [`MapGrid`] — a new map, a loaded save — is the whole trigger, and
+/// the signature is what keeps that safe to leave in a per-frame schedule.
+pub(crate) fn rebuild_water_decals(
+    mut commands: Commands,
+    map: Res<MapGrid>,
+    mut decals: ResMut<WaterDecals>,
+    shimmers: Query<Entity, With<WaterShimmer>>,
+    foam: Query<Entity, With<CoastFoam>>,
+) {
+    let _perf = crate::overlays::perf::scope("rebuild_water_decals");
+    if !map.is_changed() {
+        return;
+    }
+    let signature = water_signature(&map);
+    // `is_added` is the startup bake, which has already run this frame.
+    if map.is_added() || decals.signature == Some(signature) {
+        decals.signature = Some(signature);
+        return;
+    }
+
+    for entity in shimmers.iter().chain(foam.iter()) {
+        commands.entity(entity).despawn();
+    }
+    bake_water_decals(commands, map, decals);
 }
 
 /// Cardinal directions from `tile` that face land.
@@ -230,7 +310,92 @@ pub(crate) fn step_coast_foam(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rail_map::generate_map;
+    use rail_map::{generate_map, TerrainKind};
+
+    /// A `w` x `h` map that is entirely water below `wet_rows`, land above.
+    fn banded_map(w: u32, h: u32, wet_rows: i32) -> MapGrid {
+        let mut map = MapGrid::empty(w, h, 1);
+        for y in 0..wet_rows {
+            for x in 0..w as i32 {
+                if let Some(tile) = map.get_mut(TileCoord { x, y }) {
+                    tile.water = true;
+                    tile.kind = TerrainKind::Water;
+                    tile.height = -3;
+                }
+            }
+        }
+        map
+    }
+
+    fn decal_app(map: MapGrid) -> App {
+        let mut app = App::new();
+        app.insert_resource(map)
+            .init_resource::<WaterDecals>()
+            .add_systems(Startup, bake_water_decals)
+            .add_systems(Update, rebuild_water_decals);
+        app
+    }
+
+    fn decal_positions(app: &mut App) -> Vec<Vec2> {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, Or<(With<WaterShimmer>, With<CoastFoam>)>>();
+        q.iter(app.world())
+            .map(|t| t.translation.truncate())
+            .collect()
+    }
+
+    #[test]
+    fn a_new_map_repaints_the_sea_instead_of_inheriting_it() {
+        // The reported bug: after New Map, water shimmered off the edge of the
+        // map and over ground where no water existed. The decals were baked on
+        // `Startup` and never again, so the first world's sea stayed painted
+        // over every world after it.
+        let mut app = decal_app(banded_map(32, 32, 16));
+        app.update();
+        let before = decal_positions(&mut app);
+        assert!(!before.is_empty(), "the first world has a sea to draw");
+
+        // A smaller, drier world takes its place.
+        app.world_mut().insert_resource(banded_map(12, 12, 3));
+        app.update();
+
+        let after = decal_positions(&mut app);
+        assert!(!after.is_empty(), "the new world has a sea of its own");
+        let limit = 12.0 * TILE_SIZE;
+        for p in &after {
+            assert!(
+                p.x >= -TILE_SIZE && p.y >= -TILE_SIZE && p.x <= limit && p.y <= limit,
+                "a decal is drawn off the map at {p:?}"
+            );
+        }
+        // Nothing survives on the dry rows the old map had water on.
+        let dry_row_y = 8.0 * TILE_SIZE;
+        assert!(
+            !after.iter().any(|p| p.y > dry_row_y),
+            "the old map's water is still drawn where this map has none"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_world_never_rebakes() {
+        // A write to `MapGrid` for a reason that has nothing to do with water
+        // must cost one hash, not a few thousand respawned sprites. This is the
+        // FPS-regression shape, so it is asserted rather than commented.
+        let mut app = decal_app(banded_map(24, 24, 8));
+        app.update();
+        let before = decal_positions(&mut app);
+
+        // Touch the map without moving any water.
+        app.world_mut().resource_mut::<MapGrid>().seed = 99;
+        app.update();
+
+        assert_eq!(
+            decal_positions(&mut app),
+            before,
+            "a non-water write must not rebake the sea"
+        );
+    }
 
     #[test]
     fn loops_match_the_brief() {

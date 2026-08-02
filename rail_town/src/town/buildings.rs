@@ -197,11 +197,41 @@ struct BlockPlan {
 
 /// Per-system bake cache. Lives in a `Local` so registering this feature needs
 /// no resource init in the shared `town/mod.rs`.
+///
+/// A `Local` outlives the world it was filled for, which is the whole reason
+/// [`TownState::world`] exists — see [`world_id`].
 #[derive(Default)]
 pub struct TownState {
     boot_frames: u32,
     rural_seeded: bool,
+    /// Which world the standing lots, props and plans belong to.
+    world: Option<(u32, u32, u64)>,
     plans: HashMap<(i32, i32), BlockPlan>,
+}
+
+/// Identity of the world on screen: its size and its seed.
+///
+/// Regenerating the same options gives the same tiles, so this is a true world
+/// identity and not a content hash — nothing here draws from individual tiles,
+/// only from where the town is allowed to be.
+fn world_id(map: &MapGrid) -> (u32, u32, u64) {
+    (map.width, map.height, map.seed)
+}
+
+/// Whether a tile is somewhere the map can actually draw.
+///
+/// The second of two guards against the same bug. The sim clamps
+/// [`TownDensity`] to the map, and presentation refuses to draw a lot outside it
+/// whatever it is handed — because "houses standing past the edge of the world"
+/// is a class of failure that has come back more than once, and one guard is
+/// only ever one refactor from being the guard that got deleted.
+fn on_map(bounds: Option<(u32, u32)>, tile: TileCoord) -> bool {
+    match bounds {
+        Some((w, h)) => {
+            tile.x >= 0 && tile.y >= 0 && (tile.x as u32) < w && (tile.y as u32) < h
+        }
+        None => true,
+    }
 }
 
 // ─ The system ──────────────────────────────────────────
@@ -234,6 +264,34 @@ pub fn sync_building_sprites(
     state.boot_frames = state.boot_frames.saturating_add(1);
 
     let map_height = map.as_ref().map(|m| m.height).unwrap_or(64);
+    let bounds = map.as_ref().map(|m| (m.width, m.height));
+
+    // A new map is a new town. Everything standing — lots mid-scaffold, the
+    // farmsteads the one-shot rural pass laid down, the cached plans — belongs
+    // to the world that was here before, and the rural seed is a latch that
+    // would otherwise never fire again. Keyed on the world's identity rather
+    // than on `MapGrid::is_changed`, so an unrelated write costs one compare.
+    if let Some(map) = map.as_ref() {
+        let id = world_id(map);
+        if state.world != Some(id) {
+            let replacing = state.world.is_some();
+            state.world = Some(id);
+            if replacing {
+                for (entity, ..) in lots.iter() {
+                    commands.entity(entity).despawn();
+                }
+                for (entity, _) in props.iter() {
+                    commands.entity(entity).despawn();
+                }
+                state.plans.clear();
+                state.rural_seeded = false;
+                state.boot_frames = 1;
+                // The despawns above are queued, so this frame's queries would
+                // still see the old town. Pick it up again next frame.
+                return;
+            }
+        }
+    }
 
     if !state.rural_seeded && state.boot_frames >= 3 {
         if let Some(map) = map.as_ref() {
@@ -249,7 +307,14 @@ pub fn sync_building_sprites(
     };
 
     let seeded = state.rural_seeded;
-    let changed = replan_blocks(&density, &stations, &industries, &network, &mut state);
+    let changed = replan_blocks(
+        &density,
+        &stations,
+        &industries,
+        &network,
+        bounds,
+        &mut state,
+    );
     if !changed.is_empty() {
         apply_plans(
             &mut commands,
@@ -262,7 +327,7 @@ pub fn sync_building_sprites(
         );
     }
 
-    advance_phases(&mut commands, &atlas, dt, &mut lots);
+    advance_phases(&mut commands, &atlas, dt, bounds, &mut lots);
 }
 
 /// Recompute each dirty block's plan. Returns only the blocks that changed.
@@ -271,12 +336,18 @@ fn replan_blocks(
     stations: &StationRegistry,
     industries: &IndustryRegistry,
     network: &TrackNetwork,
+    bounds: Option<(u32, u32)>,
     state: &mut TownState,
 ) -> Vec<(TileCoord, BlockPlan)> {
     let mut changed = Vec::new();
     let mut live: Vec<(i32, i32)> = Vec::with_capacity(density.len());
 
     for (tile, d) in density.iter() {
+        // Density off the map is not a block waiting to be built; it is a bug
+        // upstream, and drawing it puts houses past the edge of the world.
+        if !on_map(bounds, tile) {
+            continue;
+        }
         live.push((tile.x, tile.y));
         replan_one(tile, d, stations, industries, network, state, &mut changed);
     }
@@ -627,9 +698,17 @@ fn advance_phases(
     commands: &mut Commands,
     atlas: &BuildingAtlas,
     dt: f32,
+    bounds: Option<(u32, u32)>,
     lots: &mut Query<(Entity, &mut BuildingLot, &mut Sprite, &mut BuildingWindows)>,
 ) {
     for (entity, mut lot, mut sprite, mut windows) in lots.iter_mut() {
+        // The backstop for anything already standing off the map — a save from
+        // before density was clamped, or a future writer that forgets. This walk
+        // happens every frame anyway, so the guard is free.
+        if !on_map(bounds, lot.tile) {
+            commands.entity(entity).despawn();
+            continue;
+        }
         if dt > 0.0 {
             step_phase(&mut lot, dt);
         }
@@ -862,9 +941,19 @@ mod tests {
 #[cfg(test)]
 mod app_tests {
     use super::*;
+    use super::building_art::{Family, Roof};
     use bevy::image::TextureAtlasLayout;
     use bevy::MinimalPlugins;
     use rail_map::{generate_map, TerrainKind};
+
+    fn kind(tier: u8) -> BuildingKind {
+        BuildingKind {
+            family: Family::Town,
+            tier,
+            variant: 0,
+            roof: Roof::Tile,
+        }
+    }
 
     fn test_app() -> App {
         let mut app = App::new();
@@ -980,6 +1069,127 @@ mod app_tests {
             props <= eligible / 8,
             "{props} props across {eligible} rural tiles carpets the map"
         );
+    }
+
+    /// The reported bug: "stuff spawned outside the map edge, e.g. homes."
+    ///
+    /// The sim clamps density to the map now, but presentation must refuse
+    /// regardless — density is a sparse map keyed by tile and anything that can
+    /// write it can put a house past the edge of the world.
+    #[test]
+    fn presentation_refuses_to_build_off_the_map() {
+        let mut app = test_app();
+        settle(&mut app, 4);
+
+        {
+            let mut density = app.world_mut().resource_mut::<TownDensity>();
+            // A station two tiles from the border reaches past it — this is the
+            // shape of ring the growth system used to write unchecked.
+            density.set(TileCoord { x: -2, y: 8 }, 0.9);
+            density.set(TileCoord { x: 8, y: -1 }, 0.9);
+            density.set(TileCoord { x: 26, y: 8 }, 0.9);
+            density.set(TileCoord { x: 8, y: 30 }, 0.9);
+            // And one honest block, so the test can tell "refused" from "inert".
+            density.set(TileCoord { x: 8, y: 8 }, 0.9);
+        }
+        settle(&mut app, 4);
+
+        let map = app.world().resource::<rail_map::MapGrid>().clone();
+        let mut query = app.world_mut().query::<&BuildingLot>();
+        let offenders: Vec<TileCoord> = query
+            .iter(app.world())
+            .map(|l| l.tile)
+            .filter(|t| !map.contains(*t))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "houses standing off the map at {offenders:?}"
+        );
+        assert_eq!(
+            count::<BuildingLot>(&mut app),
+            LOTS_PER_TILE as usize,
+            "the in-bounds block still builds"
+        );
+    }
+
+    #[test]
+    fn a_lot_already_standing_off_the_map_is_cleared() {
+        // The backstop, for a save written before density was clamped.
+        let mut app = test_app();
+        settle(&mut app, 4);
+        let atlas = app.world().resource::<BuildingAtlas>().clone();
+        let stray = app
+            .world_mut()
+            .spawn((
+                atlas.sprite(0),
+                Anchor::BOTTOM_CENTER,
+                Transform::from_xyz(0.0, 0.0, 1.5),
+                BuildingLot {
+                    tile: TileCoord { x: 90, y: 90 },
+                    slot: 0,
+                    district: District::Residential,
+                    kind: kind(1),
+                    target: Some(kind(1)),
+                    phase: LotPhase::Standing(Decay::Healthy),
+                    elapsed: 0.0,
+                },
+                BuildingWindows {
+                    lit_frame: None,
+                    flip_x: false,
+                },
+            ))
+            .id();
+        settle(&mut app, 2);
+        assert!(
+            app.world().get_entity(stray).is_err(),
+            "a lot outside the map must be cleared, not merely left un-updated"
+        );
+    }
+
+    /// The one-shot rural seed is a latch, and a `Local` outlives the world.
+    ///
+    /// After a New Map the old world's farmsteads stayed standing — including
+    /// wherever they fell relative to a map of a different size — and the new
+    /// world never got any of its own.
+    #[test]
+    fn a_new_map_clears_the_old_town_and_lays_out_a_new_one() {
+        let mut app = test_app();
+        settle(&mut app, 4);
+        app.world_mut()
+            .resource_mut::<TownDensity>()
+            .set(TileCoord { x: 8, y: 8 }, 0.9);
+        settle(&mut app, 4);
+        assert!(count::<BuildingLot>(&mut app) > 0);
+        assert!(count::<RuralProp>(&mut app) > 0);
+
+        // A new world, smaller and differently shaped, with an empty town.
+        app.world_mut().insert_resource(generate_map(16, 16, 7));
+        app.world_mut()
+            .insert_resource(TownDensity::default());
+        let mut stations = StationRegistry::new();
+        stations.insert("Eastgate", TileCoord { x: 5, y: 5 }, GROUND_LAYER);
+        app.world_mut().insert_resource(stations);
+        settle(&mut app, 8);
+
+        assert_eq!(
+            count::<BuildingLot>(&mut app),
+            0,
+            "the old town's buildings do not move to the new map"
+        );
+        let map = app.world().resource::<rail_map::MapGrid>().clone();
+        let mut query = app.world_mut().query::<&RuralProp>();
+        let props: Vec<TileCoord> = query.iter(app.world()).map(|p| p.tile).collect();
+        assert!(
+            !props.is_empty(),
+            "the new world's countryside must be laid out too, not skipped \
+             because the one-shot latch already fired"
+        );
+        for tile in props {
+            assert!(
+                map.contains(tile),
+                "a farmstead from the old map is standing at {tile:?}"
+            );
+        }
     }
 
     #[test]

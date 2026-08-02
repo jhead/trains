@@ -44,7 +44,8 @@
 //! | [`ambience`] | §2 the bed |
 //! | [`trains`] | §3.2 the sounds the network makes |
 //! | [`ui_sound`] | §5 interface, and the aggregated money chime |
-//! | [`music`] | §4 the score |
+//! | [`music`] | §4 when the score plays |
+//! | [`score`] | §4 what it plays — the composition and the strings |
 //!
 //! # Wiring
 //!
@@ -68,6 +69,8 @@ mod dsp;
 mod mixer;
 #[cfg(feature = "sfx")]
 mod music;
+#[cfg(feature = "sfx")]
+mod score;
 #[cfg(feature = "sfx")]
 mod trains;
 #[cfg(feature = "sfx")]
@@ -137,6 +140,8 @@ impl Plugin for AudioPlugin {
                 Update,
                 (
                     mixer::advance_audio_clock,
+                    // §7 — the player's volumes, before anything reads a bus.
+                    mixer::apply_settings,
                     mixer::sync_listener,
                     mixer::refresh_mix,
                     mixer::refresh_budget,
@@ -325,6 +330,102 @@ mod tests {
             .iter(app.world())
             .count();
         assert!(playing <= 1, "{playing} thuds from one drag");
+    }
+
+    /// One-shots currently playing.
+    fn playing(app: &mut App) -> usize {
+        app.world_mut()
+            .query::<&mixer::OneShot>()
+            .iter(app.world())
+            .count()
+    }
+
+    #[test]
+    fn a_new_world_does_not_replay_the_old_one_s_stations() {
+        // Installing a new map clears the registries and reissues ids from
+        // one. Presentation state that latched once per process then compares
+        // the new world's first station against the old world's list; here
+        // that would fire a station chord and a demolition for things that
+        // never happened. The latch is keyed on the world instead.
+        let mut app = test_app();
+        for _ in 0..3 {
+            app.update();
+        }
+        app.world_mut()
+            .resource_mut::<StationRegistry>()
+            .insert("Old Town", rail_sim::TileCoord { x: 4, y: 4 }, rail_sim::GROUND_LAYER);
+        app.update();
+        assert!(playing(&mut app) > 0, "the first station made no sound");
+
+        // A different world, with its own registry, arriving in one frame.
+        for entity in app
+            .world_mut()
+            .query_filtered::<Entity, With<mixer::OneShot>>()
+            .iter(app.world())
+            .collect::<Vec<_>>()
+        {
+            app.world_mut().entity_mut(entity).despawn();
+        }
+        app.insert_resource(generate_map(32, 32, 4242));
+        app.insert_resource(StationRegistry::default());
+        app.update();
+        assert_eq!(
+            playing(&mut app),
+            0,
+            "the new world replayed the old world's stations"
+        );
+
+        // And the new world's own first station still sounds.
+        app.world_mut()
+            .resource_mut::<StationRegistry>()
+            .insert("New Town", rail_sim::TileCoord { x: 6, y: 6 }, rail_sim::GROUND_LAYER);
+        app.update();
+        assert!(playing(&mut app) > 0, "the new world's station was swallowed");
+    }
+
+    #[test]
+    fn the_volume_sliders_reach_the_mix() {
+        // Playtest: "changing the volume in the settings doesn't appear to
+        // change the sounds' volume." `AudioMix` had the public bus fields and
+        // no writer, so every level in the game was a product of two constants.
+        // This asserts that a settings change moves the mix at all — a bus that
+        // never leaves its default is the exact shape of that bug.
+        let mut app = test_app();
+        app.insert_resource(crate::shell::Settings::default());
+        app.update();
+        let before = app.world().resource::<mixer::AudioMix>().clone();
+        assert!(
+            (before.master - 0.8).abs() < 0.01,
+            "the mix did not start from the stored master: {}",
+            before.master
+        );
+
+        {
+            let mut settings = app.world_mut().resource_mut::<crate::shell::Settings>();
+            settings.audio.master = 20;
+            settings.audio.music = 0;
+            settings.audio.ambience = 100;
+        }
+        // The buses are slewed rather than assigned, so a handful of headless
+        // frames moves them a little; the direction is what is being asserted.
+        for _ in 0..64 {
+            app.update();
+        }
+        let after = app.world().resource::<mixer::AudioMix>();
+        assert!(
+            after.master < before.master,
+            "the master slider did not move the mix: {} -> {}",
+            before.master,
+            after.master
+        );
+        assert!(
+            after.music_bus < before.music_bus,
+            "the music slider did not move the mix"
+        );
+        assert!(
+            after.ambience_bus > before.ambience_bus,
+            "the ambience slider did not move the mix"
+        );
     }
 
     #[test]

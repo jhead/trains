@@ -25,8 +25,9 @@ For a snapshot of progress against these, see [`docs/PROGRESS-AUDIT.md`](../PROG
 | 11 | [Roadmap](11-roadmap.md) | In what order, and how do we know each phase landed? |
 | 12 | [Multiplayer: Neighbour Maps](12-multiplayer.md) | How do maps sit next to other players' maps? |
 | 13 | [Shadows](13-shadows.md) | How does light fall on the world? Sun quantisation, what casts, what it costs. |
+| 14 | [Music](14-music.md) | What does the score actually play? Mode, harmony, melody, form, synthesis. |
 
-**01 and 03 are binding standards** — the pixel contract, the palette and the UI kit are constraints, not suggestions. 02 and 04–10 are feature design. 11 sequences them.
+**01 and 03 are binding standards** — the pixel contract, the palette and the UI kit are constraints, not suggestions. 02 and 04–10 are feature design. 11 sequences them. 13 and 14 are subordinate to 01 and 10 respectively: where a brief and its parent disagree, the parent wins.
 
 ---
 

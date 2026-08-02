@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use bevy::audio::{AudioSink, SpatialAudioSink};
 use bevy::prelude::*;
-use rail_map::tile_to_world;
+use rail_map::{tile_to_world, MapGrid};
 use rail_sim::{
     ticks_for_piece, TileOccupancy, TownDensity, TrackNetwork, Train, TrainId, TrainKind,
     TrainLocation,
@@ -85,7 +85,14 @@ pub struct TrainAudio {
     bell_flip: usize,
     last_whistle: f64,
     rng: Rng,
-    seeded: bool,
+    /// The world the dwell snapshot belongs to, as `(width, height, seed)`.
+    ///
+    /// **Keyed on the world rather than latched once per process.** Installing
+    /// a new map despawns every `Train` and reissues ids from one, so a bare
+    /// "have I run yet" flag would compare a brand-new train against the old
+    /// world's dwell state and announce an arrival that never happened. Keying
+    /// it makes the first frame of every world a silent baseline.
+    world: Option<(u32, u32, u64)>,
 }
 
 impl Default for TrainAudio {
@@ -97,7 +104,7 @@ impl Default for TrainAudio {
             bell_flip: 0,
             last_whistle: f64::NEG_INFINITY,
             rng: Rng::new(0x7472_6169_6e73),
-            seeded: false,
+            world: None,
         }
     }
 }
@@ -175,6 +182,7 @@ pub fn drive_rolling_voices(
     network: Res<TrackNetwork>,
     occupancy: Res<TileOccupancy>,
     density: Res<TownDensity>,
+    map: Option<Res<MapGrid>>,
     trains: Query<(&Train, &TrainLocation)>,
     mut audio: ResMut<TrainAudio>,
     mut budget: ResMut<VoiceBudget>,
@@ -200,7 +208,11 @@ pub fn drive_rolling_voices(
         voice.keep = false;
     }
 
-    let bus = mix.effects() * mix.effect_perspective();
+    // Master x effects x focus, applied on its own fast slew so a volume change
+    // is heard at once; the perspective and distance terms belong to the voice's
+    // own slow fade.
+    let bus = mix.effects();
+    let perspective = mix.effect_perspective();
     for state in states.iter().take(MAX_ROLLING) {
         let falloff = mix.falloff(state.at);
         if falloff <= 0.0 && !audio.voices.contains_key(&state.id.0) {
@@ -243,10 +255,10 @@ pub fn drive_rolling_voices(
         let rate = (1.0 - voice.closing / DOPPLER_C).clamp(0.94, 1.06);
         voice.handle.set_pitch(rate, &sinks, &spatial);
 
-        let target = gain::ROLLING * falloff * bus * (0.25 + 0.75 * state.speed);
+        let target = gain::ROLLING * falloff * perspective * (0.25 + 0.75 * state.speed);
         voice
             .handle
-            .apply(target, dt, ROLL_FADE_SECS, &mut sinks, &mut spatial);
+            .apply(target, bus, dt, ROLL_FADE_SECS, &mut sinks, &mut spatial);
     }
 
     // Fade out and retire anything that lost its slot or left the map.
@@ -257,7 +269,7 @@ pub fn drive_rolling_voices(
         }
         voice
             .handle
-            .apply(0.0, dt, ROLL_FADE_SECS, &mut sinks, &mut spatial);
+            .apply(0.0, bus, dt, ROLL_FADE_SECS, &mut sinks, &mut spatial);
         if voice.handle.gain <= 0.001 {
             commands.entity(voice.handle.entity).despawn();
             retired.push(*id);
@@ -273,7 +285,14 @@ pub fn drive_rolling_voices(
     };
     let now = clock.elapsed;
     let live: Vec<u64> = states.iter().map(|s| s.id.0).collect();
-    let seeded = audio.seeded;
+    let world = map.map(|m| (m.width, m.height, m.seed));
+    let seeded = audio.world.is_some() && audio.world == world;
+    if !seeded {
+        // A different world: throw away the previous one's dwell snapshot so
+        // its train ids cannot be mistaken for this one's.
+        audio.dwelling.clear();
+        audio.next_bell.clear();
+    }
     for state in states.iter() {
         let was = audio.dwelling.insert(state.id.0, state.dwelling);
         if !seeded {
@@ -291,7 +310,7 @@ pub fn drive_rolling_voices(
     }
     audio.dwelling.retain(|id, _| live.contains(id));
     audio.next_bell.retain(|id, _| live.contains(id));
-    audio.seeded = true;
+    audio.world = world;
 
     // Crossing bells.
     for state in states.iter() {

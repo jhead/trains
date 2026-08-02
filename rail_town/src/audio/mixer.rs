@@ -85,9 +85,20 @@ pub mod gain {
     pub const MILESTONE: f32 = 0.26;
 
     /// Total for the whole ambience bed, shared out between the layers.
-    pub const AMBIENCE_TOTAL: f32 = 0.34;
+    ///
+    /// Lowered from `0.34` after the playtest. The bed is the only thing in the
+    /// game that is *never* absent, so it is the only thing whose level is
+    /// judged over two hours rather than over two seconds — and the wind, which
+    /// is most of it, has come down further still inside its own generator.
+    pub const AMBIENCE_TOTAL: f32 = 0.28;
     /// Peak for a music cue.
-    pub const MUSIC: f32 = 0.20;
+    ///
+    /// The score normalises its own output to roughly the same peak as the
+    /// ambience generators (see [`super::score`]), so this number means the
+    /// same thing as every other one in the table: still the guest, still under
+    /// the whistle, and a little above the bed it sits on because a plucked
+    /// string is transient and a wind bed is not.
+    pub const MUSIC: f32 = 0.34;
 }
 
 /// Voice-limit categories. Nearest instances win within each.
@@ -177,6 +188,14 @@ pub struct AudioMix {
     pub ambience_bus: f32,
     pub effects_bus: f32,
     pub ui_bus: f32,
+    /// Player's "Mute unfocused" choice, mirrored from `Settings`.
+    pub mute_unfocused: bool,
+    /// Undoes `bevy_audio`'s `GlobalVolume`, which the shell drives from the
+    /// master slider and which is multiplied into a one-shot when its sink is
+    /// created. Without it a one-shot would be attenuated by the master twice
+    /// while the live voices were attenuated once, and lowering the master
+    /// would silence the railway long before it silenced the wind.
+    pub global_trim: f32,
     /// Smoothed window focus, `0.0` when the game is in the background.
     pub focus: f32,
     /// Smoothed music duck, `1.0` when nothing is ducking it.
@@ -196,10 +215,12 @@ impl Default for AudioMix {
     fn default() -> Self {
         Self {
             master: 0.8,
-            music_bus: 1.0,
-            ambience_bus: 1.0,
-            effects_bus: 1.0,
-            ui_bus: 1.0,
+            music_bus: 0.7,
+            ambience_bus: 0.7,
+            effects_bus: 0.8,
+            ui_bus: 0.6,
+            mute_unfocused: true,
+            global_trim: 1.0,
             focus: 1.0,
             music_duck: 1.0,
             ambience_duck: 1.0,
@@ -362,10 +383,55 @@ pub fn sync_listener(
         * TILE_SIZE;
 }
 
+/// How fast a bus follows the settings panel. Fast enough to feel like the key
+/// press caused it, slow enough that a ten-point step is a lean not a click.
+const BUS_SLEW_SECS: f32 = 0.08;
+
+/// Copy the player's volumes into the mix (brief §7, shell design §5).
+///
+/// **This is the writer [`AudioMix`] never had.** Every level in this module is
+/// a product of [`AudioMix::master`] and one bus, and until now both sides of
+/// that product were constants — so the Audio tab stored five numbers that
+/// nothing read, which is exactly what the playtest found ("changing the volume
+/// in the settings doesn't appear to change the sounds' volume").
+///
+/// Two details make the difference between working and appearing to work:
+///
+/// - **The buses are slewed, not assigned.** A jump from 80% to 70% on a live
+///   ambience bed is a step, and a step is a startle (§1).
+/// - **The live voices get it through [`super::voices::VoiceHandle::apply`]**,
+///   which writes the sink every frame. `bevy_audio`'s own `GlobalVolume` is
+///   applied once when a sink is created and never again, so it can only ever
+///   reach one-shots — the beds, the trains and the score are precisely the
+///   sounds it cannot touch, and they are the ones that are always playing.
+///
+/// `Settings` is optional so the audio plugin still builds headless, where the
+/// shell does not exist.
+pub fn apply_settings(
+    settings: Option<Res<crate::shell::Settings>>,
+    clock: Res<AudioClock>,
+    mut mix: ResMut<AudioMix>,
+) {
+    let Some(settings) = settings else {
+        return;
+    };
+    let dt = clock.real_delta.clamp(0.0, 0.25);
+    let audio = &settings.audio;
+    let pct = |v: u32| (v as f32 / 100.0).clamp(0.0, 1.0);
+    mix.master = super::dsp::approach(mix.master, pct(audio.master), dt, BUS_SLEW_SECS);
+    mix.music_bus = super::dsp::approach(mix.music_bus, pct(audio.music), dt, BUS_SLEW_SECS);
+    mix.ambience_bus =
+        super::dsp::approach(mix.ambience_bus, pct(audio.ambience), dt, BUS_SLEW_SECS);
+    mix.effects_bus = super::dsp::approach(mix.effects_bus, pct(audio.effects), dt, BUS_SLEW_SECS);
+    mix.ui_bus = super::dsp::approach(mix.ui_bus, pct(audio.ui), dt, BUS_SLEW_SECS);
+    mix.mute_unfocused = audio.mute_on_focus_loss;
+}
+
 /// Focus mute and duck release.
 pub fn refresh_mix(
     clock: Res<AudioClock>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    global: Option<Res<bevy::audio::GlobalVolume>>,
     mut duck: ResMut<Duck>,
     mut mix: ResMut<AudioMix>,
 ) {
@@ -373,8 +439,14 @@ pub fn refresh_mix(
 
     // Mute on focus loss, by default (§7) — faded, because a cut is a transient.
     let focused = windows.iter().next().map(|w| w.focused).unwrap_or(true);
-    let target = if focused { 1.0 } else { 0.0 };
+    let target = if focused || !mix.mute_unfocused { 1.0 } else { 0.0 };
     mix.focus = super::dsp::approach(mix.focus, target, dt, FOCUS_FADE_SECS);
+
+    // See [`AudioMix::global_trim`]. Measured rather than assumed, so this stays
+    // correct whoever else writes `GlobalVolume`.
+    mix.global_trim = global
+        .map(|g| (1.0 / g.volume.to_linear().max(0.02)).clamp(1.0, 16.0))
+        .unwrap_or(1.0);
 
     duck.build = super::dsp::approach(duck.build, 0.0, dt, DUCK_RELEASE_SECS);
     duck.alert = super::dsp::approach(duck.alert, 0.0, dt, DUCK_RELEASE_SECS);
@@ -454,6 +526,9 @@ pub fn play(commands: &mut Commands, budget: &mut VoiceBudget, mix: &AudioMix, c
     if volume < MIN_AUDIBLE {
         return false;
     }
+    // `bevy_audio` folds `GlobalVolume` into the sink at creation; this takes it
+    // back out so the master is applied exactly once, here.
+    let volume = volume * mix.global_trim;
 
     match budget.claim(cue.category, dist) {
         Claim::Play => {}

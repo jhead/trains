@@ -120,6 +120,16 @@ pub fn land_transit_train(
     let paid = link.arrival_payout_cents(units);
     ledger.credit(money, MoneyCategory::Deliveries, paid);
 
+    // The railhead it left from may have been demolished, or belong to a world
+    // that has since been replaced. Pay for the goods either way -- they landed
+    // at the portal and the neighbour held up their end -- but do not put stock
+    // down on track that is not there. `advance_trains` would recall it to the
+    // yard a tick later; skipping the spawn means it never stands on the grass
+    // in the first place.
+    if network.piece(transit.home).is_none() {
+        return (paid, offer.good, units);
+    }
+
     let mut location = TrainLocation::at_track(transit.home);
     let mut cargo = TrainCargo::Empty;
     if let Some(consumer) = industries.consumer_of(offer.good) {

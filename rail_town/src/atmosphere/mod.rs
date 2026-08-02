@@ -41,7 +41,9 @@ use rail_sim::SimClock;
 use bake::{track_density_levels, DensityLevels};
 use smoke::{bake_chimney_smoke, step_chimney_smoke, SmokeLayer};
 use time_of_day::{advance_time_of_day, spawn_day_tint, sync_day_tint};
-use water::{bake_water_decals, step_coast_foam, step_water_shimmer};
+use water::{
+    bake_water_decals, rebuild_water_decals, step_coast_foam, step_water_shimmer, WaterDecals,
+};
 use windows::{step_window_light, sync_lit_windows, WindowLayer};
 
 // The public read model. `DayPhase` / `DAY_CYCLE_SECS` are for the systems that
@@ -94,12 +96,18 @@ impl Plugin for AtmospherePlugin {
             .init_resource::<DensityLevels>()
             .init_resource::<WindowLayer>()
             .init_resource::<SmokeLayer>()
+            .init_resource::<WaterDecals>()
             .add_systems(Startup, (spawn_day_tint, bake_water_decals))
             .add_systems(
                 Update,
                 (
                     advance_time_of_day,
                     advance_ambient_clock,
+                    // The sea belongs to the world it was baked from. A new map
+                    // or a load replaces `MapGrid`, and the old world's glints
+                    // and foam would otherwise stay painted over the new one —
+                    // on dry land, and off the edge of a smaller map.
+                    rebuild_water_decals,
                     sync_day_tint.after(advance_time_of_day),
                     step_window_light.after(advance_time_of_day),
                     // Bakes run after the fade has been applied for this frame,
@@ -257,6 +265,28 @@ mod tests {
         assert!(count::<ChimneySmoke>(&mut app) > 0, "occupied buildings smoke");
         assert!(count::<WaterShimmer>(&mut app) > 0, "open water shimmers");
         assert!(count::<CoastFoam>(&mut app) > 0, "the coast laps");
+    }
+
+    /// Wiring check for the water rebake: the plugin has to actually register
+    /// it, not just define it. This is the reported bug end to end — a New Map
+    /// left the previous world's sea shimmering over dry ground.
+    #[test]
+    fn a_new_world_does_not_inherit_the_old_one_s_water() {
+        let mut app = test_app();
+        app.update();
+        assert!(count::<WaterShimmer>(&mut app) + count::<CoastFoam>(&mut app) > 0);
+
+        // The same size, and not a drop of water on it.
+        app.world_mut()
+            .insert_resource(rail_map::MapGrid::empty(24, 24, 7));
+        app.update();
+        app.update();
+
+        assert_eq!(
+            count::<WaterShimmer>(&mut app) + count::<CoastFoam>(&mut app),
+            0,
+            "water is still being drawn on a map that has none"
+        );
     }
 
     #[test]

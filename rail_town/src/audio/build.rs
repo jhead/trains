@@ -21,7 +21,7 @@
 use std::collections::VecDeque;
 
 use bevy::prelude::*;
-use rail_map::tile_to_world;
+use rail_map::{MapGrid, tile_to_world};
 use rail_sim::{StationRegistry, TileCoord, TrackEdit};
 
 use crate::lines::LineToolState;
@@ -71,7 +71,15 @@ pub struct BuildAudio {
     rng: Rng,
     /// Station ids seen last frame, for placement / removal detection.
     stations: Vec<u64>,
-    stations_seeded: bool,
+    /// The world those ids belong to, as `(width, height, seed)`.
+    ///
+    /// **Keyed on the world rather than latched once per process.** A new map
+    /// clears the registries and reissues ids from one, so a bare "have I run
+    /// yet" flag would compare the new world's first station against the old
+    /// world's list and either replay a chord that should be new or fire a
+    /// demolition for a station that never existed. Keying it means the first
+    /// frame of every world is a fresh baseline, silently.
+    stations_world: Option<(u32, u32, u64)>,
     tool: Option<ToolSnapshot>,
 }
 
@@ -85,7 +93,7 @@ impl Default for BuildAudio {
             last_tool: f64::NEG_INFINITY,
             rng: Rng::new(0x7261_696c),
             stations: Vec::new(),
-            stations_seeded: false,
+            stations_world: None,
             tool: None,
         }
     }
@@ -242,6 +250,7 @@ pub fn drain_build_queue(
 /// watching the registry keeps this module decoupled from the station slice.
 pub fn watch_stations(
     stations: Res<StationRegistry>,
+    map: Option<Res<MapGrid>>,
     mix: Res<AudioMix>,
     bank: Option<Res<SfxBank>>,
     mut audio: ResMut<BuildAudio>,
@@ -256,11 +265,13 @@ pub fn watch_stations(
     // every frame and fire a phantom demolition whenever the order shifted.
     let mut current: Vec<u64> = stations.iter().map(|s| s.id.0).collect();
     current.sort_unstable();
-    if current == audio.stations {
+    let world = map.map(|m| (m.width, m.height, m.seed));
+    let same_world = audio.stations_world.is_some() && audio.stations_world == world;
+    if same_world && current == audio.stations {
         return;
     }
 
-    if audio.stations_seeded {
+    if same_world {
         for station in stations.iter() {
             if !audio.stations.contains(&station.id.0) {
                 let at = world_of(station.tile);
@@ -297,7 +308,7 @@ pub fn watch_stations(
     }
 
     audio.stations = current;
-    audio.stations_seeded = true;
+    audio.stations_world = world;
 }
 
 /// A minimal click when the active tool changes.

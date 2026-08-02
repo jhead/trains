@@ -13,7 +13,7 @@ use rail_sim::{
 
 use crate::map::{CameraFocusRequest, MapCamera, MapViewState};
 use crate::stations::{IndustrySprite, StationSprite};
-use crate::track::{TrackSprite, TrackToolState};
+use crate::track::{BuildTool, TrackSprite, TrackToolState};
 use crate::trains::{TrainSprite, TrainToolState};
 use crate::town::PeepSprite;
 use crate::ui::UiBlocksWorld;
@@ -212,7 +212,10 @@ pub fn selection_click_input(
     if train_tool.place_mode {
         return;
     }
-    if track_tool.drag.is_some() {
+    // Only the Look tool selects. An armed tool owns the world press —
+    // otherwise clicking to demolish also selected the piece and popped the
+    // Inspector open on a track that was about to stop existing.
+    if track_tool.tool != BuildTool::Select || track_tool.drag.is_some() {
         return;
     }
 

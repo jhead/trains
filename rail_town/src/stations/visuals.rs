@@ -89,6 +89,14 @@ pub fn sync_station_industry_sprites(
             } else if !is_new && *was_new {
                 commands.entity(*entity).remove::<NewDemandMarker>();
             }
+            // Follow the registry's tile, always. A world swap reissues ids from
+            // one, so a reused sprite can be matched to a station standing
+            // somewhere else entirely -- which left the old world's platforms
+            // floating in the void beyond the new map's edge.
+            let (wx, wy) = tile_to_world(station.tile);
+            commands
+                .entity(*entity)
+                .insert(Transform::from_xyz(wx, wy, 2.0));
             continue;
         }
         let (wx, wy) = tile_to_world(station.tile);
@@ -132,6 +140,12 @@ pub fn sync_station_industry_sprites(
             } else if !is_new && *was_new {
                 commands.entity(*entity).remove::<NewDemandMarker>();
             }
+            // See the station branch: ids are reissued on a world swap, so a
+            // reused sprite must be moved to where the registry says it is.
+            let (wx, wy) = tile_to_world(ind.tile);
+            commands
+                .entity(*entity)
+                .insert(Transform::from_xyz(wx, wy, 2.0));
             continue;
         }
         let (wx, wy) = tile_to_world(ind.tile);

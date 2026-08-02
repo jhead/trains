@@ -26,8 +26,8 @@ use bevy::reflect::TypePath;
 
 use super::clip::{SAMPLE_RATE, SR};
 use super::dsp::{
-    advance_phase, band_norm, exp_decay, lerp, lp_norm, pole_coeff, raised_cosine, semitones, sine,
-    soft_clip, svf_damp, svf_f, OnePole, Rng, Svf,
+    advance_phase, band_norm, exp_decay, lerp, lp_norm, pole_coeff, raised_cosine, sine, soft_clip,
+    svf_damp, svf_f, OnePole, Rng, Svf,
 };
 
 /// Samples between parameter reads. 64 at 22.05 kHz is 2.9 ms — far finer than
@@ -94,6 +94,12 @@ impl VoiceKind {
 /// All are `0.0..=1.0`. The meaning is per-kind and documented on each setter's
 /// caller; the ranges are uniform so a voice can never be driven out of bounds
 /// by a caller that misremembers the scale.
+///
+/// [`Self::cue`] is the exception: a counter rather than a level, and the only
+/// control that is not smoothed. The score needs to be told *when a cue begins*
+/// so that every cue opens with the theme rather than wherever the generator
+/// happened to have got to, and a monotonically increasing integer is the
+/// cheapest edge-trigger there is across a lock-free boundary.
 #[derive(Debug, Default)]
 pub struct VoiceParams {
     tone: AtomicU32,
@@ -101,6 +107,7 @@ pub struct VoiceParams {
     depth: AtomicU32,
     density: AtomicU32,
     color: AtomicU32,
+    cue: AtomicU32,
 }
 
 macro_rules! param {
@@ -156,6 +163,19 @@ impl VoiceParams {
         "Per-kind variant: river vs surf, day vs night town, which musical root."
     );
 
+    /// Which cue the score is playing. `0` is silence; any change restarts the
+    /// piece from bar one.
+    #[inline]
+    pub fn cue(&self) -> u32 {
+        self.cue.load(Ordering::Relaxed)
+    }
+
+    /// Set the cue number. See [`Self::cue`].
+    #[inline]
+    pub fn set_cue(&self, value: u32) {
+        self.cue.store(value, Ordering::Relaxed);
+    }
+
     /// A params block with sensible mid-scale defaults.
     pub fn new() -> Arc<Self> {
         let params = Arc::new(Self::default());
@@ -164,6 +184,7 @@ impl VoiceParams {
         params.set_depth(0.5);
         params.set_density(0.3);
         params.set_color(0.0);
+        params.set_cue(0);
         params
     }
 }
@@ -330,8 +351,17 @@ pub struct VoiceRender {
     /// Samples until the next sparse event.
     next_event: u32,
     ctl: u32,
-    /// Rotating index for voices that step through a set (chord tones).
-    step: u32,
+
+    /// The composed piece and its plucked strings — only for
+    /// [`VoiceKind::Music`].
+    ///
+    /// Boxed and optional so the six ambience beds do not each carry twelve
+    /// unused delay lines. The allocation happens in [`Decodable::decoder`],
+    /// which `bevy_audio` calls from the ECS when the sink is created, never on
+    /// the audio callback.
+    score: Option<Box<super::score::Score>>,
+    /// The cue number the score is following, read every control block.
+    cue: u32,
 }
 
 impl VoiceRender {
@@ -359,7 +389,11 @@ impl VoiceRender {
             grains: [Grain::default(); MAX_GRAINS],
             next_event: 0,
             ctl: 0,
-            step: 0,
+            score: match kind {
+                VoiceKind::Music => Some(Box::new(super::score::Score::new(seed))),
+                _ => None,
+            },
+            cue: 0,
         };
         // Decorrelate the slow modulators so two voices of the same kind never
         // breathe in lockstep.
@@ -384,6 +418,7 @@ impl VoiceRender {
         // The variant selector jumps: it is only ever changed while the voice is
         // silent, and slewing it would sweep through the values in between.
         self.color = self.params.color();
+        self.cue = self.params.cue();
     }
 
     /// Free a grain slot, preferring one that has already finished.
@@ -436,7 +471,18 @@ impl VoiceRender {
 
         let gust = 0.60 + 0.40 * self.drift(0.031 + 0.06 * self.motion, 0.017);
         let weight = 1.0 - self.tone;
-        (hiss * (0.35 + 0.35 * self.tone) + body * 0.22 * weight) * gust
+        // Playtest: "there's this white noise that seems to play continually. I
+        // think it's kinda nice but should be brought down in volume a bit."
+        //
+        // This is it. The wind is the one bed that is never absent, so it is
+        // the one bed whose level is judged over two hours rather than over two
+        // seconds, and it was reaching the mix at about -23 dBFS. The hiss is
+        // down 4.6 dB here, `gain::AMBIENCE_TOTAL` takes another 1.7, and the
+        // ambience slider — which now actually applies — takes 3 more at its
+        // default of 70%. It lands near -32 dBFS: still plainly there, no
+        // longer the loudest thing in a quiet frame. The gust and the body keep
+        // their shape, so it is quieter without becoming thinner.
+        (hiss * (0.19 + 0.19 * self.tone) + body * 0.18 * weight) * gust
     }
 
     fn water(&mut self) -> f32 {
@@ -665,79 +711,33 @@ impl VoiceRender {
         self.out_lp.lp(dry, pole_coeff(cut, SR))
     }
 
+    /// The score. All of the composition and all of the plucked-string
+    /// synthesis live in [`super::score`]; this is only the wiring.
+    ///
+    /// The parameter mapping, once, so both sides can be read against it:
+    ///
+    /// | Control | Meaning for the score |
+    /// | --- | --- |
+    /// | `cue` | which cue is playing; a change restarts the piece |
+    /// | `tone` | warmth — how the network is doing |
+    /// | `density` | how much of the composition survives the thinning |
+    /// | `color` | the dusk variant, `0` day and `1` evening |
+    ///
+    /// A slow breath goes on top. It is a tenth of a decibel and it is there
+    /// for the same reason a real player is never quite steady.
     fn music(&mut self) -> f32 {
-        // Slow harmonic movement, no percussion, nothing that builds (brief §4).
-        // The cue envelope lives on the sink; this only decides the harmony.
-        if self.next_event == 0 {
-            // Sparse: a new voice enters every twelve to forty seconds.
-            let mean = lerp(40.0, 12.0, self.density);
-            self.schedule(mean);
-
-            let root = MUSIC_ROOTS[(self.color * (MUSIC_ROOTS.len() - 1) as f32).round() as usize
-                % MUSIC_ROOTS.len()];
-            // Warm when thriving, open fifths when not. Neither is dramatic and
-            // neither resolves, so no cue can read as a comment on failure.
-            let set: &[f32] = if self.tone > 0.5 {
-                &MUSIC_WARM
-            } else {
-                &MUSIC_OPEN
-            };
-            let degree = set[(self.step as usize) % set.len()];
-            self.step = self.step.wrapping_add(1 + self.rng.below(2) as u32);
-            let octave = if self.rng.chance(0.35 + 0.3 * self.depth) {
-                12.0
-            } else {
-                0.0
-            };
-            let freq = root * semitones(degree + octave);
-            // Long attack, long tail: a note takes seconds to arrive.
-            let attack = self.rng.range(2.5, 5.5);
-            let tau = self.rng.range(7.0, 15.0);
-            let amp = self.rng.range(0.10, 0.16);
-            self.spawn_grain(Grain::tone(0, freq, freq, amp, attack, tau, 28.0));
-            // A detuned twin, a fifth of a hertz apart, for an analogue drift.
-            let twin_delay = (self.rng.range(0.0, 1.5) * SR) as u32;
-            self.spawn_grain(Grain::tone(
-                twin_delay,
-                freq * 1.0013,
-                freq * 0.9991,
-                amp * 0.7,
-                attack * 1.2,
-                tau,
-                28.0,
-            ));
-            if self.tone > 0.5 && self.rng.chance(0.5) {
-                // A soft upper partial only in the warm palette.
-                let upper_delay = (self.rng.range(1.0, 4.0) * SR) as u32;
-                self.spawn_grain(Grain::tone(
-                    upper_delay,
-                    freq * 2.0,
-                    freq * 2.0,
-                    amp * 0.22,
-                    attack * 1.4,
-                    tau * 0.8,
-                    24.0,
-                ));
-            }
-        } else {
-            self.next_event -= 1;
+        let (cue, warmth, density, dusk) = (self.cue, self.tone, self.density, self.color);
+        let voices = match self.score.as_mut() {
+            Some(score) => score.step(cue, warmth, density, dusk),
+            None => return 0.0,
+        };
+        if cue == 0 {
+            return 0.0;
         }
-
-        let breathe = 0.86 + 0.14 * self.drift(0.037, 0.023);
-        let voices = self.grains_out() * breathe;
-        // The warm variant keeps its top; the sparse one is felt more than heard.
-        let cut = lerp(1400.0, 4200.0, self.tone);
-        self.out_lp.lp(voices, pole_coeff(cut, SR))
+        let breathe = 0.94 + 0.06 * self.drift(0.037, 0.023);
+        voices * breathe
     }
 }
-
-/// Roots for the score, a minor-pentatonic-ish set two octaves below middle C.
-/// Low enough to sit under the ambience rather than on top of it.
-const MUSIC_ROOTS: [f32; 5] = [98.0, 110.0, 130.81, 146.83, 164.81];
-/// Warm voicing — open, with a third. Used while the network is thriving.
-const MUSIC_WARM: [f32; 6] = [0.0, 7.0, 12.0, 16.0, 19.0, 24.0];
-/// Sparse voicing — fifths and octaves only. Never sad, just emptier.
-const MUSIC_OPEN: [f32; 4] = [0.0, 7.0, 12.0, 19.0];
 
 impl Iterator for VoiceRender {
     type Item = f32;
@@ -806,6 +806,9 @@ mod tests {
         p.set_depth(0.6);
         p.set_density(0.9);
         p.set_color(0.6);
+        // The score only sounds while a cue is running; without this the music
+        // voice would pass every loudness check by being silent.
+        p.set_cue(1);
     }
 
     #[test]
@@ -928,20 +931,50 @@ mod tests {
     }
 
     #[test]
-    fn music_is_sparse_and_never_percussive() {
-        // No sample-to-sample jump anywhere near a transient: the score has no
-        // attack sharper than a couple of seconds.
+    fn the_score_is_silent_until_a_cue_asks_for_it() {
+        // The whole music voice is gated on the cue number, which is what buys
+        // the three-to-eight minutes of silence between cues for free: with no
+        // cue, no note is scheduled and no string is ringing, so the generator
+        // costs a comparison per sample.
         let voice = LiveVoice::new(VoiceKind::Music, 4);
         voice.params.set_density(1.0);
         voice.params.set_tone(0.9);
         let mut render = voice.decoder();
-        let mut prev = 0.0f32;
-        let mut worst = 0.0f32;
-        for _ in 0..(SR as usize * 20) {
-            let s = render.next().unwrap();
-            worst = worst.max((s - prev).abs());
-            prev = s;
+        for _ in 0..(SR as usize * 4) {
+            assert_eq!(render.next().unwrap(), 0.0, "the score played without a cue");
         }
-        assert!(worst < 0.08, "music produced a {worst} step - that is a transient");
+        voice.params.set_cue(1);
+        let mut peak = 0.0f32;
+        for _ in 0..(SR as usize * 20) {
+            peak = peak.max(render.next().unwrap().abs());
+        }
+        assert!(peak > 0.05, "the cue produced nothing: {peak}");
+    }
+
+    #[test]
+    fn the_score_is_plucked_but_never_percussive() {
+        // A pluck is allowed an attack — that is what makes it a string rather
+        // than a pad — but the *envelope* must never arrive at once. Measured
+        // over 10 ms windows, which is what the ear integrates a transient
+        // over; the raw sample slope of a 440 Hz partial says nothing.
+        let voice = LiveVoice::new(VoiceKind::Music, 4);
+        full(&voice.params);
+        let mut render = voice.decoder();
+        let buf: Vec<f32> = (0..(SR as usize * 30)).map(|_| render.next().unwrap()).collect();
+        let peak = buf.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        assert!(peak > 0.05 && peak < 0.8, "the score peaked at {peak}");
+        let window = (0.010 * SR) as usize;
+        let mut worst = 0.0f32;
+        let mut previous = 0.0f32;
+        for chunk in buf.chunks(window) {
+            let rms = (chunk.iter().map(|s| (s * s) as f64).sum::<f64>() / chunk.len() as f64)
+                .sqrt() as f32;
+            worst = worst.max((rms - previous).abs());
+            previous = rms;
+        }
+        assert!(
+            worst < peak * 0.42,
+            "the score's envelope jumped by {worst} against a peak of {peak}"
+        );
     }
 }

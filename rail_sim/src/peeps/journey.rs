@@ -981,6 +981,7 @@ mod tests {
                 // Walking is terrain-aware, so the harness carries real terrain.
                 .insert_resource(terrain)
                 .init_resource::<crate::trains::TileOccupancy>()
+                .init_resource::<crate::trains::TrainYard>()
                 .init_resource::<DistrictFlow>()
                 .init_resource::<ComplaintFeed>()
                 .init_resource::<WalkRouter>();

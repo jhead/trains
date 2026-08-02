@@ -6,6 +6,7 @@ use bevy_ecs::prelude::*;
 
 use crate::ids::TileCoord;
 use crate::stations::{catchment_influence, StationRegistry, StationService};
+use crate::track::TrackTerrain;
 
 /// Chebyshev radius (tiles) of the growth ring around each station.
 pub const GROWTH_RADIUS: i32 = 5;
@@ -54,9 +55,22 @@ pub fn town_falloff(dist: i32, radius: i32) -> f32 {
 ///
 /// Values are in `0.0..=`[`MAX_DENSITY`]. Tiles with density near zero may be
 /// omitted; readers should treat missing tiles as `0.0`.
+///
+/// # The map is the edge of the world
+///
+/// A station may legally stand two tiles from the border, and its growth ring
+/// reaches further than that — so the ring is the one thing in the sim that
+/// routinely asks about tiles which do not exist. Density therefore carries the
+/// map extent it belongs to ([`TownDensity::set_bounds`]) and refuses writes
+/// outside it. Presentation draws whatever is in here, so "nothing is stored off
+/// the map" is the cheapest possible guarantee that nothing is *drawn* off the
+/// map. Bounds are unset until the world's terrain is known, which keeps
+/// hand-built test fixtures and save restores working unchanged.
 #[derive(Debug, Clone, Default, Resource)]
 pub struct TownDensity {
     cells: HashMap<(i32, i32), f32>,
+    /// Map extent the cells are confined to, once the world is known.
+    bounds: Option<(u32, u32)>,
 }
 
 impl TownDensity {
@@ -67,7 +81,37 @@ impl TownDensity {
             .unwrap_or(0.0)
     }
 
+    /// Confine this field to a `width` x `height` map, dropping anything outside.
+    ///
+    /// Idempotent and O(1) once the bounds have settled, so it is safe to call
+    /// every tick: the sweep only runs when the world underneath actually
+    /// changes size (a new map, a loaded save).
+    pub fn set_bounds(&mut self, width: u32, height: u32) {
+        if self.bounds == Some((width, height)) {
+            return;
+        }
+        self.bounds = Some((width, height));
+        self.cells
+            .retain(|&(x, y), _| within(TileCoord { x, y }, width, height));
+    }
+
+    /// Map extent this field is confined to, if the world is known yet.
+    pub fn bounds(&self) -> Option<(u32, u32)> {
+        self.bounds
+    }
+
+    /// Whether `tile` is somewhere density may legally exist.
+    pub fn in_bounds(&self, tile: TileCoord) -> bool {
+        match self.bounds {
+            Some((w, h)) => within(tile, w, h),
+            None => true,
+        }
+    }
+
     pub fn set(&mut self, tile: TileCoord, density: f32) {
+        if !self.in_bounds(tile) {
+            return;
+        }
         let d = density.clamp(0.0, MAX_DENSITY);
         if d < 0.001 {
             self.cells.remove(&(tile.x, tile.y));
@@ -87,6 +131,11 @@ impl TownDensity {
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty()
     }
+}
+
+#[inline]
+fn within(tile: TileCoord, width: u32, height: u32) -> bool {
+    tile.x >= 0 && tile.y >= 0 && (tile.x as u32) < width && (tile.y as u32) < height
 }
 
 /// Target density at `tile` from the strongest nearby station influence.
@@ -120,11 +169,24 @@ pub fn density_target_at(
 }
 
 /// Move every cell in station rings toward its service-driven target.
+///
+/// The ring is clamped to the map before anything is written. A station may
+/// stand two tiles from the border and reach four, so without this a coastal
+/// town grows houses out over the edge of the world — and every layer that
+/// draws from density draws them there.
 pub fn advance_town_growth(
     mut density: ResMut<TownDensity>,
     stations: Res<StationRegistry>,
     service: Res<StationService>,
+    terrain: Option<Res<TrackTerrain>>,
 ) {
+    // The terrain is the map's extent as the sim knows it. Telling density about
+    // it here — rather than at world install — means a swapped world is honoured
+    // by whoever ticks next, with no extra wiring anywhere else.
+    if let Some(terrain) = terrain.as_deref() {
+        density.set_bounds(terrain.width(), terrain.height());
+    }
+
     if stations.is_empty() {
         return;
     }
@@ -136,10 +198,14 @@ pub fn advance_town_growth(
         let radius = station.tier.catchment();
         for dy in -radius..=radius {
             for dx in -radius..=radius {
-                tiles.push(TileCoord {
+                let tile = TileCoord {
                     x: station.tile.x + dx,
                     y: station.tile.y + dy,
-                });
+                };
+                if !density.in_bounds(tile) {
+                    continue;
+                }
+                tiles.push(tile);
             }
         }
     }
@@ -160,6 +226,7 @@ mod tests {
     use crate::ids::StationId;
     use crate::stations::StationServiceScore;
     use crate::track::GROUND_LAYER;
+    use bevy_app::App;
 
     fn registry_with(tile: TileCoord, name: &str) -> (StationRegistry, StationId) {
         let mut reg = StationRegistry::new();
@@ -285,6 +352,80 @@ mod tests {
         assert!(built(3) < built(5));
         assert!(built(5) <= built(8));
         assert!(built(8) < 8, "even an interchange must leave open country");
+    }
+
+    /// Terrain of `w` x `h` plains at sea level.
+    fn flat_terrain(w: u32, h: u32) -> TrackTerrain {
+        TrackTerrain::new(w, h, (0..w * h).map(|_| (false, 0i8)))
+    }
+
+    #[test]
+    fn a_town_never_grows_off_the_edge_of_the_map() {
+        // The reported bug: a station near the border grew a ring of homes past
+        // the map edge, because the ring walked `tile +/- radius` with nothing
+        // to stop it. Two tiles in is a legal seed position, and the catchment
+        // reaches further than that.
+        let mut app = App::new();
+        let (stations, id) = registry_with(TileCoord { x: 2, y: 2 }, "Edgewater");
+        let mut service = StationService::default();
+        service.scores.insert(
+            id,
+            StationServiceScore {
+                score: 100,
+                ..Default::default()
+            },
+        );
+        app.insert_resource(stations)
+            .insert_resource(service)
+            .insert_resource(flat_terrain(16, 16))
+            .init_resource::<TownDensity>()
+            .add_systems(bevy_app::Update, advance_town_growth);
+
+        for _ in 0..80 {
+            app.update();
+        }
+
+        let density = app.world().resource::<TownDensity>();
+        assert!(!density.is_empty(), "the town has to actually grow");
+        for (tile, d) in density.iter() {
+            assert!(
+                tile.x >= 0 && tile.y >= 0 && tile.x < 16 && tile.y < 16,
+                "density escaped the map at ({}, {}) = {d}",
+                tile.x,
+                tile.y
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_map_drops_the_old_map_s_density() {
+        // A smaller world must not inherit the cells of a larger one: those
+        // tiles are off the new map, and everything that draws density would
+        // draw them there.
+        let mut density = TownDensity::default();
+        density.set_bounds(32, 32);
+        density.set(TileCoord { x: 30, y: 30 }, 0.9);
+        density.set(TileCoord { x: 4, y: 4 }, 0.9);
+        assert_eq!(density.len(), 2);
+
+        density.set_bounds(16, 16);
+        assert_eq!(density.get(TileCoord { x: 30, y: 30 }), 0.0);
+        assert_eq!(density.get(TileCoord { x: 4, y: 4 }), 0.9);
+        assert_eq!(density.len(), 1);
+
+        // And it stays refused, rather than being swept once and forgotten.
+        density.set(TileCoord { x: 30, y: 30 }, 0.9);
+        density.set(TileCoord { x: -1, y: 4 }, 0.9);
+        assert_eq!(density.len(), 1, "out-of-bounds writes must not land");
+    }
+
+    #[test]
+    fn density_is_unbounded_until_the_world_is_known() {
+        // Hand-built fixtures and save restores write before any terrain exists.
+        let mut density = TownDensity::default();
+        assert_eq!(density.bounds(), None);
+        density.set(TileCoord { x: 900, y: 900 }, 0.5);
+        assert_eq!(density.get(TileCoord { x: 900, y: 900 }), 0.5);
     }
 
     #[test]

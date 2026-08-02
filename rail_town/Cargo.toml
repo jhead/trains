@@ -1,0 +1,18 @@
+[package]
+name = "rail_town"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rail Town Bevy application (input, rendering, UI)"
+
+[features]
+default = []
+# Future: enable Steamworks on native desktop builds only.
+# Never enable for wasm32 — keep Steam out of default features.
+steam = []
+
+[dependencies]
+bevy = { workspace = true, features = ["2d"] }
+rail_sim = { path = "../rail_sim" }
+rail_map = { path = "../rail_map" }
+rail_net = { path = "../rail_net" }

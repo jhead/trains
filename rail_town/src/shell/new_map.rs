@@ -134,7 +134,7 @@ pub fn rebuild_new_map_screen(
                         spawn_button(row, MenuItem::new(BACK_ROW, MenuAction::Back), "Back");
                         spawn_button(row, MenuItem::new(BEGIN_ROW, MenuAction::Begin), "Begin");
                     });
-                spawn_note(panel, "← → change   ↵ roll seed   digits type a seed");
+                spawn_note(panel, "<- -> change   Enter roll seed   digits type a seed");
             });
 
             root.spawn(shell_panel(Node {

@@ -27,17 +27,58 @@
 //! - Facing / id types: [`EdgeFacing`], [`PortalId`], [`Layer`]
 //!
 //! ## Generation
-//! - [`generate_map`] — seeded procedural land / water / elevation + edge portals
+//! - [`generate_map`] — seeded land / water / elevation + edge portals, stock options
+//! - [`generate`] — seed plus [`MapGenOptions`], at the size the options name
+//! - [`generate_map_with`] — the same, at an explicit size
+//! - Option types: [`MapSize`], [`TerrainStyle`], [`WaterStyle`], [`ResourceSpread`]
+//!
+//! ## What generation meant
+//!
+//! Design 02 §4 makes anchor placement level design, and level design cannot be
+//! inferred back out of a heightmap. So the generator writes its intentions down:
+//!
+//! - [`MapGrid::features`] — [`MapFeatures`]: the opening beat, growth sites,
+//!   river crossings, ridge passes, and a per-tile [`Surface`] class that tells a
+//!   river from a bay
+//! - [`MapGrid::anchor_hints`] — those sites, best first, ready to seed a sampler
+//!
+//! ### Handing the opening beat to `rail_sim`
+//!
+//! `rail_sim` cannot see this crate (the dependency runs the other way), so the
+//! hint travels as plain [`TileCoord`](rail_sim::ids::TileCoord)s in a resource
+//! the app inserts beside its `TrackTerrain`:
+//!
+//! ```ignore
+//! // rail_town, next to `commands.insert_resource(track_terrain_from(&map))`:
+//! commands.insert_resource(rail_sim::AnchorSites(map.anchor_hints()));
+//! ```
+//!
+//! Without it, anchor placement falls back to farthest-point sampling, which
+//! design 02 §4.1 names as the worst possible opening.
+//!
+//! ## Measuring a map
+//! - [`measure::composition`] — the four rows of design 02 §2.1
+//! - [`measure::river_crossings`] / [`measure::ridge_passes`] — the decisions on offer
+//! - [`measure::largest_buildable_region`] — is the mainland one place?
 
 mod coords;
+mod features;
 mod gen;
 mod grid;
+mod options;
 mod portal;
 mod tile;
 
+pub mod measure;
+
 pub use coords::{map_center_world, tile_to_world, world_to_tile, TILE_SIZE};
-pub use gen::generate_map;
+pub use features::{MapFeatures, RiverCrossing, SiteHint, SiteKind, Surface};
+pub use gen::{generate, generate_map, generate_map_with};
 pub use grid::{MapGrid, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_SEED, DEFAULT_MAP_WIDTH};
+pub use measure::Composition;
+pub use options::{
+    CompositionTargets, MapGenOptions, MapSize, ResourceSpread, TerrainStyle, WaterStyle,
+};
 pub use portal::Portal;
 pub use tile::{TerrainKind, Tile};
 

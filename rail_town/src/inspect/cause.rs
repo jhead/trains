@@ -62,16 +62,16 @@ pub fn peep_mood_line(mood: Mood, wait_secs: u32, station_name: &str) -> String 
     let mins = (wait_secs / 60).max(1);
     match mood {
         Mood::Frustrated => {
-            format!("Frustrated — waited {mins} min at {station_name}.")
+            format!("Frustrated - waited {mins} min at {station_name}.")
         }
         Mood::Uneasy => {
-            format!("Uneasy — waiting at {station_name} ({mins} min).")
+            format!("Uneasy - waiting at {station_name} ({mins} min).")
         }
         Mood::Content => {
             if wait_secs < 60 {
-                "Content — commute is fine.".into()
+                "Content - commute is fine.".into()
             } else {
-                format!("Content — at {station_name}.")
+                format!("Content - at {station_name}.")
             }
         }
     }
@@ -135,6 +135,6 @@ mod tests {
     #[test]
     fn peep_frustrated_names_station() {
         let line = peep_mood_line(Mood::Frustrated, 11 * 60, "Eastgate");
-        assert_eq!(line, "Frustrated — waited 11 min at Eastgate.");
+        assert_eq!(line, "Frustrated - waited 11 min at Eastgate.");
     }
 }

@@ -83,7 +83,7 @@ impl ServiceScoreHistory {
 
     pub fn sparkline(&self, id: StationId) -> String {
         let Some(q) = self.samples.get(&id) else {
-            return "·".into();
+            return "-".into();
         };
         const BARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
         q.iter()
@@ -185,7 +185,9 @@ pub fn selection_click_input(
     }
 }
 
-fn pick_world(
+/// Shared with [`super::hover`] so the hover tier picks exactly what a click
+/// would pick, rather than growing a second, subtly different hit test.
+pub(super) fn pick_world(
     world: Vec2,
     tile: rail_sim::TileCoord,
     network: &TrackNetwork,

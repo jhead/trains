@@ -180,16 +180,16 @@ fn unserved_in_catchment(
 pub fn station_reason(err: StationPlacementError, cost: i64, balance: i64) -> String {
     match err {
         StationPlacementError::InvalidLayer => "Can't build on that layer".into(),
-        StationPlacementError::NoTrack => "Platforms need track — lay the line first".into(),
+        StationPlacementError::NoTrack => "Platforms need track - lay the line first".into(),
         StationPlacementError::AlreadyStation => "Station already here".into(),
         StationPlacementError::TooClose { distance, min } => {
-            format!("Too close — {distance} tiles, need {min}")
+            format!("Too close - {distance} tiles, need {min}")
         }
         StationPlacementError::NoPlatformRoom { have, need } => {
-            format!("Not enough platform — {have} tiles of line, needs {need}")
+            format!("Not enough platform - {have} tiles of line, needs {need}")
         }
         StationPlacementError::NotAStubEnd => {
-            "Terminus needs a dead end — the line runs through here".into()
+            "Terminus needs a dead end - the line runs through here".into()
         }
         StationPlacementError::InsufficientFunds => {
             let short = (cost - balance).max(0);
@@ -197,7 +197,7 @@ pub fn station_reason(err: StationPlacementError, cost: i64, balance: i64) -> St
         }
         StationPlacementError::UnknownStation => "No station there".into(),
         StationPlacementError::OnLine { .. } => {
-            "A line still calls here — clear the line first".into()
+            "A line still calls here - clear the line first".into()
         }
         StationPlacementError::NotUpgradable { from, to } => {
             format!("Can't upgrade {} to {}", from.label(), to.label())
@@ -208,7 +208,7 @@ pub fn station_reason(err: StationPlacementError, cost: i64, balance: i64) -> St
 /// One-line summary for the tool's cost HUD.
 pub fn station_hud_line(preview: &StationPreview) -> String {
     format!(
-        "{}  {}  ·  {} platforms  ·  reach {}\n{} buildings  ·  {} unserved\nBalance  {}",
+        "{}  {}  -  {} platforms  -  reach {}\n{} buildings  -  {} unserved\nBalance  {}",
         preview.tier.label(),
         format_dollars(preview.cost_cents),
         preview.tier.platforms(),
@@ -288,7 +288,7 @@ mod tests {
         assert!(!p.can_commit);
         assert_eq!(
             p.reject.as_deref(),
-            Some("Platforms need track — lay the line first")
+            Some("Platforms need track - lay the line first")
         );
         assert!(p.platforms.is_empty());
     }
@@ -312,7 +312,7 @@ mod tests {
                 0,
                 0,
             ),
-            format!("Too close — 2 tiles, need {MIN_STATION_SPACING}")
+            format!("Too close - 2 tiles, need {MIN_STATION_SPACING}")
         );
         assert_eq!(
             station_reason(
@@ -320,7 +320,7 @@ mod tests {
                 0,
                 0
             ),
-            "Not enough platform — 2 tiles of line, needs 4"
+            "Not enough platform - 2 tiles of line, needs 4"
         );
     }
 }

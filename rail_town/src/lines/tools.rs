@@ -136,7 +136,7 @@ pub fn line_tool_input(
                 .get(station_id)
                 .map(|s| s.name.as_str())
                 .unwrap_or("?");
-            line_state.warn = Some(format!("No route — {a} is not connected to {b}."));
+            line_state.warn = Some(format!("No route - {a} is not connected to {b}."));
             // Still allow adding so the player sees the warn segment; confirm will
             // still create the line (ops can fix track later). Or refuse?
             // Design: draw warn but allow confirm only if all segments connect.

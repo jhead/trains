@@ -128,7 +128,20 @@ pub fn advance_trains(
             continue;
         };
         let profile = TrainProfile::for_kind(train.kind);
-        let needed = profile.ticks_for_piece(piece.max_grade, piece.curve);
+        // Charge for the leg actually being travelled, not for "a tile". A
+        // half-step link spans sqrt(5) tiles; billing it as one would make
+        // shallow runs 2.24x faster than the geometry allows.
+        let leg_sq = loc
+            .path
+            .get(loc.path_index + 1)
+            .and_then(|next| network.piece(*next))
+            .map(|next| {
+                let dx = (next.tile.x - piece.tile.x) as i64;
+                let dy = (next.tile.y - piece.tile.y) as i64;
+                (dx * dx + dy * dy) as u32
+            })
+            .unwrap_or(1);
+        let needed = profile.ticks_for_leg(piece.max_grade, piece.curve, leg_sq);
         loc.progress = loc.progress.saturating_add(1);
         if loc.progress < needed {
             continue;

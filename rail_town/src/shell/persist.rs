@@ -152,24 +152,30 @@ pub fn config_dir() -> Option<PathBuf> {
     )
 }
 
-pub fn settings_path() -> Option<PathBuf> {
-    config_dir().map(|d| d.join(SETTINGS_FILE))
+/// Path of a named document inside the config directory.
+pub fn doc_path(file: &str) -> Option<PathBuf> {
+    config_dir().map(|d| d.join(file))
 }
 
-/// Read the settings file. `None` when there is no readable file yet.
-pub fn load_settings_doc() -> Option<ParsedKv> {
-    let path = settings_path()?;
+pub fn settings_path() -> Option<PathBuf> {
+    doc_path(SETTINGS_FILE)
+}
+
+/// Read a document from the config directory. `None` when there is no readable
+/// file yet, which is simply how a first run looks.
+pub fn load_doc(file: &str) -> Option<ParsedKv> {
+    let path = doc_path(file)?;
     let text = fs::read_to_string(path).ok()?;
     let parsed = KvDoc::parse(&text);
     (!parsed.is_empty()).then_some(parsed)
 }
 
-/// Write the settings file, creating the config directory if needed.
+/// Write a document, creating the config directory if needed.
 ///
 /// Failure is not fatal — a read-only profile should never stop the game — so the
 /// error is returned for the caller to log rather than unwrapped.
-pub fn save_settings_doc(doc: &KvDoc) -> std::io::Result<()> {
-    let path = settings_path().ok_or_else(|| {
+pub fn save_doc(file: &str, doc: &KvDoc) -> std::io::Result<()> {
+    let path = doc_path(file).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "no config directory for this platform",
@@ -179,6 +185,16 @@ pub fn save_settings_doc(doc: &KvDoc) -> std::io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, doc.to_ron())
+}
+
+/// Read the settings file. `None` when there is no readable file yet.
+pub fn load_settings_doc() -> Option<ParsedKv> {
+    load_doc(SETTINGS_FILE)
+}
+
+/// Write the settings file.
+pub fn save_settings_doc(doc: &KvDoc) -> std::io::Result<()> {
+    save_doc(SETTINGS_FILE, doc)
 }
 
 #[cfg(test)]
@@ -229,6 +245,18 @@ mod tests {
         assert!(ron.contains("(\n"));
         assert!(ron.trim_end().ends_with(')'));
         assert!(ron.contains("    a: 1,\n"));
+    }
+
+    #[test]
+    fn any_named_document_lands_beside_the_settings() {
+        // Onboarding "seen" state is per-player, not per-world, so it lives here
+        // rather than in a save. It must share the settings' directory.
+        let Some(dir) = config_dir() else {
+            return;
+        };
+        let path = doc_path("onboarding.ron").expect("named docs follow the config dir");
+        assert_eq!(path.parent(), Some(dir.as_path()));
+        assert_eq!(settings_path(), doc_path(SETTINGS_FILE));
     }
 
     #[test]

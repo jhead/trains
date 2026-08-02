@@ -20,6 +20,7 @@ use super::journey::{Journey, JourneyStage, PeepPosition};
 use super::memory::JourneyMemory;
 use super::names::{full_name, hash64, portrait_variant, BodyType};
 use super::routine::Routine;
+use super::walk::WalkRoute;
 use super::{HouseholdId, PeepId, PeepSpawnState};
 
 /// Sim-seconds advanced per FixedUpdate tick while a peep is waiting.
@@ -302,6 +303,8 @@ pub fn spawn_peep_households(
                     JourneyMemory::default(),
                     WaitingAtStation::at(station),
                     PeepDetail::Abstract,
+                    // A recomputable cache, never saved — see `peeps::walk`.
+                    WalkRoute::default(),
                 ));
                 seeded += 1;
             }
@@ -546,7 +549,7 @@ pub fn peeps_move_away(
         feed.push(ComplaintEntry {
             kind: TalkKind::Warning,
             peep_name: format!(
-                "{} left {station_name} — {minutes} minutes to anywhere",
+                "{} left {station_name} - {minutes} minutes to anywhere",
                 household.plural()
             ),
             station_name: String::new(),

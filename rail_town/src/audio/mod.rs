@@ -273,7 +273,7 @@ mod tests {
             .count();
         assert!(
             playing <= 2,
-            "{playing} clacks landed in one frame — that is a burst"
+            "{playing} clacks landed in one frame - that is a burst"
         );
     }
 

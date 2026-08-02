@@ -32,6 +32,8 @@ use serde::{Deserialize, Serialize};
 use crate::clock::SimClock;
 use crate::command_buffer::CommandBuffer;
 use crate::demand::DemandSpawner;
+use crate::border::BorderRegistry;
+use crate::goals::GoalBoard;
 use crate::economy::{AlertBoard, JobBoard, MoneyLedger};
 use crate::history::CommandHistory;
 use crate::ids::{StationId, TileCoord};
@@ -56,7 +58,7 @@ use crate::WorldAnchorsSeeded;
 /// A save written by a different version is refused with
 /// [`SaveError::VersionMismatch`](super::SaveError::VersionMismatch); there is
 /// no silent partial read.
-pub const SCHEMA_VERSION: u16 = 1;
+pub const SCHEMA_VERSION: u16 = 2;
 
 /// Terrain generator revision recorded with the map.
 ///
@@ -437,6 +439,13 @@ pub struct WorldSnapshot {
     pub peeps: PeepsSnapshot,
     pub economy: EconomySnapshot,
     pub demand: DemandSpawner,
+    /// Goal set and progress. A goals world that lost this on load would
+    /// silently revert to a sandbox board.
+    pub goals: GoalBoard,
+    /// Open and archived border links, cached neighbour manifests, and trains
+    /// mid-crossing. Transit stock lives here as plain data rather than as
+    /// entities, so a save/load mid-crossing cannot strand it.
+    pub borders: BorderRegistry,
     pub clock: ClockSnapshot,
     /// Treasury, in cents.
     pub money_cents: i64,
@@ -464,6 +473,8 @@ impl Default for WorldSnapshot {
             peeps: PeepsSnapshot::default(),
             economy: EconomySnapshot::default(),
             demand: DemandSpawner::default(),
+            goals: GoalBoard::default(),
+            borders: BorderRegistry::default(),
             clock: ClockSnapshot::default(),
             money_cents: 0,
             anchors_seeded: false,
@@ -515,6 +526,8 @@ impl WorldSnapshot {
                 alerts: world.get_resource::<AlertBoard>().cloned().unwrap_or_default(),
             },
             demand: world.get_resource::<DemandSpawner>().cloned().unwrap_or_default(),
+            goals: world.get_resource::<GoalBoard>().cloned().unwrap_or_default(),
+            borders: world.get_resource::<BorderRegistry>().cloned().unwrap_or_default(),
             clock: world
                 .get_resource::<SimClock>()
                 .map(|c| ClockSnapshot {
@@ -564,6 +577,8 @@ impl WorldSnapshot {
         world.insert_resource(self.economy.ledger.clone());
         world.insert_resource(self.economy.alerts.clone());
         world.insert_resource(self.demand.clone());
+        world.insert_resource(self.goals.clone());
+        world.insert_resource(self.borders.clone());
 
         let clock = SimClock {
             paused: self.clock.paused,

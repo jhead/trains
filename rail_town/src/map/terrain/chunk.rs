@@ -212,7 +212,7 @@ pub fn setup_terrain(
     let (cols, rows) = spawn_chunks(&mut commands, &mut images, &map, &atlas, &mut dirty);
 
     info!(
-        "terrain: atlas {} texels in {:?}, {}×{} chunks composited in {:?}",
+        "terrain: atlas {} texels in {:?}, {}x{} chunks composited in {:?}",
         atlas.texel_count(),
         atlas_done - started,
         cols,

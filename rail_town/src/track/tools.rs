@@ -28,7 +28,13 @@ use super::propose::PathMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Resource)]
 pub enum BuildTool {
+    /// Look around without building anything.
+    ///
+    /// The default, deliberately. With only Build and Demolish the player is
+    /// permanently armed: every click on the world lays track, and there is no
+    /// way to just inspect. `Esc` always comes back here.
     #[default]
+    Select,
     Build,
     Demolish,
 }
@@ -108,17 +114,40 @@ pub fn track_tool_input(
         state.suppress_build_click = false;
         state.drag = None;
     }
+    let had_pending =
+        state.anchor.is_some() || state.drag.is_some() || state.drag_origin.is_some();
+    if keys.just_pressed(KeyCode::KeyV) {
+        state.tool = BuildTool::Select;
+        state.suppress_build_click = false;
+        state.drag = None;
+    }
     if keys.just_pressed(KeyCode::Escape) {
         state.anchor = None;
         state.drag = None;
         state.drag_origin = None;
         state.build_preview = None;
         state.demolish_preview = None;
+        // Esc unwinds one layer at a time (brief 03 §10.1): first cancel a
+        // pending drag or anchor, and only disarm the tool once there is
+        // nothing left to cancel. Without the second step the player has no way
+        // out of build mode at all.
+        if !had_pending {
+            state.tool = BuildTool::Select;
+        }
     }
 
     let hover = cursor_tile(&windows, &camera_q, &map);
     state.hover_tile = hover;
     state.path_mode = path_mode_from_keys(&keys);
+
+    // Select is a look-around mode: no ghost, no click-to-build.
+    if state.tool == BuildTool::Select {
+        state.anchor = None;
+        state.drag = None;
+        state.build_preview = None;
+        state.demolish_preview = None;
+        return;
+    }
 
     if state.suppress_build_click {
         state.drag = None;
@@ -141,6 +170,8 @@ pub fn track_tool_input(
     if mouse.just_pressed(MouseButton::Left) && !click_consumed.0 {
         if let Some(tile) = hover {
             match state.tool {
+                // Handled by the early return above; clicks belong to selection.
+                BuildTool::Select => {}
                 BuildTool::Build => {
                     let origin = if state.path_mode == PathMode::SingleTile {
                         tile

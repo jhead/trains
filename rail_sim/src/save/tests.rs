@@ -130,7 +130,7 @@ fn lived_in_world() -> World {
     // --- lines ------------------------------------------------------------
     let mut lines = LineRegistry::new();
     let line = lines
-        .create("Eastgate — Westbrook".into(), vec![eastgate, westbrook])
+        .create("Eastgate - Westbrook".into(), vec![eastgate, westbrook])
         .expect("line");
     lines.assign_train(line, TrainId(1));
 
@@ -464,7 +464,7 @@ fn save_load_round_trip_is_exact() {
     let bytes = encode_save(&meta, &saved).expect("encode");
     let (_, loaded) = decode_save(&bytes).expect("decode");
 
-    assert_eq!(loaded, saved, "the blob must survive encode → decode");
+    assert_eq!(loaded, saved, "the blob must survive encode -> decode");
 
     // And restoring it into a fresh world must reproduce the same snapshot.
     let mut fresh = World::new();
@@ -760,7 +760,7 @@ fn lines_keep_their_stops_colour_and_trains() {
     let lines = fresh.resource::<LineRegistry>();
     assert_eq!(lines.len(), 1);
     let line = lines.iter().next().expect("one line");
-    assert_eq!(line.name, "Eastgate — Westbrook");
+    assert_eq!(line.name, "Eastgate - Westbrook");
     assert_eq!(line.stops, vec![StationId(1), StationId(2)]);
     assert_eq!(line.trains, vec![TrainId(1)]);
     assert!(lines.line_for_train(TrainId(1)).is_some());

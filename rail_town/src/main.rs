@@ -6,9 +6,11 @@
 
 mod atmosphere;
 mod audio;
+mod border;
 mod inspect;
 mod lines;
 mod map;
+mod onboarding;
 mod overlays;
 mod palette;
 mod shell;
@@ -22,12 +24,14 @@ mod ui;
 use atmosphere::AtmospherePlugin;
 use audio::AudioPlugin;
 use bevy::prelude::*;
+use border::BorderPresentationPlugin;
 use inspect::InspectPlugin;
 use lines::LinesPlugin;
 use map::MapPlugin;
+use onboarding::OnboardingPlugin;
 use overlays::OverlaysPlugin;
 use palette::BG0;
-use rail_net::NeighborService;
+use rail_net::{ManifestService, NeighborService};
 use rail_sim::SimPlugin;
 use shell::ShellPlugin;
 use sim_bridge::SimBridgePlugin;
@@ -65,6 +69,7 @@ fn main() {
         .add_plugins(StationsPlugin)
         .add_plugins(TrainsPlugin)
         .add_plugins(LinesPlugin)
+        .add_plugins(BorderPresentationPlugin)
         .add_plugins(TownPresentationPlugin)
         // Time-of-day tint, lit windows, and world-anchored ambient motion.
         .add_plugins(AtmospherePlugin)
@@ -73,9 +78,14 @@ fn main() {
         .add_plugins(AudioPlugin)
         .add_plugins(InspectPlugin)
         .add_plugins(OverlaysPlugin)
+        // Opening nudge, one-shot hints, and the first-payout moment.
+        .add_plugins(OnboardingPlugin)
         .add_plugins(UiPlugin)
         // Null neighbor backend: single-player never blocks on edge handoff.
         .insert_resource(NeighborService::null())
+        // Offline blob store: MP-1 trades entirely with echo neighbours, and
+        // an unset endpoint is the shipping default.
+        .insert_resource(ManifestService::offline())
         .insert_resource(ClearColor(BG0))
         .run();
 }

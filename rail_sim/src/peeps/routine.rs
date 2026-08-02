@@ -158,7 +158,7 @@ impl Routine {
     /// Peep-card line — *"Leaves Eastgate about 07:24, home by 15:40."*
     pub fn describe(&self, home_station_name: &str) -> String {
         format!(
-            "{} · leaves {} about {}, home by {}",
+            "{} - leaves {} about {}, home by {}",
             self.role.label(),
             home_station_name,
             self.depart_label(),

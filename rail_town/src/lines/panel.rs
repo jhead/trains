@@ -68,7 +68,7 @@ pub fn setup_lines_panel(mut commands: Commands) {
                 text_primary(),
             ));
             root.spawn((
-                Text::new("L · click stations · Enter"),
+                Text::new("L - click stations - Enter"),
                 micro_font(),
                 text_secondary(),
             ));
@@ -180,7 +180,7 @@ pub fn update_lines_panel(
             ))
             .with_children(|row| {
                 row.spawn((
-                    Text::new(format!("● {}", line.name)),
+                    Text::new(format!("o {}", line.name)),
                     body_font(),
                     TextColor(colour),
                 ));
@@ -249,7 +249,7 @@ pub fn assign_train_clicks(
 
 fn stop_strip(stations: &StationRegistry, stops: &[rail_sim::StationId]) -> String {
     if stops.is_empty() {
-        return "—".into();
+        return "-".into();
     }
     stops
         .iter()
@@ -263,7 +263,7 @@ fn stop_strip(stations: &StationRegistry, stops: &[rail_sim::StationId]) -> Stri
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
-        .join(" — ")
+        .join(" - ")
 }
 
 fn draft_strip(stations: &StationRegistry, stops: &[rail_sim::StationId]) -> String {

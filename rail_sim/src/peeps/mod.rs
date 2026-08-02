@@ -19,6 +19,7 @@
 //! | [`budget`] | Bounded full simulation biased to the camera |
 //! | [`flow`] | District-level flow for the abstracted majority |
 //! | [`resident`] | Identity, spawning, wait / mood, moving away |
+//! | [`walk`] | Terrain-aware walking routes over walkable ground |
 //! | [`complaints`] | The public Town Talk feed |
 //!
 //! # Reading peeps from presentation
@@ -36,6 +37,7 @@ mod memory;
 mod names;
 mod resident;
 mod routine;
+mod walk;
 
 pub use budget::{
     rebalance_peep_detail, select_detailed, PeepBudget, PeepDetail, PeepFocus,
@@ -75,6 +77,11 @@ pub use resident::{
 pub use routine::{
     clock_label, minute_in_window, PeepRole, Routine, DAY_MINUTES, DEPART_WINDOW_MINUTES,
 };
+pub use walk::{
+    ensure_walk_routes, find_walk_route, find_walk_route_within, walk_step, WalkRoute, WalkRouter,
+    WalkStep, WalkWorld, NO_ROUTE_TALK_COOLDOWN_TICKS, WALK_CLIMB_COST, WALK_MAX_HEIGHT,
+    WALK_MAX_STEP_GRADE, WALK_ROUTES_PER_TICK, WALK_SEARCH_LIMIT, WALK_STEP_COST,
+};
 
 /// Back-compat alias for the pre-journey spawn system name.
 pub use resident::spawn_peep_households as spawn_peeps_for_stations;
@@ -107,9 +114,9 @@ use crate::{sim_is_running, SimSet};
 /// Registers peep resources and the Advance chain.
 ///
 /// Order matters and is explicit: the district window opens, households seed,
-/// level of detail is chosen, waits and moods update, then the full-detail
-/// journeys and the abstracted flow advance, and finally anyone who has had
-/// enough packs up.
+/// every peep is guaranteed a walk-route cache, level of detail is chosen,
+/// waits and moods update, then the full-detail journeys and the abstracted
+/// flow advance, and finally anyone who has had enough packs up.
 pub struct PeepsPlugin;
 
 impl Plugin for PeepsPlugin {
@@ -120,11 +127,15 @@ impl Plugin for PeepsPlugin {
             .init_resource::<DistrictFlow>()
             .init_resource::<PeepBudget>()
             .init_resource::<PeepFocus>()
+            .init_resource::<WalkRouter>()
             .add_systems(
                 FixedUpdate,
                 (
                     begin_flow_window,
                     spawn_peep_households,
+                    // Peeps restored from a save arrive without a route cache;
+                    // this gives them one before anybody tries to walk.
+                    ensure_walk_routes,
                     rebalance_peep_detail,
                     advance_peep_waits,
                     advance_journeys,

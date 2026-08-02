@@ -242,7 +242,7 @@ pub fn sync_flash_sprites(
 fn cost_hud_build(p: &BuildPreview) -> (String, bool) {
     let warn = p.reject.is_some() || p.balance_after_cents < 0;
     let bridges = if p.bridge_count > 0 {
-        format!(" · {} bridge", p.bridge_count)
+        format!(" - {} bridge", p.bridge_count)
     } else {
         String::new()
     };

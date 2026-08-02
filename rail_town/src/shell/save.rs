@@ -117,7 +117,7 @@ pub fn service_save_requests(world: &mut World) {
 
     if let Some(slot) = save {
         message = Some(match queue(world, &slot) {
-            Ok(()) => format!("Saving {}…", slot.display_name()),
+            Ok(()) => format!("Saving {}...", slot.display_name()),
             Err(err) => describe(&err, "save"),
         });
     }
@@ -155,7 +155,7 @@ fn queue(world: &mut World, slot: &SaveSlot) -> save::SaveResult<()> {
 /// Autosave on the interval, straight onto the rotation.
 pub fn queue_autosave_now(world: &mut World) {
     let message = match save::queue_autosave(world) {
-        Ok(()) => "Autosaving…".to_string(),
+        Ok(()) => "Autosaving...".to_string(),
         // A save already in flight is not an error worth telling the player about.
         Err(save::SaveError::Busy) => return,
         Err(err) => describe(&err, "autosave"),
@@ -176,7 +176,7 @@ fn describe(error: &save::SaveError, verb: &str) -> String {
         save::SaveError::NoStorage => "No save storage on this platform".into(),
         save::SaveError::Busy => "A save is already running".into(),
         save::SaveError::InvalidSlotName(_) => "That save name cannot be used".into(),
-        _ => format!("Could not {verb} — the file could not be read"),
+        _ => format!("Could not {verb} - the file could not be read"),
     }
 }
 
@@ -187,7 +187,7 @@ fn describe_restore(slot: &SaveSlot, report: &save::RestoreReport) -> String {
     } else {
         // Restoring is deliberately forgiving; say so rather than pretending the
         // load was exact.
-        format!("Loaded {name} — some of it could not be restored")
+        format!("Loaded {name} - some of it could not be restored")
     }
 }
 

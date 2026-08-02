@@ -189,7 +189,7 @@ pub fn spawn_new_demand(
         spawner.next_settlement = spawner.next_settlement.saturating_add(1);
         let id = stations.insert(name, tile, GROUND_LAYER);
         service.ensure(id);
-        let message = format!("New settlement: {name} — not yet served");
+        let message = format!("New settlement: {name} - not yet served");
         talk.push(ComplaintEntry {
             kind: TalkKind::Opportunity,
             peep_name: message.clone(),
@@ -212,9 +212,9 @@ pub fn spawn_new_demand(
         spawner.next_industry = spawner.next_industry.saturating_add(1);
         let id = industries.insert(name, tile, produces, consumes);
         let label = if produces.is_some() {
-            format!("New industry: {name} — not yet served")
+            format!("New industry: {name} - not yet served")
         } else {
-            format!("New mill: {name} — not yet served")
+            format!("New mill: {name} - not yet served")
         };
         talk.push(ComplaintEntry {
             kind: TalkKind::Opportunity,

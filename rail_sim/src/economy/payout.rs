@@ -9,10 +9,20 @@ use crate::trains::{track_for_station, Train, TrainCargo, TrainLocation};
 
 use super::ledger::{MoneyCategory, MoneyLedger};
 
-/// Passenger fare on delivery: $5.00.
-pub const PASSENGER_FARE_CENTS: i64 = 500;
-/// Goods delivery payout: $20.00.
-pub const GOODS_DELIVERY_CENTS: i64 = 2_000;
+/// Passenger fare on delivery: $30.00.
+///
+/// Sized against upkeep rather than against realism. A transit train working a
+/// short line completes roughly one or two runs a minute, so a pair of them
+/// clears the running cost of an early network several times over — which is
+/// what `DESIGN.md` asks for: *"A well-run network outruns its costs
+/// comfortably, and that surplus is meant to be spent expanding."*
+pub const PASSENGER_FARE_CENTS: i64 = 3_000;
+
+/// Goods delivery payout: $90.00.
+///
+/// Lumpier and larger than a fare, per the design's split between dense short
+/// passenger hops and long point-to-point freight that funds the network.
+pub const GOODS_DELIVERY_CENTS: i64 = 9_000;
 
 /// When a train with cargo sits at its path destination, pay out and clear cargo.
 pub fn resolve_deliveries(

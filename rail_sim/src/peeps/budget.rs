@@ -17,6 +17,7 @@ use crate::stations::StationRegistry;
 
 use super::journey::{JourneyStage, PeepPosition};
 use super::routine::Routine;
+use super::walk::WalkRoute;
 use super::Journey;
 
 /// Hard cap on peeps simulated in full detail (journeys, positions, sprites).
@@ -184,7 +185,11 @@ pub fn select_detailed<K: Copy + Ord>(
 /// Re-rank peeps into [`PeepDetail::Full`] / [`PeepDetail::Abstract`].
 ///
 /// Promotions snap the peep's position to somewhere sensible for their current
-/// stage, so a peep who walks on screen never appears mid-air.
+/// stage, so a peep who walks on screen never appears mid-air. That is a
+/// teleport as far as walking is concerned, so any cached [`WalkRoute`] is
+/// dropped on the way in **and** on the way out: only full-detail peeps have
+/// positions, so only they need a route at all.
+#[allow(clippy::type_complexity)]
 pub fn rebalance_peep_detail(
     focus: Res<PeepFocus>,
     stations: Res<StationRegistry>,
@@ -196,6 +201,7 @@ pub fn rebalance_peep_detail(
         &Journey,
         &mut PeepPosition,
         &mut PeepDetail,
+        Option<&mut WalkRoute>,
     )>,
 ) {
     if !budget.due() {
@@ -204,7 +210,7 @@ pub fn rebalance_peep_detail(
 
     let mut candidates: Vec<(Entity, TileCoord)> = peeps
         .iter()
-        .map(|(entity, peep, routine, journey, pos, detail)| {
+        .map(|(entity, peep, routine, journey, pos, detail, _)| {
             // Rank on where they actually are when the position is live, else on
             // where their current stage says they must be.
             let tile = if detail.is_full() && journey.stage != JourneyStage::AtHome {
@@ -225,7 +231,7 @@ pub fn rebalance_peep_detail(
 
     let mut detailed = 0usize;
     let mut abstracted = 0usize;
-    for (entity, peep, routine, journey, mut pos, mut detail) in peeps.iter_mut() {
+    for (entity, peep, routine, journey, mut pos, mut detail, mut route) in peeps.iter_mut() {
         let want = if chosen.contains(&entity) {
             PeepDetail::Full
         } else {
@@ -238,6 +244,10 @@ pub fn rebalance_peep_detail(
         }
         if *detail == want {
             continue;
+        }
+        // Detail changed: whatever route they were on no longer describes them.
+        if let Some(route) = route.as_deref_mut() {
+            route.clear();
         }
         if want.is_full() {
             // Coming back into view — put them where their stage says they are.

@@ -18,7 +18,8 @@ pub use ledger::{
     tick_money_ledger, MoneyCategory, MoneyLedger, LEDGER_HISTORY_LEN, LEDGER_SAMPLE_SIM_SECS,
 };
 pub use opex::{
-    apply_track_maintenance, apply_train_opex, track_maintenance_total, TRAIN_OPEX_CENTS,
+    apply_track_maintenance, apply_train_opex, track_maintenance_total, MaintenanceAccrual,
+    MAINT_CENTS_PER_WEIGHT_PER_MINUTE, TICKS_PER_MINUTE, TRAIN_OPEX_CENTS,
 };
 pub use payout::{
     resolve_deliveries, GOODS_DELIVERY_CENTS, PASSENGER_FARE_CENTS,

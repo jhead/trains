@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn the_first_cue_is_never_at_launch() {
-        assert!(FIRST_CUE_MIN > 60.0, "a minute or two in (§4)");
+        assert!(FIRST_CUE_MIN > 60.0, "a minute or two in (S4)");
         assert!(FIRST_CUE_MAX < 240.0, "but not never");
     }
 

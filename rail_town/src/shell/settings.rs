@@ -309,8 +309,8 @@ impl SettingId {
         let g = &settings.gameplay;
         match self {
             Self::WindowMode => d.window_mode.label().into(),
-            Self::UiScale => format!("{}×", d.ui_scale),
-            Self::WorldZoomDefault => format!("{}×", d.world_zoom_default),
+            Self::UiScale => format!("{}x", d.ui_scale),
+            Self::WorldZoomDefault => format!("{}x", d.world_zoom_default),
             Self::Vsync => on_off(d.vsync),
             Self::FrameCap => {
                 if d.frame_cap == 0 {

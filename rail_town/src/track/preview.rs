@@ -91,7 +91,7 @@ fn preview_build_proposed(
             balance_after_cents: balance,
             can_commit: false,
             reject: Some(RejectInfo {
-                message: "Need a straight or 45° run".into(),
+                message: "Need a run along one of the 16 directions".into(),
                 tiles: vec![proposed.endpoint],
             }),
             endpoint: proposed.endpoint,
@@ -290,16 +290,24 @@ pub fn preview_demolish(
 pub fn placement_reason(err: PlacementError, total_cost: i64, balance: i64) -> String {
     match err {
         PlacementError::OutOfBounds => "Map edge".into(),
-        PlacementError::NotStraight => "Need a straight or 45° run".into(),
+        PlacementError::NotStraight => "Need a run along one of the 16 directions".into(),
         PlacementError::InvalidLayer => "Can't build on that layer".into(),
         PlacementError::AlreadyOccupied => "Track already here".into(),
         PlacementError::BridgeTooLong { span } => {
-            format!("Span too wide — {span} tiles, max {MAX_BRIDGE_SPAN}")
+            format!("Span too wide - {span} tiles, max {MAX_BRIDGE_SPAN}")
         }
         PlacementError::GradeTooSteep { grade } => {
-            format!("Too steep — grade {grade}, max {MAX_GRADE}")
+            format!("Too steep - grade {grade}, max {MAX_GRADE}")
         }
         PlacementError::TerrainForbidden => "Can't build on that terrain".into(),
+        PlacementError::TurnoutTooShallow { divergence_tenths } => format!(
+            "Turnout too shallow - {}.{}deg, min 22.5deg",
+            divergence_tenths / 10,
+            divergence_tenths % 10
+        ),
+        PlacementError::HalfStepBlocked { tile } => {
+            format!("Shallow run is blocked at {}, {}", tile.x, tile.y)
+        }
         PlacementError::InsufficientFunds => {
             let short = (total_cost - balance).max(0);
             format!("Short by {}", format_dollars(short))

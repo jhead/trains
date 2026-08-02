@@ -43,7 +43,11 @@ pub fn apply_commands(
             | CommandKind::UnassignTrain(_)
             | CommandKind::PlaceStation(_)
             | CommandKind::DemolishStation(_)
-            | CommandKind::UpgradeStation(_) => {
+            | CommandKind::UpgradeStation(_)
+            | CommandKind::OpenBorder(_)
+            | CommandKind::CloseBorder(_)
+            | CommandKind::SetBorderTrade(_)
+            | CommandKind::AssignTrainToBorder(_) => {
                 pending.write(PendingWorldCommand {
                     command: command.clone(),
                 });

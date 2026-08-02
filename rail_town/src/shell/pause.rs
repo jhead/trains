@@ -37,7 +37,7 @@ pub fn spawn_pause_if_missing(
     }
     let saves = save::slots();
     let footer = format!(
-        "Rail Town · seed {} · {}",
+        "Rail Town - seed {} - {}",
         map.seed,
         played_label(time.elapsed_secs())
     );

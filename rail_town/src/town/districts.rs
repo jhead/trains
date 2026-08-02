@@ -35,6 +35,16 @@ pub enum District {
 }
 
 impl District {
+    /// Plain name, for hover and the inspector. ASCII only.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rural => "Open country",
+            Self::Residential => "Residential",
+            Self::Commercial => "Commercial",
+            Self::Industrial => "Works",
+        }
+    }
+
     /// Silhouette family this district builds from.
     pub fn family(self) -> Family {
         match self {

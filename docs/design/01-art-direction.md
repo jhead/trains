@@ -207,6 +207,23 @@ So the graph is sixteen-directional, and the curves stamped between graph nodes 
 
 A sixteen-direction graph on a square tile grid means a piece can link to a neighbour two tiles along one axis and one along the other. That is a genuine increase in the richness of the routing geometry, and it is a real cost in adjacency and pathfinding that should be budgeted as such rather than bolted on. **Minimum turnout divergence is one direction step**; anything shallower is refused at placement time, because it cannot be drawn.
 
+#### The rose is not evenly spaced — and that is better
+
+A square grid cannot give sixteen directions at an even 22.5°. The knight's moves land at **26.57°** and **63.43°**, so the realised rose steps run `26.57° · 18.43° · 18.43° · 26.57°` per quadrant — up to 4.07° off an ideal rose.
+
+That sounds like a defect and is actually a stronger result than an even rose would be. The tightest realised step, 18.43°, is nearly **twice** the `junction` plate's ~10° pixel floor; the widest, 26.57°, sits inside the plate's ~30° generator ceiling. **Every adjacent pair in the realised rose is comfortably inside the drawable window, with none near either wall.** An even 22.5° rose would have had less margin at the narrow end.
+
+Two consequences that bind:
+
+- **The sprite bank must be baked at the realised bearings, not at even steps.** A 32-entry bank spaced at 11.25° does not contain 26.57° — the nearest entry is 4.07° away, well above the `spritebank` plate's 2.81° target. Baking an even bank would reintroduce exactly the facet-popping that plate exists to warn about. Bake at the sixteen realised bearings plus interpolants between them.
+- **The realised turnout floor is 36.87°, not 22.5°**, because a half-step link and a compass link cannot meet at the same node (see below). The one-step minimum stays in the rules as a guard rail: it is a property of the linking rule rather than of the type system, and relaxing that rule would make an undrawable 18.43° pair reachable immediately.
+
+#### Half-step links are self-limiting
+
+A knight's-move link crosses two intervening tiles. The link is refused while either is occupied — the *build* is never refused, only the link. This stores nothing, is symmetric by construction, and never makes bare ground mysteriously unbuildable.
+
+It also means half-steps exist **only over open ground**. In a dense yard, parallel running lines or a passing loop, every half-step is suppressed automatically. Shallow angles therefore read as a long-distance, open-country geometry — which is how real railways use them — but sixteen directions buys correspondingly less inside a built-up town than the direction count alone suggests.
+
 ### 5.3 Track cross-section
 
 Ported from the plates' measured constants and scaled to a 32-texel tile. These numbers *are* the line weights.

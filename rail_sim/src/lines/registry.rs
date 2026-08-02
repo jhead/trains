@@ -187,7 +187,7 @@ pub fn suggest_line_name(stations: &StationRegistry, stops: &[StationId]) -> Str
     if first.id == last.id {
         first.name.clone()
     } else {
-        format!("{} — {}", first.name, last.name)
+        format!("{} - {}", first.name, last.name)
     }
 }
 
@@ -254,7 +254,7 @@ mod tests {
 
         let mut lines = LineRegistry::new();
         let name = suggest_line_name(&stations, &[a, b, c]);
-        assert_eq!(name, "Eastgate — Millhaven");
+        assert_eq!(name, "Eastgate - Millhaven");
         let id = lines.create(name, vec![a, b, c]).expect("line");
         let line = lines.get(id).unwrap();
         assert_eq!(line.stops.len(), 3);

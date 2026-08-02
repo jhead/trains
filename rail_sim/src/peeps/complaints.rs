@@ -89,13 +89,13 @@ impl ComplaintEntry {
                 }
             }
             TalkKind::Praise => {
-                format!("{} · smooth ride via {}", self.peep_name, self.station_name)
+                format!("{} - smooth ride via {}", self.peep_name, self.station_name)
             }
             TalkKind::Opportunity => {
                 if self.station_name.is_empty() {
                     self.peep_name.clone()
                 } else {
-                    format!("{} · {}", self.peep_name, self.station_name)
+                    format!("{} - {}", self.peep_name, self.station_name)
                 }
             }
             // A warning with no station carries its own whole sentence — that is
@@ -105,7 +105,7 @@ impl ComplaintEntry {
                 if self.station_name.is_empty() {
                     self.peep_name.clone()
                 } else {
-                    format!("{} · trouble at {}", self.peep_name, self.station_name)
+                    format!("{} - trouble at {}", self.peep_name, self.station_name)
                 }
             }
         }
@@ -273,7 +273,7 @@ mod tests {
             tile: None,
             count: 1,
         };
-        assert_eq!(e.display_line(), "Mara · smooth ride via Eastgate");
+        assert_eq!(e.display_line(), "Mara - smooth ride via Eastgate");
     }
 
     #[test]
@@ -307,7 +307,7 @@ mod tests {
     fn a_household_departure_carries_its_own_sentence() {
         let e = ComplaintEntry {
             kind: TalkKind::Warning,
-            peep_name: "The Aldertons left Westbrook — 22 minutes to anywhere".into(),
+            peep_name: "The Aldertons left Westbrook - 22 minutes to anywhere".into(),
             station_name: String::new(),
             wait_minutes: 0,
             sim_tick: 4,
@@ -318,7 +318,7 @@ mod tests {
         };
         assert_eq!(
             e.display_line(),
-            "The Aldertons left Westbrook — 22 minutes to anywhere"
+            "The Aldertons left Westbrook - 22 minutes to anywhere"
         );
     }
 

@@ -145,10 +145,30 @@ pub struct BuildingWindows {
     pub flip_x: bool,
 }
 
-/// A countryside prop on unserved land.
+/// What a countryside object is — for hover, and for the frame it draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuralKind {
+    /// A working farm: the anchor its fields are arranged around.
+    Farmstead,
+    /// Worked ground or a landmark, indexed into [`FRAME_RURAL`].
+    Prop(usize),
+}
+
+impl RuralKind {
+    /// Plain name for the hover tooltip.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Farmstead => "Farmstead",
+            Self::Prop(i) => building_art::rural_label(i),
+        }
+    }
+}
+
+/// A countryside object on unserved land.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct RuralProp {
     pub tile: TileCoord,
+    pub kind: RuralKind,
 }
 
 // ─ Plugin ──────────────────────────────────────────────
@@ -424,12 +444,19 @@ fn spawn_prop(commands: &mut Commands, atlas: &BuildingAtlas, map_height: u32, t
         sprite,
         Anchor::BOTTOM_CENTER,
         Transform::from_xyz(bx as f32, by as f32, lot_z(by, map_height)),
-        RuralProp { tile },
+        RuralProp {
+            tile,
+            kind: RuralKind::Prop(prop),
+        },
     ));
 }
 
-/// Scatter the countryside once. The unserved map has to look *deliberately*
-/// rural — quiet farmland, not unfinished content (brief 06 §2.2).
+/// Lay the countryside out once.
+///
+/// The unserved map has to look *deliberately* rural (brief 06 §2.2) — and that
+/// means mostly **open**. `lots.rs` only puts an object on a farm anchor, on the
+/// worked ground next to one, or very occasionally on a lone landmark tile, so
+/// this walk over the map plants a few dozen things rather than a few thousand.
 fn seed_rural(
     commands: &mut Commands,
     atlas: &BuildingAtlas,
@@ -463,7 +490,10 @@ fn seed_rural(
                     sprite,
                     Anchor::BOTTOM_CENTER,
                     Transform::from_xyz(bx as f32, by as f32, lot_z(by, map.height)),
-                    RuralProp { tile },
+                    RuralProp {
+                        tile,
+                        kind: RuralKind::Farmstead,
+                    },
                 ));
                 continue;
             }
@@ -488,6 +518,30 @@ pub fn frame_for(lot: &BuildingLot) -> usize {
         LotPhase::Cleared => {
             FRAME_SCAR + (world_hash(lot.tile.x, lot.tile.y + 1, 0x5CA9) % 2) as usize
         }
+    }
+}
+
+/// What a lot is, in words — the hover tier's answer to *what is this?*
+pub fn lot_label(lot: &BuildingLot) -> &'static str {
+    match lot.phase {
+        LotPhase::Stake => "Surveyor's Stake",
+        LotPhase::Scaffold => "Building Site",
+        LotPhase::Cleared => "Cleared Lot",
+        LotPhase::Settle | LotPhase::Standing(_) => lot.kind.label(),
+    }
+}
+
+/// How a lot is doing. `None` while it is simply standing and well — a healthy
+/// building has nothing to report, and saying so anyway is noise.
+pub fn lot_condition(lot: &BuildingLot) -> Option<&'static str> {
+    match lot.phase {
+        LotPhase::Stake => Some("marked out"),
+        LotPhase::Scaffold => Some("going up"),
+        LotPhase::Settle | LotPhase::Standing(Decay::Healthy) => None,
+        LotPhase::Standing(Decay::Dimmed) => Some("windows dark"),
+        LotPhase::Standing(Decay::Boarded) => Some("boarded up"),
+        LotPhase::Standing(Decay::Derelict) => Some("derelict"),
+        LotPhase::Cleared => Some("cleared"),
     }
 }
 
@@ -899,7 +953,7 @@ mod app_tests {
     }
 
     #[test]
-    fn unserved_land_is_countryside_not_blank_ground() {
+    fn unserved_land_is_open_country_with_the_odd_farm() {
         let mut app = test_app();
         settle(&mut app, 6);
 
@@ -915,10 +969,16 @@ mod app_tests {
         let props = count::<RuralProp>(&mut app);
         assert!(eligible > 0, "the test map has no buildable land");
         assert!(
-            props >= eligible / 4,
-            "only {props} props across {eligible} rural tiles — that reads as unfinished"
+            props > 0,
+            "unserved land needs *something* on it, or it reads as unfinished"
         );
-        assert!(props < eligible, "countryside needs air, not wall-to-wall props");
+        // The playtest verdict on the old scatter was "extremely numerous …
+        // spread out all over the map". Open country is the point: a town can
+        // only read as a place if there is empty land around it.
+        assert!(
+            props <= eligible / 8,
+            "{props} props across {eligible} rural tiles carpets the map"
+        );
     }
 
     #[test]

@@ -131,7 +131,7 @@ pub fn rebuild_settings_panel(
                     }
                     spawn_button(strip, button(MenuAction::CloseSettings), "Back");
                 });
-                spawn_note(body, "← → change   Tab next tab   Esc closes");
+                spawn_note(body, "<- -> change   Tab next tab   Esc closes");
             });
         });
 }
@@ -186,7 +186,7 @@ fn spawn_controls_tab(
         for action in actions {
             let capturing = panel.rebinding == Some(action);
             let value = if capturing {
-                "press a key…".to_string()
+                "press a key...".to_string()
             } else {
                 settings.controls.key_for(action).label()
             };

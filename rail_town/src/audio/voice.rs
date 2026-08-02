@@ -129,7 +129,7 @@ impl VoiceParams {
         tone,
         set_tone,
         tone,
-        "Brightness. Distance and altitude close this down; it is the low-pass the brief asks for in §7."
+        "Brightness. Distance and altitude close this down; it is the low-pass the brief asks for in S7."
     );
     param!(
         motion,
@@ -841,7 +841,7 @@ mod tests {
         assert!(quietest > 0.004, "a bed is effectively silent: {levels:?}");
         assert!(
             loudest / quietest < 12.0,
-            "beds span {:.1}x — too wide: {levels:?}",
+            "beds span {:.1}x - too wide: {levels:?}",
             loudest / quietest
         );
     }
@@ -942,6 +942,6 @@ mod tests {
             worst = worst.max((s - prev).abs());
             prev = s;
         }
-        assert!(worst < 0.08, "music produced a {worst} step — that is a transient");
+        assert!(worst < 0.08, "music produced a {worst} step - that is a transient");
     }
 }

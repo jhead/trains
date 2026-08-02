@@ -142,7 +142,20 @@ mod tests {
     fn test_app() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        app.insert_resource(generate_map(24, 24, 42));
+        // Carve a lake rather than trusting the generator to supply one. Maps
+        // are deliberately land-dominated now — many have no open water at all
+        // — so a generated test map is not a reliable source of water tiles.
+        let mut map = generate_map(24, 24, 42);
+        for y in 16..22 {
+            for x in 2..8 {
+                if let Some(tile) = map.get_mut(TileCoord { x, y }) {
+                    tile.water = true;
+                    tile.kind = rail_map::TerrainKind::Water;
+                    tile.height = -3;
+                }
+            }
+        }
+        app.insert_resource(map);
         app.insert_resource(SimClock::default());
 
         let mut density = TownDensity::default();

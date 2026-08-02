@@ -503,7 +503,7 @@ mod tests {
         let mut lines = LineRegistry::new();
         let (a, b) = (StationId(1), StationId(2));
         let id = lines
-            .create("Ashford — Brackwell".into(), vec![a, b])
+            .create("Ashford - Brackwell".into(), vec![a, b])
             .expect("line");
         assert_eq!(line_using(&lines, a), Some(id));
         assert_eq!(line_using(&lines, StationId(9)), None);

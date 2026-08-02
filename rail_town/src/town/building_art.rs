@@ -9,9 +9,16 @@
 //! # Cell geometry
 //!
 //! A tile is 32 texels; a tile holds four 16×16 lots. Each atlas cell is
-//! [`CELL_W`] × [`CELL_H`] = 16 × 32: the bottom 16 rows are the lot footprint
-//! and the building draws upward past it, which is the fake front face from
-//! brief 01 §6.1. Cell-local coordinates put `(0, 0)` at the **bottom left**.
+//! [`CELL_W`] × [`CELL_H`] = 24 × 48, which is deliberately **larger than the
+//! lot it stands on**: a building fills its lot, overhangs it a little, and
+//! draws well upward past the tile boundary — the fake front face from brief 01
+//! §6.1. Cell-local coordinates put `(0, 0)` at the **bottom left**.
+//!
+//! The cell was 16 × 32 and the playtest verdict was blunt: at default zoom a
+//! player could not tell what anything was. Silhouette legibility beats density
+//! of detail at this resolution, so buildings are drawn big enough that a
+//! cottage, a shopfront and a warehouse are three different shapes at a glance,
+//! and the town carries fewer of them (see `lots.rs` and the sim's falloff).
 //!
 //! # Frame layout
 //!
@@ -45,10 +52,12 @@ use crate::palette::{
 
 // ─ Cell + atlas geometry ───────────────────────────────
 
-/// Texel width of one lot cell (a lot is 16 × 16 of ground).
-pub const CELL_W: u32 = 16;
-/// Texel height of one lot cell; the top 16 rows are the fake front face.
-pub const CELL_H: u32 = 32;
+/// Texel width of one lot cell (a lot is 16 × 16 of ground; a building may
+/// overhang it, and most do).
+pub const CELL_W: u32 = 24;
+/// Texel height of one lot cell; everything above the footprint is the fake
+/// front face, so a tall building genuinely towers over the row behind it.
+pub const CELL_H: u32 = 48;
 /// Cells per atlas row.
 const ATLAS_COLS: u32 = 16;
 
@@ -181,6 +190,36 @@ impl BuildingKind {
     pub fn scaffold_class(self) -> usize {
         self.tier as usize
     }
+
+    /// Plain name, for hover and the inspector.
+    ///
+    /// Brief 05 §1: the hover tier answers *what is this?* — so the answer has
+    /// to be a word a player already owns, not a tier number. ASCII only; the
+    /// shipped font has no glyph for anything else.
+    pub fn label(self) -> &'static str {
+        match (self.family, self.tier.min(3)) {
+            (Family::Town, 0) => "Cottage",
+            (Family::Town, 1) => "Townhouse",
+            (Family::Town, 2) => "Shopfront",
+            (Family::Town, _) => "Block",
+            (Family::Works, 0) => "Shed",
+            (Family::Works, 1) => "Workshop",
+            (Family::Works, 2) => "Goods Yard",
+            (Family::Works, _) => "Warehouse",
+        }
+    }
+}
+
+/// Plain name for a rural prop, by its offset from [`FRAME_RURAL`].
+pub fn rural_label(prop: usize) -> &'static str {
+    match prop {
+        0 => "Ploughed Field",
+        1 => "Haystack",
+        2 => "Hedgerow",
+        3 => "Farm Lane",
+        4 => "Dry-Stone Wall",
+        _ => "Old Oak",
+    }
 }
 
 /// One window opening in cell-local texels, `y` measured from the cell bottom.
@@ -202,9 +241,45 @@ pub struct BuildingAtlas {
     pub image: Handle<Image>,
     pub layout: Handle<TextureAtlasLayout>,
     windows: Vec<Vec<WinRect>>,
+    bounds: Vec<Option<[i32; 4]>>,
 }
 
 impl BuildingAtlas {
+    /// Drawn bounds of `frame` as cell-local `(x0, y0, x1, y1)`, inclusive,
+    /// with `y` measured up from the cell bottom.
+    ///
+    /// Baked with the art, so hover and picking hug the actual silhouette
+    /// instead of the cell — most of a cell is empty sky.
+    pub fn frame_bounds(&self, frame: usize) -> Option<(i32, i32, i32, i32)> {
+        self.bounds
+            .get(frame)
+            .copied()
+            .flatten()
+            .map(|b| (b[0], b[1], b[2], b[3]))
+    }
+
+    /// World rectangle covered by `frame`'s drawn texels, for a sprite anchored
+    /// [`Anchor::BOTTOM_CENTER`](bevy::sprite::Anchor) at `base`.
+    ///
+    /// Cell geometry stays in this module: callers ask where the building *is*,
+    /// not how the atlas is laid out.
+    pub fn frame_rect(&self, frame: usize, base: Vec2, flip_x: bool) -> Option<Rect> {
+        let (x0, y0, x1, y1) = self.frame_bounds(frame)?;
+        let cell = CELL_W as i32;
+        let (left, right) = if flip_x {
+            (cell - 1 - x1, cell - 1 - x0)
+        } else {
+            (x0, x1)
+        };
+        let origin = base.x - CELL_W as f32 / 2.0;
+        Some(Rect::new(
+            origin + left as f32,
+            base.y + y0 as f32,
+            origin + right as f32 + 1.0,
+            base.y + y1 as f32 + 1.0,
+        ))
+    }
+
     /// Window openings for `frame`, in cell-local texels from the cell bottom.
     ///
     /// Empty for effect frames and for frames whose windows are boarded over.
@@ -250,10 +325,12 @@ pub fn bake_atlas(
     let ah = rows * CELL_H;
     let mut data = vec![0u8; (aw * ah * 4) as usize];
     let mut windows = vec![Vec::new(); (ATLAS_COLS * rows) as usize];
+    let mut bounds = vec![None; (ATLAS_COLS * rows) as usize];
 
     for (frame, slot) in windows.iter_mut().enumerate().take(FRAME_COUNT) {
         let (canvas, wins) = draw_frame(frame);
         blit(&mut data, aw, frame as u32, &canvas);
+        bounds[frame] = canvas.bounds().map(|(x0, y0, x1, y1)| [x0, y0, x1, y1]);
         *slot = wins;
     }
 
@@ -280,6 +357,7 @@ pub fn bake_atlas(
         image: images.add(image),
         layout: layouts.add(layout),
         windows,
+        bounds,
     }
 }
 
@@ -468,10 +546,21 @@ fn draw_wall(c: &mut Canvas, x: i32, y: i32, w: i32, h: i32, r: Ramp) {
     c.vline(x + w - 1, y, h, r.d);
 }
 
+/// A window opening, with a sill under it and a lintel over it.
+///
+/// The sill row matters beyond decoration: the night layer spills light onto
+/// it, so it must always be a drawn texel. The lintel uses `tint`, so it can
+/// never push the silhouette outward.
 fn draw_window(c: &mut Canvas, x: i32, y: i32, w: i32, h: i32, sill: [u8; 4], wins: &mut Vec<WinRect>) {
     c.rect(x, y, w, h, glass());
     c.set(x, y + h - 1, glint());
+    if w >= 3 {
+        c.set(x + 1, y + h - 1, glint());
+    }
     c.hline(x, y - 1, w, sill);
+    for i in 0..w {
+        c.tint(x + i, y + h, rgba(OUTLINE));
+    }
     wins.push(WinRect {
         x: x.clamp(0, W - 1) as u8,
         y: y.clamp(0, CELL_H as i32 - 1) as u8,
@@ -485,11 +574,17 @@ fn draw_door(c: &mut Canvas, x: i32, y: i32, w: i32, h: i32) {
     c.rect(x, y, w, h, t.d);
     c.vline(x, y, h, t.m);
     c.hline(x, y + h - 1, w, t.m);
+    if w >= 3 && h >= 4 {
+        c.set(x + w - 2, y + h / 2, t.l);
+    }
 }
 
 /// Pitched roof over a `w`-wide wall whose top row is `y - 1`. Returns the ridge row.
+///
+/// The eaves overhang two texels each side — at this scale that overhang is
+/// most of what says *roof* rather than *box with a hat*.
 fn draw_pitch(c: &mut Canvas, x: i32, y: i32, w: i32, rows: i32, r: Ramp) -> i32 {
-    c.hline(x - 1, y, w + 2, r.d);
+    c.hline(x - 2, y, w + 4, r.d);
     for i in 1..rows {
         let rw = (w - 2 * (i - 1)).max(1);
         let rx = x + (i - 1);
@@ -507,216 +602,267 @@ fn draw_pitch(c: &mut Canvas, x: i32, y: i32, w: i32, rows: i32, r: Ramp) -> i32
 /// Flat roof cap. Returns the row above the parapet.
 fn draw_parapet(c: &mut Canvas, x: i32, y: i32, w: i32, r: Ramp) -> i32 {
     c.hline(x - 1, y, w + 2, r.d);
-    c.hline(x - 1, y + 1, w + 2, r.l);
-    y + 2
+    c.hline(x - 1, y + 1, w + 2, r.m);
+    c.hline(x - 1, y + 2, w + 2, r.l);
+    y + 3
 }
 
 fn draw_chimney(c: &mut Canvas, x: i32, y: i32, h: i32) {
     let p = plaster();
-    c.rect(x, y, 2, h, p.d);
+    c.rect(x, y, 3, h, p.d);
     c.vline(x, y, h, p.m);
-    c.hline(x, y + h - 1, 2, rgba(OUTLINE));
+    c.hline(x - 1, y + h - 2, 5, p.d);
+    c.hline(x - 1, y + h - 1, 5, rgba(OUTLINE));
 }
 
 fn draw_stack(c: &mut Canvas, x: i32, y: i32, h: i32) {
     let s = stone();
-    c.rect(x, y, 2, h, s.m);
-    c.vline(x + 1, y, h, s.d);
-    c.hline(x, y + h - 1, 2, s.l);
+    c.rect(x, y, 3, h, s.m);
+    c.vline(x, y, h, s.l);
+    c.vline(x + 2, y, h, s.d);
+    let mut band = y + 3;
+    while band < y + h - 2 {
+        c.hline(x, band, 3, s.d);
+        band += 4;
+    }
+    c.hline(x - 1, y + h - 1, 5, s.l);
 }
 
 // ─ Town family ─────────────────────────────────────────
 
 /// Tier 1 — single storey, pitched roof, one chimney.
+///
+/// Reads as a *roof*: the pitch is nearly as tall as the wall under it, and the
+/// chimney stands well clear. Low and wide, so it can never be mistaken for the
+/// tall narrow townhouse beside it.
 fn cottage(c: &mut Canvas, v: u8, roof: Ramp, squash: i32, wins: &mut Vec<WinRect>) {
     let v = v as i32;
-    let w = 9 + (v % 2) * 2;
-    let h = (6 + v / 2 - squash).max(4);
+    let w = 15 + (v % 2) * 2;
+    let h = (9 + v / 2 - squash * 2).max(7);
     let x = (W - w) / 2;
     let p = plaster();
+    let t = timber();
 
     ground_shadow(c, x, w);
     draw_wall(c, x, 1, w, h, p);
-    c.hline(x, 1, w, timber().d);
+    c.hline(x, 1, w, t.d);
 
-    let top = 1 + h;
-    let wy = top - 3;
-    draw_window(c, x + 1, wy, 2, 2, p.l, wins);
-    draw_window(c, x + w - 3, wy, 2, 2, p.l, wins);
+    let dx = x + w / 2 - 1;
+    draw_door(c, dx, 2, 3, 5);
+    c.hline(dx - 1, 1, 5, p.l);
 
-    let dx = x + w / 2 - 1 + if v >= 2 { 1 } else { 0 };
-    draw_door(c, dx, 2, 2, 3);
-    if v >= 2 {
-        c.hline(dx - 1, 5, 4, timber().m);
+    draw_window(c, x + 2, 4, 3, 3, p.l, wins);
+    draw_window(c, x + w - 5, 4, 3, 3, p.l, wins);
+
+    if v >= 2 && h >= 9 {
+        // Porch hood over the door.
+        c.hline(dx - 2, 8, 7, t.d);
+        c.hline(dx - 2, 7, 7, t.m);
     }
 
-    let ridge = draw_pitch(c, x, top, w, 4, roof);
-    let chim = if v < 2 { x + 1 } else { x + w - 3 };
-    draw_chimney(c, chim, top, ridge - top + 3);
+    let top = 1 + h;
+    let ridge = draw_pitch(c, x, top, w, 7, roof);
+    if v >= 2 {
+        // Dormer: a small gable let into the roof face.
+        let gx = x + w / 2 - 1;
+        c.rect(gx - 1, ridge - 4, 5, 4, roof.d);
+        draw_window(c, gx, ridge - 3, 2, 2, roof.m, wins);
+    }
+    let chim = if v < 2 { x + 1 } else { x + w - 4 };
+    draw_chimney(c, chim, top, ridge - top + 5);
 }
 
 /// Tier 2 — two storeys, shared party walls, small yard.
+///
+/// Narrower and much taller than a cottage, with a string course splitting the
+/// two storeys and a party wall down each edge: a row of these reads as a
+/// terrace, which is exactly what a thickening district should look like.
 fn townhouse(c: &mut Canvas, v: u8, roof: Ramp, squash: i32, wins: &mut Vec<WinRect>) {
     let v = v as i32;
-    let w = 12 + (v % 2) * 2;
-    let h = (13 + v / 2 - squash).max(9);
+    let w = 13 + (v % 2) * 2;
+    let h = (20 + (v / 2) * 2 - squash * 3).max(15);
     let x = (W - w) / 2;
     let p = plaster();
     let t = timber();
 
     // Yard: a low garden wall reaching past the footprint, with tufts.
-    c.hline(x - 1, 0, w + 2, t.m);
+    c.hline(x - 2, 0, w + 4, t.m);
     let mut i = 0;
-    while i < w + 2 {
-        c.set(x - 1 + i, 0, t.d);
+    while i < w + 4 {
+        c.set(x - 2 + i, 0, t.d);
         i += 3;
     }
-    c.set(x - 1, 1, rgba(GRASS_D));
-    c.set(x + w, 1, rgba(GRASS_D));
+    c.set(x - 2, 1, rgba(GRASS_D));
+    c.set(x + w + 1, 1, rgba(GRASS_D));
 
     draw_wall(c, x, 1, w, h, p);
     // Shared walls: the party wall on each side is what makes a terrace read.
     c.vline(x, 1, h, t.d);
     c.vline(x + w - 1, 1, h, t.d);
+    c.hline(x, 1, w, t.d);
 
-    draw_door(c, x + w / 2 - 1, 2, 2, 4);
+    draw_door(c, x + w / 2 - 1, 2, 3, 6);
+    draw_window(c, x + 2, 4, 3, 4, p.l, wins);
+    draw_window(c, x + w - 5, 4, 3, 4, p.l, wins);
 
-    let cols = if w >= 14 { 3 } else { 2 };
-    let span = w - 5;
-    let course = h - 4;
+    // String course between the storeys.
+    let course = h / 2 + 2;
     c.hline(x, course, w, p.d);
-    for row in 0..2 {
-        let wy = if row == 0 { 6 } else { h - 3 };
-        for ci in 0..cols {
-            let wx = x + 2 + if cols > 1 { ci * span / (cols - 1) } else { 0 };
-            draw_window(c, wx, wy, 2, 3, p.l, wins);
-        }
+    c.hline(x, course + 1, w, p.l);
+
+    let cols = if w >= 15 { 3 } else { 2 };
+    let span = w - 7;
+    for ci in 0..cols {
+        let wx = x + 2 + ci * span / (cols - 1).max(1);
+        draw_window(c, wx, course + 3, 3, 4, p.l, wins);
     }
 
     let top = 1 + h;
     if v >= 2 {
-        // Mansard: two shallow courses then a flat cap.
-        c.hline(x - 1, top, w + 2, roof.d);
-        c.hline(x, top + 1, w, roof.m);
+        // Mansard: a shallow course with dormers, then a flat cap.
+        c.hline(x - 2, top, w + 4, roof.d);
+        c.hline(x - 1, top + 1, w + 2, roof.m);
+        for k in 0..2 {
+            draw_window(c, x + 3 + k * (w - 8), top, 2, 2, roof.d, wins);
+        }
         draw_parapet(c, x + 1, top + 2, w - 2, roof);
-        draw_chimney(c, x + 1, top, 4);
+        draw_chimney(c, x + 1, top, 8);
     } else {
-        let ridge = draw_pitch(c, x, top, w, 3, roof);
-        draw_chimney(c, x + 1, top, ridge - top + 2);
+        let ridge = draw_pitch(c, x, top, w, 5, roof);
+        draw_chimney(c, x + 1, top, ridge - top + 5);
     }
 }
 
 /// Tier 3 — ground-floor commerce, awning, sign.
+///
+/// The awning is the tell. It projects two texels past the wall on both sides
+/// with a toothed lower edge, so the silhouette breaks outward at first-floor
+/// height and nothing else in the town does that.
 fn shopfront(c: &mut Canvas, v: u8, roof: Ramp, squash: i32, wins: &mut Vec<WinRect>) {
     let v = v as i32;
-    let w = 12 + (v % 2) * 2;
-    let h = (17 + v / 2 - squash).max(12);
+    let w = 16 + (v % 2) * 2;
+    let h = (28 + (v / 2) * 2 - squash * 3).max(22);
     let x = (W - w) / 2;
     let p = plaster();
+    let t = timber();
 
     ground_shadow(c, x, w);
     draw_wall(c, x, 1, w, h, p);
-    c.hline(x, 1, w, timber().d);
-
     // Shop glass runs almost the full frontage — one wide, warm pane at night.
     // It sits on a dark stall riser, not a bright plinth: the ground floor is
     // where the light comes from after dusk, so it stays quiet by day.
-    let gx = x + 1;
-    let gw = w - 5;
-    draw_window(c, gx, 2, gw, 4, timber().d, wins);
-    let mut m = gx + 3;
-    while m < gx + gw {
-        c.vline(m, 2, 4, p.m);
-        m += 3;
-    }
-    draw_door(c, x + w - 4, 2, 3, 5);
+    c.rect(x, 1, w, 2, t.d);
 
-    // Awning, projecting one texel past the wall on each side. Striped, but
-    // kept off the light step: contrast is a budget and track owns it.
-    for px in (x - 1)..(x + w + 1) {
-        let stripe = if (px + v).rem_euclid(2) == 0 {
-            roof.m
-        } else {
-            p.m
-        };
-        c.set(px, 7, stripe);
-        c.set(px, 6, roof.d);
+    let gx = x + 1;
+    let gw = w - 7;
+    draw_window(c, gx, 3, gw, 5, t.d, wins);
+    let mut m = gx + 4;
+    while m < gx + gw - 1 {
+        c.vline(m, 3, 5, p.m);
+        m += 4;
+    }
+    draw_door(c, x + w - 5, 3, 4, 6);
+
+    // Awning, striped but kept off the light step: contrast is a budget and
+    // track owns it.
+    let ay = 10;
+    for px in (x - 2)..(x + w + 2) {
+        c.set(px, ay, roof.d);
+        c.set(
+            px,
+            ay + 1,
+            if (px + v).rem_euclid(2) == 0 { roof.m } else { p.m },
+        );
+        if px.rem_euclid(2) == 0 {
+            c.set(px, ay - 1, roof.d);
+        }
     }
 
     // Sign board with lettering dashes.
     let sx = x + 2;
     let sw = w - 4;
-    c.rect(sx, 8, sw, 2, timber().d);
+    c.rect(sx, ay + 2, sw, 3, t.d);
+    c.hline(sx, ay + 4, sw, t.m);
     let mut lx = sx + 1;
     while lx < sx + sw - 1 {
-        c.set(lx, 9, timber().l);
+        c.set(lx, ay + 3, t.l);
         lx += 2;
     }
 
-    // Two storeys of lodgings over the shop: a tall row, then attic panes.
-    for ci in 0..3 {
-        let wx = x + 1 + ci * ((w - 4) / 2);
-        if 11 + 3 <= h {
-            draw_window(c, wx, 11, 2, 3, p.l, wins);
-        }
-        if 15 + 2 <= h {
-            draw_window(c, wx, 15, 2, 2, p.l, wins);
+    // Two storeys of lodgings over the shop.
+    for row in 0..2 {
+        let wy = ay + 7 + row * 6;
+        if wy + 4 < 1 + h {
+            for ci in 0..3 {
+                let wx = x + 2 + ci * ((w - 7) / 2);
+                draw_window(c, wx, wy, 3, 4, p.l, wins);
+            }
         }
     }
 
     let top = 1 + h;
     if v >= 2 {
-        draw_parapet(c, x, top, w, roof);
-        c.rect(x + 2, top + 2, 3, 2, roof.m);
+        let above = draw_parapet(c, x, top, w, roof);
+        c.rect(x + 3, above, 4, 3, roof.m);
+        c.hline(x + 3, above + 2, 4, roof.l);
     } else {
-        draw_pitch(c, x, top, w, 3, roof);
+        let ridge = draw_pitch(c, x, top, w, 5, roof);
+        draw_chimney(c, x + w - 5, top, ridge - top + 4);
     }
 }
 
 /// Tier 4 — three to four storeys, flat roof, courtyard entry.
+///
+/// The tallest thing a district can build: a flat-capped slab with a regular
+/// window grid and a carriage arch punched through the ground floor.
 fn block(c: &mut Canvas, v: u8, roof: Ramp, squash: i32, wins: &mut Vec<WinRect>) {
     let v = v as i32;
-    let w = 13 + (v % 2) * 2;
-    let h = (21 + (v / 2) * 3 - squash).max(15);
+    let w = 18 + (v % 2) * 2;
+    let h = (36 + (v / 2) * 3 - squash * 3).max(28);
     let x = (W - w) / 2;
     let p = plaster();
 
     ground_shadow(c, x, w);
     draw_wall(c, x, 1, w, h, p);
-    c.hline(x, 1, w, rgba(BALLAST_M));
+    c.rect(x, 1, w, 3, rgba(BALLAST_M));
 
     // Carriage arch through to the courtyard.
-    let ex = x + w / 2 - 2;
-    c.rect(ex, 1, 4, 6, rgba(OUTLINE));
-    c.hline(ex, 6, 4, p.l);
-    c.hline(ex, 1, 4, rgba(BALLAST_M));
+    let ex = x + w / 2 - 3;
+    c.rect(ex, 1, 6, 8, rgba(OUTLINE));
+    c.hline(ex, 8, 6, p.l);
+    c.hline(ex + 1, 9, 4, p.d);
+    c.hline(ex, 1, 6, rgba(BALLAST_M));
 
     // Storey band, then a regular window grid above the arch.
-    c.hline(x, 7, w, p.d);
-    let cols = [x + 2, x + w / 2 - 1, x + w - 4];
-    let mut wy = 9;
-    while wy + 2 <= h {
+    c.hline(x, 10, w, p.d);
+    c.hline(x, 11, w, p.l);
+    let cols = [x + 2, x + w / 2 - 2, x + w - 6];
+    let mut wy = 14;
+    while wy + 4 <= h {
         for cx in cols {
-            draw_window(c, cx, wy, 2, 2, p.l, wins);
+            draw_window(c, cx, wy, 4, 4, p.l, wins);
         }
-        wy += 5;
+        wy += 7;
     }
 
     let top = 1 + h;
     let above = draw_parapet(c, x, top, w, roof);
     // Roof furniture: stair head one side, vent the other.
-    c.rect(x + 2, above, 3, 2, roof.m);
-    c.hline(x + 2, above + 1, 3, roof.l);
-    draw_stack(c, x + w - 4, above, 3);
+    c.rect(x + 2, above, 5, 3, roof.m);
+    c.hline(x + 2, above + 2, 5, roof.l);
+    draw_stack(c, x + w - 6, above, 4);
 }
 
 // ─ Works family ────────────────────────────────────────
 
-/// Works tier 1 — a timber shed with a corrugated roof.
+/// Works tier 1 — a timber shed under a leaning corrugated roof.
+///
+/// The shortest thing in the game, and the only roof that slopes one way:
+/// wide, low and lopsided, so it never reads as a house.
 fn shed(c: &mut Canvas, v: u8, roof: Ramp, squash: i32, wins: &mut Vec<WinRect>) {
     let v = v as i32;
-    let w = 10 + (v % 2) * 2;
-    let h = (5 + v / 2 - squash).max(4);
+    let w = 18 + (v % 2) * 2;
+    let h = (8 + v / 2 - squash * 2).max(6);
     let x = (W - w) / 2;
     let t = timber();
 
@@ -728,32 +874,57 @@ fn shed(c: &mut Canvas, v: u8, roof: Ramp, squash: i32, wins: &mut Vec<WinRect>)
         px += 3;
     }
 
-    draw_door(c, x + w / 2 - 2, 1, 4, h - 1);
-    // Every building carries at least one pane, so every building can light up.
-    draw_window(c, x + 1, h - 2, 2, 2, t.l, wins);
+    // Big braced barn door, pale against the timber wall — a shed is mostly
+    // door, and that is what says *goods* rather than *home*.
+    let dw = 8;
+    let dx = x + w / 2 - dw / 2;
+    let dh = h - 1;
+    c.rect(dx, 1, dw, dh, t.m);
+    c.vline(dx, 1, dh, t.l);
+    c.vline(dx + dw - 1, 1, dh, t.l);
+    c.hline(dx, dh, dw, t.l);
+    c.vline(dx + dw / 2, 1, dh, t.d);
+    for i in 0..dh {
+        let run = i * (dw / 2 - 1) / dh.max(1);
+        c.set(dx + 1 + run, 1 + i, t.l);
+        c.set(dx + dw - 2 - run, 1 + i, t.l);
+    }
 
-    // Corrugation: alternating columns rather than a flat plane.
+    // Every building carries at least one pane, so every building can light up.
+    draw_window(c, x + 1, h - 3, 3, 2, t.l, wins);
+
+    // Mono-pitch roof, leaning by variant. Corrugated by alternating columns
+    // rather than by a flat plane.
     let top = 1 + h;
-    c.hline(x - 1, top, w + 2, roof.d);
-    for px in (x - 1)..(x + w + 1) {
-        c.set(px, top + 1, if px.rem_euclid(2) == 0 { roof.m } else { roof.l });
+    let span = w + 4;
+    for i in 0..span {
+        let px = x - 2 + i;
+        let step = (i * 4) / span;
+        let rise = if v % 2 == 0 { step } else { 3 - step };
+        c.vline(px, top, rise + 2, roof.d);
+        c.set(
+            px,
+            top + rise + 1,
+            if px.rem_euclid(2) == 0 { roof.l } else { roof.m },
+        );
     }
 }
 
 /// Works tier 2 — sawtooth workshop with a stack.
 fn workshop(c: &mut Canvas, v: u8, roof: Ramp, squash: i32, wins: &mut Vec<WinRect>) {
     let v = v as i32;
-    let w = 12 + (v % 2) * 2;
-    let h = (8 + v / 2 - squash).max(6);
+    let w = 18 + (v % 2) * 2;
+    let h = (15 + v / 2 - squash * 3).max(11);
     let x = (W - w) / 2;
     let p = plaster();
+    let t = timber();
 
     ground_shadow(c, x, w);
     draw_wall(c, x, 1, w, h, p);
-    c.hline(x, 1, w, timber().d);
-    draw_door(c, x + 1, 2, 4, 5);
+    c.rect(x, 1, w, 2, t.d);
+    draw_door(c, x + 1, 2, 5, 7);
     for ci in 0..2 {
-        draw_window(c, x + 6 + ci * 3, 3, 2, 3, p.l, wins);
+        draw_window(c, x + 8 + ci * 4, 4, 3, 4, p.l, wins);
     }
 
     // Two sawtooth bays — a glazed vertical face, then a slope falling away.
@@ -763,104 +934,120 @@ fn workshop(c: &mut Canvas, v: u8, roof: Ramp, squash: i32, wins: &mut Vec<WinRe
     c.hline(x - 1, top - 1, w + 2, roof.d);
     for tooth in 0..2 {
         let tx = x + tooth * bay;
-        c.vline(tx, top, 4, glass());
-        c.vline(tx + 1, top, 4, glass());
+        c.rect(tx, top, 3, 6, glass());
+        c.vline(tx, top, 6, glint());
         wins.push(WinRect {
             x: tx.clamp(0, W - 1) as u8,
             y: top as u8,
-            w: 2,
-            h: 4,
+            w: 3,
+            h: 6,
         });
-        for i in 2..bay {
-            let fall = ((i - 1) * 3 / (bay - 2).max(1)).min(3);
-            let colh = 4 - fall;
+        for i in 3..bay {
+            let fall = ((i - 2) * 5 / (bay - 3).max(1)).min(5);
+            let colh = 6 - fall;
             c.vline(tx + i, top, colh, roof.m);
             c.set(tx + i, top + colh - 1, roof.l);
         }
     }
-    draw_stack(c, x + w - 3, top, 6);
+    draw_stack(c, x + w - 4, top, 10);
 }
 
-/// Works tier 3 — a fenced yard of stacked crates around a small hut.
+/// Works tier 3 — a fenced yard of stacked crates under a gantry.
+///
+/// Mostly *open*: a low fence, crates, and a gantry standing over them. A yard
+/// is the one works building that is not a solid mass, which is what separates
+/// it from the warehouse at a glance.
 fn yard(c: &mut Canvas, v: u8, roof: Ramp, squash: i32, wins: &mut Vec<WinRect>) {
     let v = v as i32;
-    let w = 14;
+    let w = 20;
     let x = (W - w) / 2;
     let t = timber();
     let mirror = v % 2;
-    let hut_h = (5 + v / 2 - squash).max(4);
+    let hut_h = (8 + v / 2 - squash * 2).max(6);
 
     ground_shadow(c, x, w);
 
     // Perimeter fence.
-    c.hline(x, 4, w, t.m);
+    c.hline(x, 6, w, t.m);
+    c.hline(x, 5, w, t.d);
     let mut px = x;
     while px < x + w {
-        c.vline(px, 1, 4, t.d);
-        px += 3;
+        c.vline(px, 1, 6, t.d);
+        px += 4;
     }
 
     // Hut at one end, mirrored by variant.
-    let hx = if mirror == 0 { x } else { x + w - 6 };
+    let hx = if mirror == 0 { x } else { x + w - 8 };
     let p = plaster();
-    draw_wall(c, hx, 1, 6, hut_h, p);
-    draw_door(c, hx + 2, 2, 2, 3);
-    draw_window(c, hx + (if mirror == 0 { 4 } else { 1 }), hut_h - 1, 2, 2, p.l, wins);
-    draw_pitch(c, hx, 1 + hut_h, 6, 3, roof);
+    draw_wall(c, hx, 1, 8, hut_h, p);
+    draw_door(c, hx + 3, 2, 3, 4);
+    draw_window(
+        c,
+        hx + if mirror == 0 { 5 } else { 1 },
+        hut_h - 3,
+        2,
+        2,
+        p.l,
+        wins,
+    );
+    draw_pitch(c, hx, 1 + hut_h, 8, 4, roof);
 
     // Crate stacks — height and side both move with the variant.
-    let base = if mirror == 0 { x + 7 } else { x };
+    let base = if mirror == 0 { x + 9 } else { x };
     for k in 0..2 {
-        let cx = base + k * 4;
+        let cx = base + k * 5;
         let stack = 2 + (v / 2) + ((v + k) % 2);
         for s in 0..stack {
-            let cy = 1 + s * 3;
-            c.rect(cx, cy, 3, 3, t.m);
-            c.hline(cx, cy + 2, 3, t.l);
-            c.vline(cx + 2, cy, 3, t.d);
-            c.hline(cx, cy, 3, t.d);
+            let cy = 1 + s * 4;
+            c.rect(cx, cy, 4, 4, t.m);
+            c.hline(cx, cy + 3, 4, t.l);
+            c.vline(cx + 3, cy, 4, t.d);
+            c.hline(cx, cy, 4, t.d);
         }
     }
 
-    // Gantry standing in the yard, legs on the ground, hook over the crates.
-    c.vline(base - 1, 1, 16, t.d);
-    c.vline(base + 4, 1, 16, t.d);
-    c.hline(base - 1, 17, 6, t.d);
-    c.hline(base - 1, 16, 6, t.m);
-    c.vline(base + 1, 14, 3, t.m);
-    c.hline(base, 13, 3, t.l);
+    // Gantry standing over the crates, legs on the ground, hook hanging.
+    let gx = base - 1;
+    c.vline(gx, 1, 27, t.d);
+    c.vline(gx + 10, 1, 27, t.d);
+    c.hline(gx, 27, 11, t.m);
+    c.hline(gx, 28, 11, t.d);
+    c.vline(gx + 5, 23, 4, t.m);
+    c.hline(gx + 4, 22, 3, t.l);
 }
 
-/// Works tier 4 — warehouse with loading doors, clerestory and stack.
+/// Works tier 4 — warehouse with twin loading doors, clerestory and stack.
 fn warehouse(c: &mut Canvas, v: u8, roof: Ramp, squash: i32, wins: &mut Vec<WinRect>) {
     let v = v as i32;
-    let w = 14 + (v % 2);
-    let h = (13 + (v / 2) * 2 - squash).max(10);
+    let w = 20 + (v % 2) * 2;
+    let h = (24 + (v / 2) * 2 - squash * 3).max(18);
     let x = (W - w) / 2;
     let p = plaster();
+    let t = timber();
 
     ground_shadow(c, x, w);
     draw_wall(c, x, 1, w, h, p);
-    c.rect(x, 1, w, 2, rgba(BALLAST_M));
+    c.rect(x, 1, w, 3, rgba(BALLAST_M));
 
-    draw_door(c, x + 1, 1, 4, 7);
-    draw_door(c, x + w - 5, 1, 4, 7);
-    c.hline(x + 1, 8, 4, timber().l);
-    c.hline(x + w - 5, 8, 4, timber().l);
+    // Twin loading doors, each under a plank canopy.
+    draw_door(c, x + 2, 1, 6, 9);
+    draw_door(c, x + w - 8, 1, 6, 9);
+    c.hline(x + 1, 10, 8, t.l);
+    c.hline(x + w - 9, 10, 8, t.l);
+    c.hline(x, 11, w, p.d);
 
-    // Clerestory band — a run of small panes just under the eaves.
-    let cy = h - 3;
+    // Clerestory band — a run of panes just under the eaves.
+    let cy = h - 5;
     let mut px = x + 2;
-    while px + 1 < x + w - 2 {
-        draw_window(c, px, cy, 1, 2, p.l, wins);
-        px += 3;
+    while px + 2 < x + w - 2 {
+        draw_window(c, px, cy, 2, 3, p.l, wins);
+        px += 4;
     }
 
     let top = 1 + h;
-    draw_pitch(c, x, top, w, 3, roof);
-    c.rect(x + 3, top + 2, 2, 2, roof.d);
-    c.rect(x + w - 5, top + 2, 2, 2, roof.d);
-    draw_stack(c, x + w - 3, top, 6);
+    draw_pitch(c, x, top, w, 5, roof);
+    c.rect(x + 3, top + 3, 3, 2, roof.d);
+    draw_stack(c, x + w - 5, top, 11);
 }
 
 // ─ Decay passes ────────────────────────────────────────
@@ -1021,29 +1208,33 @@ fn apply_derelict(c: &mut Canvas, wins: &[WinRect], key: u32) {
 
 // ─ Effect frames ───────────────────────────────────────
 
-/// A surveyor's stake — tiny, easy to miss, the first hint of a build.
+/// A surveyor's stake — small, easy to miss, the first hint of a build.
 fn stake(c: &mut Canvas, v: usize) {
     let t = timber();
-    c.hline(6, 0, 4, rgba_a(OUTLINE, SHADOW_ALPHA));
-    c.vline(8, 1, 5, t.m);
-    c.set(8, 5, t.l);
+    c.hline(10, 0, 5, rgba_a(OUTLINE, SHADOW_ALPHA));
+    c.vline(12, 1, 8, t.m);
+    c.vline(11, 1, 8, t.d);
     if v == 0 {
-        c.hline(9, 5, 2, t.l);
+        c.hline(13, 7, 4, t.l);
+        c.hline(13, 8, 4, t.m);
     } else {
-        c.hline(6, 5, 2, t.l);
+        c.hline(8, 7, 4, t.l);
+        c.hline(8, 8, 4, t.m);
     }
     // Chalked plot corners.
-    for (x, y) in [(4, 1), (11, 1), (4, 2), (11, 2)] {
-        c.set(x, y, rgba(PLASTER_L));
+    for (x, y) in [(4, 1), (19, 1), (4, 3), (19, 3)] {
+        c.vline(x, y, 2, rgba(PLASTER_L));
     }
-    c.set(5, 1, rgba(GRASS_D));
-    c.set(10, 1, rgba(GRASS_D));
+    c.hline(5, 1, 3, rgba(PLASTER_L));
+    c.hline(16, 1, 3, rgba(PLASTER_L));
+    c.set(6, 2, rgba(GRASS_D));
+    c.set(17, 2, rgba(GRASS_D));
 }
 
 /// Scaffold for height class `class`, frame `f` (0 = going up, 1 = topped out).
 fn scaffold(c: &mut Canvas, class: usize, f: usize) {
-    let sh = [8, 13, 16, 22][class.min(3)];
-    let w = [10, 13, 13, 15][class.min(3)];
+    let sh = [13, 22, 30, 40][class.min(3)];
+    let w = [17, 15, 19, 21][class.min(3)];
     let x = (W - w) / 2;
     let t = timber();
     let p = plaster();
@@ -1057,19 +1248,21 @@ fn scaffold(c: &mut Canvas, class: usize, f: usize) {
 
     c.vline(x, 1, sh, t.m);
     c.vline(x + w - 1, 1, sh, t.m);
-    if class >= 2 {
+    if class >= 1 {
         c.vline(x + w / 2, 1, sh, t.m);
     }
 
-    let mut y = 4;
+    let mut y = 5;
     while y < sh {
         c.hline(x, y, w, t.l);
-        y += 4;
+        c.hline(x, y - 1, w, t.d);
+        y += 6;
     }
     if f == 1 {
         c.hline(x, sh, w, t.l);
+        c.hline(x - 1, sh + 1, w + 2, t.d);
         // Dust puff at the base.
-        for (dx, dy) in [(-2, 1), (-1, 2), (w, 1), (w + 1, 2), (w / 2, 1)] {
+        for (dx, dy) in [(-2, 1), (-2, 3), (-1, 2), (w + 1, 1), (w + 1, 3), (w, 2)] {
             c.set(x + dx, dy, rgba_a(PLASTER_L, 170));
         }
     }
@@ -1078,98 +1271,139 @@ fn scaffold(c: &mut Canvas, class: usize, f: usize) {
 /// Cleared lot: the foundation scar persists (brief 06 §3.2 step 4).
 fn scar(c: &mut Canvas, v: usize) {
     let s = stone();
-    let w = 9 + (v as i32) * 2;
+    let w = 15 + (v as i32) * 3;
     let x = (W - w) / 2;
 
     c.hline(x - 1, 0, w + 2, rgba_a(OUTLINE, 110));
-    c.rect(x, 1, w, 4, rgba(GRASS_D));
+    c.rect(x, 1, w, 6, rgba(GRASS_D));
     c.hline(x, 1, w, s.d);
-    c.hline(x, 4, w, s.d);
-    c.vline(x, 1, 4, s.d);
-    c.vline(x + w - 1, 1, 4, s.d);
+    c.hline(x, 6, w, s.d);
+    c.vline(x, 1, 6, s.d);
+    c.vline(x + w - 1, 1, 6, s.d);
     let mut i = x;
     while i < x + w {
-        c.set(i, 4, s.m);
+        c.set(i, 6, s.m);
+        c.set(i, 1, s.m);
         i += 3;
     }
-    c.set(x + 2, 3, rgba(PLASTER_D));
-    c.set(x + w - 3, 2, rgba(PLASTER_D));
-    c.set(x + 3, 2, rgba(GRASS_M));
-    c.set(x + w - 4, 3, rgba(GRASS_M));
+    c.rect(x + 2, 3, 2, 2, rgba(PLASTER_D));
+    c.rect(x + w - 5, 2, 2, 2, rgba(PLASTER_D));
+    c.set(x + 5, 4, rgba(GRASS_M));
+    c.set(x + w - 7, 3, rgba(GRASS_M));
+    c.set(x + w / 2, 5, rgba(GRASS_M));
 }
 
 /// Countryside props — the unserved map must look *deliberately* rural.
+///
+/// These are rare now (see `lots.rs`): a handful of fields around a farm and
+/// the odd tree, not a prop on every tile. That means each one has to carry its
+/// own weight at a glance, so they are drawn at building scale.
 fn rural(c: &mut Canvas, which: usize) {
     let t = timber();
     match which {
-        // Ploughed field.
+        // Ploughed field: worked earth, furrow after furrow. Earth tones only —
+        // alternating earth and grass reads as planking, not as a field.
         0 => {
-            for row in 0..7 {
-                let col = if row % 2 == 0 {
-                    rgba(SAND_D)
-                } else {
-                    rgba(GRASS_D)
-                };
-                c.hline(1, 1 + row, 14, col);
+            c.rect(1, 1, 22, 8, rgba(SAND_D));
+            for row in 0..4 {
+                c.hline(1, 2 + row * 2, 22, rgba(SAND_M));
             }
-            c.vline(1, 1, 7, t.d);
-            c.vline(14, 1, 7, t.d);
+            for i in 0..11 {
+                let x = 1 + (world_hash(i, 7, 0x3F1E) % 22) as i32;
+                let y = 1 + (world_hash(i, 11, 0x3F1E) % 8) as i32;
+                c.tint(x, y, rgba(SAND_L));
+            }
+            // Headland: the unploughed strip the plough turns on.
+            c.hline(1, 1, 22, rgba(SAND_D));
+            c.hline(1, 9, 22, rgba(GRASS_D));
+            c.set(2, 10, rgba(GRASS_D));
+            c.set(21, 10, rgba(GRASS_D));
         }
         // Haystack.
         1 => {
-            c.hline(4, 0, 8, rgba_a(OUTLINE, 130));
-            c.hline(5, 1, 6, rgba(SAND_D));
-            c.hline(5, 2, 6, rgba(SAND_M));
-            c.hline(6, 3, 4, rgba(SAND_M));
-            c.hline(6, 4, 4, rgba(SAND_L));
-            c.hline(7, 5, 2, rgba(SAND_L));
-            c.set(7, 6, t.d);
+            c.hline(5, 0, 14, rgba_a(OUTLINE, 130));
+            c.hline(6, 1, 12, rgba(SAND_D));
+            c.hline(6, 2, 12, rgba(SAND_M));
+            c.hline(7, 3, 10, rgba(SAND_M));
+            c.hline(7, 4, 10, rgba(SAND_L));
+            c.hline(8, 5, 8, rgba(SAND_M));
+            c.hline(9, 6, 6, rgba(SAND_L));
+            c.hline(10, 7, 4, rgba(SAND_M));
+            c.hline(11, 8, 2, rgba(SAND_L));
+            c.vline(12, 9, 2, t.d);
         }
         // Hedgerow.
         2 => {
-            c.rect(1, 1, 14, 3, rgba(GRASS_D));
-            for x in 1..15 {
+            c.rect(1, 1, 22, 5, rgba(GRASS_D));
+            for x in 1..23 {
                 if world_hash(x, 0, 0x11AA).is_multiple_of(3) {
-                    c.set(x, 3, rgba(GRASS_M));
+                    c.set(x, 5, rgba(GRASS_M));
+                    c.set(x, 6, rgba(GRASS_D));
                 }
                 if world_hash(x, 1, 0x11AA).is_multiple_of(5) {
-                    c.set(x, 1, t.d);
+                    c.vline(x, 1, 2, t.d);
                 }
             }
+            c.hline(1, 1, 22, rgba(GRASS_D));
         }
-        // Lane with a farm gate.
+        // Farm lane: a pale rutted track between grass verges, with a gate.
         3 => {
-            c.rect(3, 1, 10, 8, rgba(GRASS_D));
-            c.rect(4, 1, 2, 8, rgba(SAND_M));
-            c.rect(10, 1, 2, 8, rgba(SAND_M));
-            c.hline(3, 5, 10, t.m);
-            c.vline(3, 3, 4, t.d);
-            c.vline(12, 3, 4, t.d);
+            c.rect(1, 1, 22, 7, rgba(GRASS_D));
+            c.rect(1, 3, 22, 3, rgba(SAND_M));
+            c.hline(1, 3, 22, rgba(SAND_D));
+            c.hline(1, 5, 22, rgba(SAND_D));
+            for i in 0..8 {
+                let x = 1 + (world_hash(i, 2, 0x1A4E) % 22) as i32;
+                c.tint(x, 4, rgba(SAND_L));
+            }
+            // Five-bar gate standing open beside the track.
+            c.vline(7, 4, 8, t.d);
+            c.vline(16, 4, 8, t.d);
+            for r in 0..3 {
+                c.hline(7, 6 + r * 2, 10, t.m);
+            }
+            for i in 0..6 {
+                c.set(8 + i, 7 + i / 2, t.l);
+            }
         }
-        // Dry-stone wall.
+        // Dry-stone wall: laid courses with a capping row, seated in grass.
         4 => {
             let s = stone();
-            for x in 2..14 {
-                c.set(x, 1, if x % 2 == 0 { s.m } else { s.d });
-                c.set(x, 2, if x % 2 == 0 { s.d } else { s.m });
+            for row in 0..5 {
+                let y = 1 + row;
+                let phase = row % 2;
+                for x in 1..23 {
+                    let block = (x + phase * 2) / 3;
+                    c.set(x, y, if block % 2 == 0 { s.m } else { s.d });
+                }
             }
-            c.hline(2, 3, 12, s.l);
+            for x in 1..23 {
+                if world_hash(x, 0, 0x51AB).is_multiple_of(3) {
+                    c.set(x, 3, s.l);
+                }
+            }
+            c.hline(1, 6, 22, s.l);
+            c.hline(0, 1, 24, rgba(GRASS_D));
+            c.set(3, 2, rgba(GRASS_D));
+            c.set(19, 2, rgba(GRASS_D));
         }
         // Lone tree — still, deliberately (brief 01 §6.3).
         _ => {
-            c.hline(6, 0, 4, rgba_a(OUTLINE, 130));
-            c.rect(7, 1, 2, 3, t.d);
-            let rows = [(6, 5), (5, 7), (5, 7), (5, 7), (6, 5), (7, 3)];
+            c.hline(8, 0, 8, rgba_a(OUTLINE, 130));
+            c.rect(11, 1, 3, 6, t.d);
+            c.vline(11, 1, 6, t.m);
+            let rows = [(8, 9), (7, 11), (6, 13), (6, 13), (7, 11), (8, 9), (10, 5)];
             for (i, (rx, rw)) in rows.iter().enumerate() {
-                c.hline(*rx, 4 + i as i32, *rw, rgba(GRASS_D));
+                c.hline(*rx, 7 + i as i32, *rw, rgba(GRASS_D));
             }
-            for i in 0..6 {
-                let x = 5 + (world_hash(i, 3, 0x77CC) % 7) as i32;
-                let y = 4 + (world_hash(i, 5, 0x77CC) % 6) as i32;
+            for i in 0..14 {
+                let x = 6 + (world_hash(i, 3, 0x77CC) % 13) as i32;
+                let y = 7 + (world_hash(i, 5, 0x77CC) % 7) as i32;
                 c.tint(x, y, rgba(GRASS_M));
             }
-            c.set(6, 8, rgba(GRASS_L));
-            c.set(7, 9, rgba(GRASS_L));
+            c.set(9, 12, rgba(GRASS_L));
+            c.set(12, 10, rgba(GRASS_L));
+            c.set(10, 9, rgba(GRASS_L));
         }
     }
 }
@@ -1305,7 +1539,7 @@ mod tests {
             let (c, _) = draw_frame(frame);
             assert!(
                 c.bounds().is_some(),
-                "frame {frame} baked to an empty cell — flat nothing is not a placeholder"
+                "frame {frame} baked to an empty cell - flat nothing is not a placeholder"
             );
         }
     }
@@ -1523,6 +1757,52 @@ mod tests {
                     !banned.iter().any(|b| b[0] == px[0] && b[1] == px[1] && b[2] == px[2]),
                     "frame {frame} used a diagnostic accent"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn baked_bounds_hug_the_silhouette() {
+        // Hover frames the building by these numbers, so they have to be the
+        // drawn texels and not the cell.
+        for frame in 0..FRAME_COUNT {
+            let (c, _) = draw_frame(frame);
+            let (x0, y0, x1, y1) = c.bounds().expect("every frame draws something");
+            assert!(x0 >= 0 && x1 < W, "frame {frame} bounds leave the cell");
+            assert!(y0 >= 0 && y1 < CELL_H as i32);
+            assert!(x1 >= x0 && y1 >= y0);
+        }
+    }
+
+    #[test]
+    fn a_building_is_big_enough_to_read() {
+        // The playtest verdict was that buildings were too small to identify.
+        // A tile is 32 texels; a building has to be a real fraction of one.
+        for family in [Family::Town, Family::Works] {
+            for tier in 0..4u8 {
+                for variant in 0..4u8 {
+                    let kind = BuildingKind {
+                        family,
+                        tier,
+                        variant,
+                        roof: Roof::Tile,
+                    };
+                    let (c, _) = draw_kind(kind, 0);
+                    let (x0, y0, x1, y1) = c.bounds().unwrap();
+                    let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
+                    assert!(
+                        w >= 14,
+                        "{family:?} tier {tier} variant {variant} is only {w} texels wide"
+                    );
+                    assert!(
+                        h >= 12,
+                        "{family:?} tier {tier} variant {variant} is only {h} texels tall"
+                    );
+                    assert!(
+                        y0 <= 1,
+                        "{family:?} tier {tier} variant {variant} floats above the ground"
+                    );
+                }
             }
         }
     }

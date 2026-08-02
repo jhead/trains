@@ -78,7 +78,7 @@ impl JourneyRecord {
     /// Inspector history line — `"Eastgate → Millhaven · 7 min · good"`.
     pub fn summary(&self, from_name: &str, to_name: &str) -> String {
         format!(
-            "{from_name} → {to_name} · {} min · {}",
+            "{from_name} -> {to_name} - {} min - {}",
             (self.total_secs / 60).max(1),
             self.outcome.label()
         )
@@ -159,13 +159,13 @@ impl JourneyMemory {
         }
         if self.wants_to_leave() {
             return format!(
-                "{} bad journeys in a row — looking to move.",
+                "{} bad journeys in a row - looking to move.",
                 self.bad_streak
             );
         }
         if self.bad_streak > 0 {
             format!(
-                "{} good of the last {} — still giving it a chance.",
+                "{} good of the last {} - still giving it a chance.",
                 self.recent_good(),
                 self.recent.len()
             )

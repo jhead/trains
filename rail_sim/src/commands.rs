@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::border::{AssignTrainToBorder, CloseBorder, OpenBorder, SetBorderTrade};
 use crate::ids::{LineId, StationId, TileCoord, TrackId, TrainId};
 use crate::stations::{DemolishStation, PlaceStation, UpgradeStation};
 
@@ -44,6 +45,10 @@ pub enum CommandKind {
     PlaceStation(PlaceStation),
     DemolishStation(DemolishStation),
     UpgradeStation(UpgradeStation),
+    OpenBorder(OpenBorder),
+    CloseBorder(CloseBorder),
+    SetBorderTrade(SetBorderTrade),
+    AssignTrainToBorder(AssignTrainToBorder),
     SetSpeed(SetSpeed),
     Pause(Pause),
 }

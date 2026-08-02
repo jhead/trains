@@ -163,7 +163,7 @@ pub fn refresh_alerts(
                 board.upsert(
                     key,
                     AlertKind::NewDemand,
-                    format!("New settlement: {} — not yet served", opp.name),
+                    format!("New settlement: {} - not yet served", opp.name),
                     AlertFocus::Station(id),
                 );
             }
@@ -173,7 +173,7 @@ pub fn refresh_alerts(
                 board.upsert(
                     key,
                     AlertKind::NewDemand,
-                    format!("New industry: {} — not yet served", opp.name),
+                    format!("New industry: {} - not yet served", opp.name),
                     AlertFocus::Tile(opp.tile),
                 );
             }
@@ -231,7 +231,7 @@ pub fn refresh_alerts(
             key,
             AlertKind::TrainsParked,
             format!(
-                "Can't afford opex — {parked_count} train{} parked",
+                "Can't afford opex - {parked_count} train{} parked",
                 if parked_count == 1 { "" } else { "s" }
             ),
             parked_focus,
@@ -254,7 +254,7 @@ pub fn refresh_alerts(
                 key,
                 AlertKind::CashLow,
                 format!(
-                    "Cash low — under {ALERT_CASH_LOW_MINUTES} min of opex"
+                    "Cash low - under {ALERT_CASH_LOW_MINUTES} min of opex"
                 ),
                 AlertFocus::None,
             );

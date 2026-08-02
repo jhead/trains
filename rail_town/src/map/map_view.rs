@@ -67,7 +67,7 @@ pub fn setup_map_view_banner(mut commands: Commands) {
         ))
         .with_children(|p| {
             p.spawn((
-                Text::new("Map View  ·  click to fly  ·  M"),
+                Text::new("Map View  -  click to fly  -  M"),
                 micro_font(),
                 text_accent(),
             ));

@@ -15,8 +15,8 @@ use bevy::prelude::Color;
 use rail_map::{generate_map, MapGrid, TerrainKind};
 use rail_sim::ids::TileCoord;
 use rail_sim::{
-    local_slope, seed_stations_and_industries, IndustryRegistry, StationRegistry, StationService,
-    TrackTerrain, MAX_GRADE, MOUNTAIN_HEIGHT_MIN, STARTING_CASH_CENTS,
+    local_slope, seed_stations_and_industries, GoalMode, IndustryRegistry, StationRegistry,
+    StationService, TrackTerrain, MAX_GRADE, MOUNTAIN_HEIGHT_MIN, STARTING_CASH_CENTS,
 };
 
 use crate::palette::{
@@ -72,12 +72,24 @@ pub enum StartingCash {
     Generous,
 }
 
-/// Session shape. Goals are not implemented yet and the row says so.
+/// Session shape (design 09 §3). Goals is the same sandbox with objectives and
+/// deadlines drawn from it — see [`rail_sim::goals`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GameMode {
     #[default]
     Sandbox,
     Goals,
+}
+
+impl GameMode {
+    /// The sim-side switch this choice sets on the world's
+    /// [`GoalBoard`](rail_sim::GoalBoard).
+    pub fn to_goal_mode(self) -> GoalMode {
+        match self {
+            Self::Sandbox => GoalMode::Sandbox,
+            Self::Goals => GoalMode::Goals,
+        }
+    }
 }
 
 /// Implements the shared "cycle through a small set of labelled values" contract
@@ -199,11 +211,6 @@ impl OptionChoice for GameMode {
             Self::Goals => "Goals",
         }
     }
-
-    fn enabled(self) -> bool {
-        // No goal system exists yet; the row draws disabled rather than lying.
-        matches!(self, Self::Sandbox)
-    }
 }
 
 /// A complete new-game setup. Seed plus these fully determine a map.
@@ -235,6 +242,11 @@ impl Default for MapOptions {
 /// Seeds a player types stay short and quotable; five digits is the design's example.
 pub const SEED_MAX: u64 = 99_999;
 
+/// Bits of [`MapOptions::packed_options`] that describe the *world* — terrain,
+/// water, resources, cash. Size (bits 0–1) is a real generator input and Mode
+/// (bit 9) is a rule about the session, so neither belongs in the seed mix.
+const WORLD_FLAVOUR_BITS: u64 = 0b1_1111_1100;
+
 impl MapOptions {
     /// Options packed into a byte, low bits first: size, terrain, water,
     /// resources, cash, mode. Used by [`Self::effective_seed`] and share codes.
@@ -258,14 +270,17 @@ impl MapOptions {
     /// Generator seed derived from the player seed and every option that the
     /// generator cannot yet take directly (see the module docs).
     pub fn effective_seed(&self) -> u64 {
-        // Map size is a real generator input, so it is deliberately excluded from
-        // the mix: resizing a map should keep the same landscape character.
+        // Map size is a real generator input, and Mode is a rule about the
+        // session rather than the world, so both are deliberately excluded from
+        // the mix: resizing a map — or playing it to goals — should keep the
+        // same landscape. [`WORLD_FLAVOUR_BITS`] is what is left.
         //
         // Measured against the *default* flavour, not zero, so a stock setup
         // passes the player's seed straight through. "Seed 42" then means the
         // same world it has always meant, and the number shown on the title
         // screen is the number the player would type to get it back.
-        let flavour = (self.packed_options() >> 2) ^ (Self::default().packed_options() >> 2);
+        let world = |bits: u64| (bits & WORLD_FLAVOUR_BITS) >> 2;
+        let flavour = world(self.packed_options()) ^ world(Self::default().packed_options());
         if flavour == 0 {
             return self.seed;
         }
@@ -349,7 +364,7 @@ impl OptionField {
     pub fn value_label(self, options: &MapOptions) -> String {
         match self {
             Self::Seed => options.seed.to_string(),
-            Self::Size => format!("{}  {}²", options.size.label(), options.size.tiles()),
+            Self::Size => format!("{}  {}2", options.size.label(), options.size.tiles()),
             Self::Terrain => options.terrain.label().into(),
             Self::Water => options.water.label().into(),
             Self::Resources => options.resources.label().into(),
@@ -381,7 +396,6 @@ impl OptionField {
             // The generator has no shape parameters yet — the choice re-rolls the
             // world through the seed instead of steering it. See the module docs.
             Self::Terrain | Self::Water | Self::Resources => Some("re-rolls, not steers"),
-            Self::Mode => Some("Goals not built"),
             _ => None,
         }
     }
@@ -793,9 +807,33 @@ mod tests {
     }
 
     #[test]
-    fn goals_mode_is_disabled_until_it_exists() {
+    fn goals_mode_is_selectable_and_reaches_the_sim() {
         assert!(GameMode::Sandbox.enabled());
-        assert!(!GameMode::Goals.enabled());
+        assert!(GameMode::Goals.enabled());
+        assert_eq!(GameMode::Sandbox.to_goal_mode(), GoalMode::Sandbox);
+        assert_eq!(GameMode::Goals.to_goal_mode(), GoalMode::Goals);
+    }
+
+    #[test]
+    fn choosing_goals_does_not_reroll_the_world() {
+        // Mode is a rule about the session, not a terrain knob. A player who
+        // liked a map must be able to replay it to goals and get the same map.
+        let sandbox = MapOptions {
+            seed: 84_213,
+            mode: GameMode::Sandbox,
+            ..MapOptions::default()
+        };
+        let goals = MapOptions {
+            mode: GameMode::Goals,
+            ..sandbox
+        };
+        assert_eq!(sandbox.effective_seed(), goals.effective_seed());
+        // …but the share code still carries the mode, so the *game* round-trips.
+        assert_ne!(sandbox.share_code(), goals.share_code());
+        assert_eq!(
+            MapOptions::from_share_code(&goals.share_code()),
+            Some(goals)
+        );
     }
 
     #[test]
@@ -836,12 +874,6 @@ mod tests {
     #[test]
     fn every_option_row_steps_and_comes_back() {
         for field in OptionField::ALL {
-            // Mode has exactly one implemented choice, so it is *correct* for it
-            // not to move. `cycling_never_lands_on_a_mode_that_does_not_exist`
-            // covers it instead.
-            if *field == OptionField::Mode {
-                continue;
-            }
             let mut options = MapOptions::default();
             let before = field.value_label(&options);
             field.cycle(&mut options, 1);
@@ -862,12 +894,17 @@ mod tests {
     }
 
     #[test]
-    fn cycling_never_lands_on_a_mode_that_does_not_exist() {
+    fn the_mode_row_steps_between_both_sessions_shapes() {
         let mut options = MapOptions::default();
-        for _ in 0..6 {
-            OptionField::Mode.cycle(&mut options, 1);
-            assert_eq!(options.mode, GameMode::Sandbox);
-        }
+        assert_eq!(options.mode, GameMode::Sandbox);
+        OptionField::Mode.cycle(&mut options, 1);
+        assert_eq!(options.mode, GameMode::Goals);
+        OptionField::Mode.cycle(&mut options, 1);
+        assert_eq!(options.mode, GameMode::Sandbox, "the row wraps");
+        assert!(
+            OptionField::Mode.pending_note().is_none(),
+            "the row no longer has to apologise for itself"
+        );
     }
 
     #[test]

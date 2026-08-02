@@ -15,6 +15,7 @@ pub struct ToolbarRoot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarTool {
+    Select,
     Build,
     Demolish,
     Line,
@@ -29,6 +30,7 @@ pub struct ToolbarButton {
 
 pub fn setup_toolbar(mut commands: Commands) {
     let slots = [
+        (ToolbarTool::Select, "Look", "V"),
         (ToolbarTool::Build, "Track", "B"),
         (ToolbarTool::Demolish, "Demolish", "X"),
         (ToolbarTool::Line, "Line", "L"),
@@ -142,6 +144,16 @@ fn apply_toolbar_tool(
     line: &mut LineToolState,
 ) {
     match tool {
+        ToolbarTool::Select => {
+            // Disarm everything — this is the "put the tools down" slot.
+            track.tool = BuildTool::Select;
+            track.anchor = None;
+            track.drag = None;
+            track.suppress_build_click = false;
+            train.place_mode = false;
+            line.active = false;
+            line.clear_draft();
+        }
         ToolbarTool::Build => {
             track.tool = BuildTool::Build;
             track.anchor = None;
@@ -212,6 +224,7 @@ fn active_tool(
         };
     }
     match tool {
+        BuildTool::Select => ToolbarTool::Select,
         BuildTool::Build => ToolbarTool::Build,
         BuildTool::Demolish => ToolbarTool::Demolish,
     }

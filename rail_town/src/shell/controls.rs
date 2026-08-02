@@ -182,9 +182,9 @@ impl ControlAction {
             Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::PauseResume => "Pause / resume",
-            Self::Speed1 => "Speed 1×",
-            Self::Speed2 => "Speed 2×",
-            Self::Speed3 => "Speed 3×",
+            Self::Speed1 => "Speed 1x",
+            Self::Speed2 => "Speed 2x",
+            Self::Speed3 => "Speed 3x",
             Self::PanUp => "Pan up",
             Self::PanDown => "Pan down",
             Self::PanLeft => "Pan left",
@@ -427,10 +427,10 @@ pub fn key_label(key: KeyCode) -> String {
         return digit.to_string();
     }
     match key {
-        KeyCode::ArrowUp => "↑".into(),
-        KeyCode::ArrowDown => "↓".into(),
-        KeyCode::ArrowLeft => "←".into(),
-        KeyCode::ArrowRight => "→".into(),
+        KeyCode::ArrowUp => "^".into(),
+        KeyCode::ArrowDown => "v".into(),
+        KeyCode::ArrowLeft => "<-".into(),
+        KeyCode::ArrowRight => "->".into(),
         KeyCode::Backquote => "`".into(),
         KeyCode::Minus => "-".into(),
         KeyCode::Equal => "=".into(),

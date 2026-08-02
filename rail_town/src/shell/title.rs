@@ -127,12 +127,12 @@ pub fn spawn_title_if_missing(
                     "",
                 );
                 spawn_row(menu, MenuItem::new(4, MenuAction::Quit), "Quit", "");
-                spawn_note(menu, "↑ ↓ select   ↵ confirm");
+                spawn_note(menu, "^ v select   Enter confirm");
             });
 
             spawn_corner_stamp(
                 root,
-                &format!("v{} · seed {}", env!("CARGO_PKG_VERSION"), map.seed),
+                &format!("v{} - seed {}", env!("CARGO_PKG_VERSION"), map.seed),
             );
         });
 }

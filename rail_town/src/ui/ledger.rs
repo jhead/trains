@@ -167,7 +167,7 @@ fn format_ledger_body(ledger: &MoneyLedger) -> String {
 fn sparkline(ledger: &MoneyLedger) -> String {
     let vals: Vec<i64> = ledger.history_nets().collect();
     if vals.is_empty() {
-        return "·".into();
+        return "-".into();
     }
     let max_abs = vals.iter().map(|v| v.unsigned_abs()).max().unwrap_or(1).max(1);
     const BARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];

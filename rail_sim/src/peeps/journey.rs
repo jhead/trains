@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::commands::TrainKind;
 use crate::ids::{StationId, TileCoord, TrackId, TrainId};
 use crate::stations::{StationRegistry, StationService};
-use crate::track::TrackNetwork;
+use crate::track::{TrackNetwork, TrackTerrain};
 use crate::trains::{track_for_station, Train, TrainLocation};
 
 use super::budget::PeepDetail;
@@ -30,6 +30,7 @@ use super::memory::{outcome_for, JourneyMemory, JourneyRecord};
 use super::names::hash64;
 use super::resident::{Peep, WaitingAtStation, SIM_SECONDS_PER_TICK};
 use super::routine::{clock_label, Routine, DAY_MINUTES};
+use super::walk::{walk_step, WalkRoute, WalkRouter, WalkStep, WalkWorld};
 use super::{day_index, minute_of_day};
 
 /// Ticks a peep takes to walk one tile. Transit crosses a tile in 3 ticks, so
@@ -178,6 +179,16 @@ impl PeepPosition {
         false
     }
 
+    /// Keep the walk cycle running across a route corner.
+    ///
+    /// [`Self::walk_toward`] stops the cycle on the tick it reaches its target,
+    /// which is right at the end of a walk and wrong in the middle of one — a
+    /// peep turning a corner should not stutter to a halt for a tick.
+    pub fn keep_walking(&mut self) {
+        self.walking = true;
+        self.tick_walk_cycle();
+    }
+
     fn tick_walk_cycle(&mut self) {
         self.step_ticks = self.step_ticks.saturating_add(1);
         if self.step_ticks >= STEP_FRAME_TICKS {
@@ -242,7 +253,7 @@ impl JourneyStage {
             Self::Alighting => "Getting off",
             Self::WalkingToDestination => "Walking to the destination",
             Self::SpendingTime => "Spending time",
-            Self::WalkingInstead => "Gave up — walking",
+            Self::WalkingInstead => "Gave up - walking",
             Self::LeavingTown => "Leaving town",
         }
     }
@@ -383,8 +394,8 @@ impl Journey {
             },
             JourneyStage::SpendingTime => format!("Spending the day near {to_name}."),
             JourneyStage::WalkingInstead => match self.leg {
-                JourneyLeg::Outbound => format!("Gave up at {from_name} — walking instead."),
-                JourneyLeg::Return => format!("Gave up at {from_name} — walking home."),
+                JourneyLeg::Outbound => format!("Gave up at {from_name} - walking instead."),
+                JourneyLeg::Return => format!("Gave up at {from_name} - walking home."),
             },
             JourneyStage::LeavingTown => format!("Leaving {from_name} for good."),
         }
@@ -453,14 +464,21 @@ pub fn boardable_train(
 }
 
 /// Advance the journey state machine for every full-detail peep.
-#[allow(clippy::too_many_arguments)]
+///
+/// Walking is terrain-aware: every walked stage follows a cached [`WalkRoute`]
+/// over walkable ground (see [`super::walk`]), so nobody crosses water or a
+/// cliff face. Only full-detail peeps have positions, so only they ever need a
+/// route; the abstracted majority never touch this system.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn advance_journeys(
     stations: Res<StationRegistry>,
     service: Res<StationService>,
     network: Res<TrackNetwork>,
+    terrain: Option<Res<TrackTerrain>>,
     trains: Query<(&Train, &TrainLocation)>,
     mut flow: ResMut<DistrictFlow>,
     mut feed: ResMut<ComplaintFeed>,
+    mut router: ResMut<WalkRouter>,
     mut peeps: Query<(
         &Peep,
         &Routine,
@@ -469,13 +487,23 @@ pub fn advance_journeys(
         &mut WaitingAtStation,
         &mut JourneyMemory,
         &PeepDetail,
+        Option<&mut WalkRoute>,
     )>,
 ) {
     let tick = service.tick;
     let minute = minute_of_day(tick);
     let today = day_index(tick);
 
-    for (peep, routine, mut journey, mut pos, mut waiting, mut memory, detail) in peeps.iter_mut() {
+    // The town gets a fixed number of route searches per tick; a peep who
+    // misses out stands on the doorstep for a tick and asks again.
+    router.begin_tick();
+    let world = terrain
+        .as_deref()
+        .map(|t| WalkWorld::new(t, Some(network.as_ref())));
+
+    for (peep, routine, mut journey, mut pos, mut waiting, mut memory, detail, mut route) in
+        peeps.iter_mut()
+    {
         if !detail.is_full() {
             continue;
         }
@@ -515,10 +543,41 @@ pub fn advance_journeys(
 
             JourneyStage::WalkingToStation => {
                 let target = journey.target;
-                if pos.walk_toward(target, WALK_TILES_PER_TICK) {
-                    waiting.station = journey.from_station;
-                    waiting.wait_secs = 0;
-                    journey.set_stage(JourneyStage::WaitingOnPlatform);
+                let step = walk_step(
+                    route.as_deref_mut(),
+                    &mut pos,
+                    target,
+                    WALK_TILES_PER_TICK,
+                    world.as_ref(),
+                    &mut router,
+                );
+                match step {
+                    WalkStep::Arrived => {
+                        waiting.station = journey.from_station;
+                        waiting.wait_secs = 0;
+                        journey.set_stage(JourneyStage::WaitingOnPlatform);
+                    }
+                    WalkStep::Walking | WalkStep::Waiting => {}
+                    WalkStep::NoRoute => {
+                        // Cut off from their own platform. They stay home rather
+                        // than wading there — and the town hears about it.
+                        if let Some(route) = route.as_deref_mut() {
+                            route.clear();
+                        }
+                        pos.stand_still();
+                        waiting.wait_secs = 0;
+                        journey.set_stage(JourneyStage::AtHome);
+                        let place = station_name(&stations, journey.from_station);
+                        speak_no_route(
+                            &mut feed,
+                            &mut router,
+                            tick,
+                            peep,
+                            journey.from_station,
+                            &place,
+                            pos.tile(),
+                        );
+                    }
                 }
             }
 
@@ -633,15 +692,54 @@ pub fn advance_journeys(
 
             JourneyStage::WalkingToDestination | JourneyStage::WalkingInstead => {
                 let target = journey.target;
-                if pos.walk_toward(target, WALK_TILES_PER_TICK) {
-                    finish_leg(
-                        &mut journey,
-                        &mut memory,
-                        &mut waiting,
-                        &mut flow,
-                        routine,
-                        tick,
-                    );
+                let step = walk_step(
+                    route.as_deref_mut(),
+                    &mut pos,
+                    target,
+                    WALK_TILES_PER_TICK,
+                    world.as_ref(),
+                    &mut router,
+                );
+                match step {
+                    WalkStep::Arrived => {
+                        finish_leg(
+                            &mut journey,
+                            &mut memory,
+                            &mut waiting,
+                            &mut flow,
+                            routine,
+                            tick,
+                        );
+                    }
+                    WalkStep::Walking | WalkStep::Waiting => {}
+                    WalkStep::NoRoute => {
+                        // They are out in the world with no way through. They
+                        // stop where they stand and the leg is graded a failure
+                        // — nobody is teleported and nobody fords a river.
+                        if let Some(route) = route.as_deref_mut() {
+                            route.clear();
+                        }
+                        pos.stand_still();
+                        journey.gave_up = true;
+                        let place = station_name(&stations, journey.to_station);
+                        speak_no_route(
+                            &mut feed,
+                            &mut router,
+                            tick,
+                            peep,
+                            journey.to_station,
+                            &place,
+                            pos.tile(),
+                        );
+                        finish_leg(
+                            &mut journey,
+                            &mut memory,
+                            &mut waiting,
+                            &mut flow,
+                            routine,
+                            tick,
+                        );
+                    }
                 }
             }
 
@@ -672,11 +770,61 @@ pub fn advance_journeys(
 
             JourneyStage::LeavingTown => {
                 let target = journey.target;
-                pos.walk_toward(target, WALK_TILES_PER_TICK);
+                // A departing household with no walkable way out waits by the
+                // door; `peeps_move_away` retires them on its own timeout.
+                let _ = walk_step(
+                    route.as_deref_mut(),
+                    &mut pos,
+                    target,
+                    WALK_TILES_PER_TICK,
+                    world.as_ref(),
+                    &mut router,
+                );
                 // Despawn is owned by `peeps_move_away` once they reach the edge.
             }
         }
     }
+}
+
+fn station_name(stations: &StationRegistry, id: StationId) -> String {
+    stations.get(id).map(|s| s.name.clone()).unwrap_or_default()
+}
+
+/// Say, once and plainly, that somebody cannot walk where they were going.
+///
+/// Uses the existing [`TalkKind::Warning`] shape a household departure already
+/// uses — a warning with no station carries its own whole sentence — so the
+/// Town Talk voice stays *plain, specific, named* and no new kind appears in a
+/// feed that other slices match exhaustively. Rate limited by [`WalkRouter`],
+/// because a district cut off by a river would otherwise say it every tick.
+fn speak_no_route(
+    feed: &mut ComplaintFeed,
+    router: &mut WalkRouter,
+    tick: u64,
+    peep: &Peep,
+    station: StationId,
+    place: &str,
+    tile: TileCoord,
+) {
+    if !router.may_speak(tick) {
+        return;
+    }
+    router.note_spoke(tick);
+    let place = if place.is_empty() { "town" } else { place };
+    feed.push(ComplaintEntry {
+        kind: TalkKind::Warning,
+        peep_name: format!(
+            "{} cannot walk to {place} - no way across",
+            peep.given_name()
+        ),
+        station_name: String::new(),
+        wait_minutes: 0,
+        sim_tick: tick,
+        peep_id: Some(peep.id),
+        station_id: Some(station),
+        tile: Some(tile),
+        count: 1,
+    });
 }
 
 /// Close out a leg: grade it, remember it, and set up what comes next.
@@ -754,6 +902,25 @@ mod tests {
         Routine::from_seed(1, tile(2, 2), StationId(1), tile(20, 20), StationId(2))
     }
 
+    /// Flat, dry ground the whole way across.
+    fn dry_land(w: u32, h: u32) -> TrackTerrain {
+        TrackTerrain::new(w, h, (0..w * h).map(|_| (false, 0i8)))
+    }
+
+    /// A north-south river at `x = 8`, with an optional dry ford at `gap`.
+    fn river_town(gap: Option<i32>) -> TrackTerrain {
+        let (w, h) = (20u32, 8u32);
+        TrackTerrain::new(
+            w,
+            h,
+            (0..w * h).map(|i| {
+                let x = (i % w) as i32;
+                let y = (i / w) as i32;
+                (x == 8 && gap != Some(y), 0i8)
+            }),
+        )
+    }
+
     /// A two-station line with one transit train standing at the near platform.
     struct Town {
         app: App,
@@ -764,8 +931,11 @@ mod tests {
     impl Town {
         /// `stations_linked` lays the rails; without them nobody can board.
         fn new(stations_linked: bool) -> Self {
+            Self::with_terrain(stations_linked, dry_land(20, 8))
+        }
+
+        fn with_terrain(stations_linked: bool, terrain: TrackTerrain) -> Self {
             let mut app = App::new();
-            let terrain = TrackTerrain::new(20, 8, (0..20 * 8).map(|_| (false, 0i8)));
             let mut network = TrackNetwork::new();
             let mut path = Vec::new();
             if stations_linked {
@@ -808,9 +978,12 @@ mod tests {
             app.insert_resource(network)
                 .insert_resource(stations)
                 .insert_resource(service)
+                // Walking is terrain-aware, so the harness carries real terrain.
+                .insert_resource(terrain)
                 .init_resource::<crate::trains::TileOccupancy>()
                 .init_resource::<DistrictFlow>()
-                .init_resource::<ComplaintFeed>();
+                .init_resource::<ComplaintFeed>()
+                .init_resource::<WalkRouter>();
 
             if stations_linked {
                 let mut loc = TrainLocation::at_track(path[0]);
@@ -866,7 +1039,27 @@ mod tests {
                 JourneyMemory::default(),
                 WaitingAtStation::at(self.east),
                 PeepDetail::Full,
+                WalkRoute::default(),
             ));
+        }
+
+        /// Where the peep is standing right now.
+        fn position(&mut self) -> PeepPosition {
+            let mut q = self.app.world_mut().query::<&PeepPosition>();
+            *q.iter(self.app.world()).next().unwrap()
+        }
+
+        /// Run, recording the tile the peep stood on each tick.
+        fn run_tracking(&mut self, ticks: u32) -> Vec<TileCoord> {
+            let mut seen = Vec::new();
+            for _ in 0..ticks {
+                self.app.world_mut().run_schedule(Update);
+                let tile = self.position().tile();
+                if seen.last() != Some(&tile) {
+                    seen.push(tile);
+                }
+            }
+            seen
         }
 
         /// Run and collect every stage the peep passed through.
@@ -989,6 +1182,96 @@ mod tests {
         );
     }
 
+    /// The playtest bug, pinned: *"they just walk through water and any other
+    /// terrain."* Given a ford, the peep must use it.
+    #[test]
+    fn a_walking_peep_goes_round_the_water_and_never_through_it() {
+        let terrain = river_town(Some(6));
+        // The straight line from home to destination crosses the river…
+        assert!(terrain.is_water(tile(8, 2)), "the test river is not wet");
+
+        let mut town = Town::with_terrain(false, terrain);
+        town.add_resident(tile(2, 2), tile(16, 2));
+        // No railway, so they give up on the platform and walk the whole way.
+        let tiles = town.run_tracking(1_400);
+
+        let terrain = river_town(Some(6));
+        for tile in &tiles {
+            assert!(
+                !terrain.is_water(*tile),
+                "the peep walked on water at {tile:?}"
+            );
+        }
+        assert!(
+            tiles.iter().any(|t| t.x > 8),
+            "the peep never reached the far bank: {tiles:?}"
+        );
+        assert!(
+            tiles.iter().any(|t| *t == tile(8, 6)),
+            "the peep did not use the ford: {tiles:?}"
+        );
+        assert!(
+            tiles.iter().any(|t| *t == tile(16, 2)),
+            "the peep never arrived by the long way round: {tiles:?}"
+        );
+    }
+
+    /// No ford, no bridge, no route: they must not swim, and they must not
+    /// teleport either.
+    #[test]
+    fn a_peep_cut_off_from_their_station_stays_home_and_town_talk_says_so() {
+        // Home on the far bank from their own platform.
+        let mut town = Town::with_terrain(false, river_town(None));
+        town.add_resident(tile(12, 2), tile(16, 2));
+        let seen = town.run(200);
+
+        assert_eq!(
+            town.stage(),
+            JourneyStage::AtHome,
+            "a peep with no walkable route must stay home: {seen:?}"
+        );
+        assert!(
+            !seen.contains(&JourneyStage::WaitingOnPlatform),
+            "they cannot have reached a platform they cannot walk to: {seen:?}"
+        );
+        assert_eq!(
+            town.position().tile(),
+            tile(12, 2),
+            "a cut-off peep must not drift or teleport"
+        );
+        let talk = town.talk();
+        assert!(
+            talk.iter()
+                .any(|l| l.contains("cannot walk to Eastgate") && l.contains("no way across")),
+            "Town Talk never said they were cut off: {talk:?}"
+        );
+    }
+
+    /// Cut off from where they were *going* rather than from their station: they
+    /// stop on their own bank and the leg is graded a failure.
+    #[test]
+    fn a_peep_cut_off_from_their_destination_stops_rather_than_fording_it() {
+        let mut town = Town::with_terrain(false, river_town(None));
+        town.add_resident(tile(2, 2), tile(16, 2));
+        let tiles = town.run_tracking(400);
+
+        let terrain = river_town(None);
+        for tile in &tiles {
+            assert!(!terrain.is_water(*tile), "walked on water at {tile:?}");
+            assert!(tile.x < 8, "somehow crossed the river at {tile:?}");
+        }
+        let talk = town.talk();
+        assert!(
+            talk.iter().any(|l| l.contains("cannot walk to Millhaven")),
+            "Town Talk never said the far bank was unreachable: {talk:?}"
+        );
+        let memory = town.memory();
+        assert!(
+            memory.lifetime_gave_up >= 1,
+            "a trip nobody could make should grade as a failure"
+        );
+    }
+
     #[test]
     fn giving_up_is_remembered_as_a_bad_journey() {
         let mut town = Town::new(false);
@@ -1104,7 +1387,7 @@ mod tests {
         j.set_stage(JourneyStage::WalkingInstead);
         assert_eq!(
             j.describe("Eastgate", "Millhaven"),
-            "Gave up at Eastgate — walking instead."
+            "Gave up at Eastgate - walking instead."
         );
     }
 

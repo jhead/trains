@@ -13,6 +13,9 @@ use peep_sprites::{sync_peep_focus, sync_peep_sprites};
 // construction rather than by a second guess at where the windows are.
 pub use buildings::building_art::BuildingAtlas;
 pub use buildings::BuildingWindows;
+// Read by `inspect::hover`, so hovering a building can name it.
+pub use buildings::districts::District;
+pub use buildings::{lot_condition, lot_label, BuildingLot, RuralKind, RuralProp};
 #[cfg(test)]
 pub use buildings::TownBuildingsPlugin;
 pub use peep_sprites::PeepSprite;

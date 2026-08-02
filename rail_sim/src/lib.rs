@@ -7,12 +7,14 @@
 //! Trains / demand / opex run in [`SimSet::Advance`] when the sim is running.
 
 pub mod apply;
+pub mod border;
 pub mod clock;
 pub mod command_buffer;
 pub mod commands;
 pub mod demand;
 pub mod economy;
 pub mod event_director;
+pub mod goals;
 pub mod history;
 pub mod ids;
 pub mod lines;
@@ -25,6 +27,14 @@ pub mod track;
 pub mod trains;
 
 pub use apply::{apply_commands, PendingWorldCommand};
+pub use border::{
+    advance_border_trade, apply_border_commands, echo_manifest, push_border_command,
+    railhead_on_edge, try_close_border, try_open_border, AssignTrainToBorder, BorderCommand,
+    BorderEdge, BorderEdit, BorderError, BorderLink, BorderManifest, BorderPlugin, BorderRegistry,
+    BorderRun, CloseBorder, LinkId, OpenBorder, PresenceSource, SetBorderTrade, StandingOffer,
+    StandingRequest, TransitTrain, BORDER_ARRIVAL_CENTS, BORDER_CROSSING_TICKS,
+    BORDER_PORTAL_COST_CENTS, MANIFEST_SCHEMA_VERSION,
+};
 pub use clock::{sim_is_running, SimClock, SimSpeed};
 pub use command_buffer::CommandBuffer;
 pub use commands::{
@@ -41,11 +51,15 @@ pub use economy::{
     apply_track_maintenance, apply_train_opex, assign_jobs, drain_peep_demand, refresh_alerts,
     resolve_deliveries, spawn_demand_jobs, sync_peep_platform_pressure, tick_money_ledger,
     track_maintenance_total, Alert, AlertBoard, AlertFocus, AlertKind, AlertKey, Job, JobBoard,
-    JobKind, MoneyCategory, MoneyLedger, ALERT_CASH_LOW_MINUTES,
+    JobKind, MaintenanceAccrual, MoneyCategory, MoneyLedger, ALERT_CASH_LOW_MINUTES,
     ALERT_SERVICE_LOW_SCORE, ALERT_WAITING_OVERWHELMED, GOODS_DELIVERY_CENTS, LEDGER_HISTORY_LEN,
     LEDGER_SAMPLE_SIM_SECS, PASSENGER_FARE_CENTS, TRAIN_OPEX_CENTS,
 };
 pub use event_director::EventDirector;
+pub use goals::{
+    evaluate_goals, generate_goal_set, generate_goals_once, Goal, GoalBoard, GoalId, GoalKind,
+    GoalMode, GoalStatus, GoalsPlugin, GOALS_PER_SET,
+};
 pub use ids::{EntityId, LineId, StationId, TileCoord, TrackId, TrainId};
 pub use lines::{
     apply_line_commands, line_colour_rgba, line_path, suggest_line_name, Line, LineColour,
@@ -129,6 +143,7 @@ impl Plugin for SimPlugin {
             .init_resource::<TileOccupancy>()
             .init_resource::<JobBoard>()
             .init_resource::<MoneyLedger>()
+            .init_resource::<MaintenanceAccrual>()
             .init_resource::<AlertBoard>()
             .init_resource::<DemandSpawner>()
             .init_resource::<LineRegistry>()
@@ -183,7 +198,13 @@ impl Plugin for SimPlugin {
                     .run_if(sim_is_running),
             )
             .add_systems(Update, seed_world_anchors_once)
-            .add_plugins((TownPlugin, PeepsPlugin, save::SavePlugin));
+            .add_plugins((
+                TownPlugin,
+                PeepsPlugin,
+                goals::GoalsPlugin,
+                save::SavePlugin,
+                border::BorderPlugin,
+            ));
     }
 }
 

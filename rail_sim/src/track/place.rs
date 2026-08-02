@@ -5,38 +5,67 @@ use crate::ids::{TileCoord, TrackId};
 use crate::money::Money;
 
 use super::cost::tile_build_cost;
+use super::dir::{dir_index, is_half_step, DIR16, DIR_COUNT};
 use super::network::TrackNetwork;
 use super::piece::{TrackKind, TrackPiece};
 use super::rules::{
-    path_bridge_spans_ok, path_grades_ok, validate_tile_empty, PlacementError,
+    half_step_run_clear, path_bridge_spans_ok, path_grades_ok, validate_tile_empty, PlacementError,
 };
 use super::terrain::TrackTerrain;
 
-/// Straight line between anchors for autofill (orthogonal or 45° diagonal).
+/// Straight run between anchors for autofill, along any of the sixteen
+/// directions.
 ///
-/// Returns `None` if the segment is not axis-aligned or equal-step diagonal.
+/// Orthogonal and 45° runs are contiguous, exactly as before. A **half-step run
+/// is sparse**: its tiles are two apart on one axis and one on the other, and
+/// the tiles in between deliberately stay empty, because a half-step link only
+/// exists while the tiles it crosses are free of track (see
+/// [`TrackNetwork`](super::network::TrackNetwork) module docs). Laying the gaps
+/// in would turn a shallow run into a staircase of 45° corners.
+///
+/// Returns `None` if the segment does not lie along one of the sixteen.
 pub fn straight_line(from: TileCoord, to: TileCoord) -> Option<Vec<TileCoord>> {
     let dx = to.x - from.x;
     let dy = to.y - from.y;
     if dx == 0 && dy == 0 {
         return Some(vec![from]);
     }
-    let adx = dx.unsigned_abs();
-    let ady = dy.unsigned_abs();
-    let steps = adx.max(ady);
-    if adx != 0 && ady != 0 && adx != ady {
-        return None;
-    }
-    let step_x = dx.signum();
-    let step_y = dy.signum();
+    let (dir, steps) = run_direction(dx, dy)?;
+    let (sx, sy) = DIR16[dir];
     let mut out = Vec::with_capacity(steps as usize + 1);
     for i in 0..=steps {
         out.push(TileCoord {
-            x: from.x + step_x * i as i32,
-            y: from.y + step_y * i as i32,
+            x: from.x + sx * i as i32,
+            y: from.y + sy * i as i32,
         });
     }
     Some(out)
+}
+
+/// The [`DIR16`] direction a `(dx, dy)` offset runs along, and how many steps.
+///
+/// Compass directions are tried first so an offset that is both — there are
+/// none, but the ordering keeps the eight-direction results bit-identical —
+/// resolves the old way.
+pub fn run_direction(dx: i32, dy: i32) -> Option<(usize, u32)> {
+    if dx == 0 && dy == 0 {
+        return None;
+    }
+    for dir in 0..DIR_COUNT {
+        let (sx, sy) = DIR16[dir];
+        // n * (sx, sy) == (dx, dy) for some positive integer n.
+        let n = if sx != 0 { dx / sx } else { dy / sy };
+        if n > 0 && sx * n == dx && sy * n == dy {
+            return Some((dir, n as u32));
+        }
+    }
+    None
+}
+
+/// The direction an autofill run travels, from its first two tiles.
+fn path_direction(path: &[TileCoord]) -> Option<usize> {
+    let (&a, &b) = (path.first()?, path.get(1)?);
+    dir_index(a, b)
 }
 
 /// Result of a successful place (single tile).
@@ -114,6 +143,15 @@ pub fn try_autofill_track(
     // Validate path bridge runs and grades as a whole.
     path_bridge_spans_ok(terrain, &path)?;
     path_grades_ok(terrain, &path)?;
+
+    // A half-step run only connects while the tiles it crosses stay clear, so
+    // refuse the whole command rather than charging for a run that would land as
+    // disconnected stubs.
+    if let Some(dir) = path_direction(&path).filter(|&d| is_half_step(d)) {
+        for leg_start in path.iter().take(path.len().saturating_sub(1)) {
+            half_step_run_clear(network, *leg_start, layer, dir)?;
+        }
+    }
 
     let mut to_place: Vec<TileCoord> = Vec::new();
     for tile in &path {

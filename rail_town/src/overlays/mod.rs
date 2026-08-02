@@ -137,8 +137,8 @@ fn update_overlay_legend(
     }
     node.display = Display::Flex;
     let hint = match overlay.0 {
-        OverlayKind::Service => "green=good · amber=fair · red=poor",
-        OverlayKind::Congestion => "red=occupied · amber=busy corridor",
+        OverlayKind::Service => "green=good - amber=fair - red=poor",
+        OverlayKind::Congestion => "red=occupied - amber=busy corridor",
         OverlayKind::Density => "brighter = denser buildings",
         OverlayKind::None => "",
     };

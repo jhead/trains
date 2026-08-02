@@ -17,7 +17,8 @@ pub struct TrainProfile {
     pub curve_div: u16,
     /// Absolute grade above this is refused (pathfinding + advance).
     pub max_grade: u8,
-    /// Operating cost per Advance tick while unparked (cents).
+    /// Operating cost in cents per **sim-minute**, spread smoothly across ticks
+    /// by [`crate::economy::apply_train_opex`].
     pub opex_cents: i64,
     /// Ticks to wait at a stop after arrival before taking new work.
     pub dwell_ticks: u16,
@@ -29,7 +30,7 @@ pub const TRANSIT_PROFILE: TrainProfile = TrainProfile {
     grade_tick_cost: 1,
     curve_div: 32,
     max_grade: 4, // matches track [`MAX_GRADE`](crate::track::MAX_GRADE)
-    opex_cents: 8,
+    opex_cents: 800,
     dwell_ticks: 2,
 };
 
@@ -39,7 +40,7 @@ pub const TRANSPORT_PROFILE: TrainProfile = TrainProfile {
     grade_tick_cost: 2,
     curve_div: 16,
     max_grade: 1,
-    opex_cents: 16,
+    opex_cents: 1_600,
     dwell_ticks: 6,
 };
 
@@ -53,21 +54,102 @@ impl TrainProfile {
 
     /// Ticks needed to finish the current tile given grade / curve.
     pub fn ticks_for_piece(self, max_grade: u8, curve: u8) -> u16 {
+        self.ticks_for_leg(max_grade, curve, 1)
+    }
+
+    /// Ticks to cover a leg of `length_sq` tiles-squared at this grade / curve.
+    ///
+    /// Legs are not all the same length: an orthogonal step is 1 tile, a
+    /// diagonal is √2, and a sixteen-direction half-step is √5. Charging every
+    /// leg the same time would let a train cover 2.24× the ground per tick on a
+    /// shallow run — which would quietly make the longest route the fastest one
+    /// and break the design's "shortest, cheapest and fastest are three
+    /// different routes".
+    ///
+    /// Scaling is in integer eighths so the sim stays deterministic; √1 / √2 /
+    /// √5 land on 8 / 11 / 18 eighths.
+    pub fn ticks_for_leg(self, max_grade: u8, curve: u8, length_sq: u32) -> u16 {
         let grade = (max_grade as u16).saturating_mul(self.grade_tick_cost);
         let turn = if self.curve_div == 0 {
             0
         } else {
             (curve as u16) / self.curve_div
         };
-        self.base_ticks
+        let flat = self
+            .base_ticks
             .saturating_add(grade)
             .saturating_add(turn)
-            .max(1)
+            .max(1);
+        let eighths = length_eighths(length_sq);
+        (((flat as u32).saturating_mul(eighths) + 4) / 8).max(1) as u16
     }
 
     /// True when this profile can climb / run a tile of the given grade.
     pub fn tolerates_grade(self, max_grade: u8) -> bool {
         max_grade <= self.max_grade
+    }
+}
+
+/// Integer-eighths length of a leg from its squared tile length.
+///
+/// Only three lengths occur on a sixteen-direction square grid, so this is a
+/// lookup rather than a square root — exact, branch-cheap, and deterministic
+/// across platforms in a way `f32::sqrt` is not guaranteed to be.
+fn length_eighths(length_sq: u32) -> u32 {
+    match length_sq {
+        0 | 1 => 8,  // orthogonal, 1.0
+        2 => 11,     // diagonal, 1.414
+        5 => 18,     // half-step knight's move, 2.236
+        other => {
+            // Defensive: round(sqrt(n) * 8) for anything the graph grows later.
+            ((other as f64).sqrt() * 8.0).round() as u32
+        }
+    }
+}
+
+#[cfg(test)]
+mod leg_tests {
+    use super::*;
+
+    #[test]
+    fn a_longer_leg_costs_proportionally_more_time() {
+        // sqrt(1) : sqrt(2) : sqrt(5)  ->  8 : 11 : 18 eighths.
+        assert_eq!(length_eighths(1), 8);
+        assert_eq!(length_eighths(2), 11);
+        assert_eq!(length_eighths(5), 18);
+
+        let ortho = TRANSIT_PROFILE.ticks_for_leg(0, 0, 1);
+        let diag = TRANSIT_PROFILE.ticks_for_leg(0, 0, 2);
+        let half = TRANSIT_PROFILE.ticks_for_leg(0, 0, 5);
+        assert!(
+            half > diag && diag >= ortho,
+            "a half-step must not be cheaper than a diagonal: {ortho}/{diag}/{half}"
+        );
+    }
+
+    #[test]
+    fn ground_covered_per_tick_is_roughly_equal_across_leg_kinds() {
+        // The whole point: no direction may be a speed exploit. Compare
+        // distance-per-tick in eighths, allowing for integer rounding.
+        let rate = |length_sq: u32| {
+            let ticks = TRANSPORT_PROFILE.ticks_for_leg(0, 0, length_sq) as f64;
+            length_eighths(length_sq) as f64 / ticks
+        };
+        let (o, d, h) = (rate(1), rate(2), rate(5));
+        let spread = [o, d, h];
+        let max = spread.iter().cloned().fold(f64::MIN, f64::max);
+        let min = spread.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(
+            max / min < 1.25,
+            "leg speeds should be within rounding of each other, got {spread:?}"
+        );
+    }
+
+    #[test]
+    fn a_leg_never_costs_zero_ticks() {
+        for length_sq in [0, 1, 2, 5, 9] {
+            assert!(TRANSIT_PROFILE.ticks_for_leg(0, 0, length_sq) >= 1);
+        }
     }
 }
 

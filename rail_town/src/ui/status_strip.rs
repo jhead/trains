@@ -90,7 +90,7 @@ pub fn setup_status_strip(mut commands: Commands, money: Res<Money>) {
                 body_font(),
                 text_secondary(),
             ));
-            parent.spawn((Text::new("·"), body_font(), text_secondary()));
+            parent.spawn((Text::new("-"), body_font(), text_secondary()));
             parent
                 .spawn(Node {
                     flex_direction: FlexDirection::Row,
@@ -99,7 +99,7 @@ pub fn setup_status_strip(mut commands: Commands, money: Res<Money>) {
                     ..default()
                 })
                 .with_children(|seg| {
-                    for (label, mult) in [("❚❚", 0u8), ("1×", 1), ("2×", 2), ("3×", 3)] {
+                    for (label, mult) in [("||", 0u8), ("1x", 1), ("2x", 2), ("3x", 3)] {
                         seg.spawn((
                             Button,
                             SpeedButton { multiplier: mult },
@@ -123,7 +123,7 @@ pub fn setup_status_strip(mut commands: Commands, money: Res<Money>) {
                         });
                     }
                 });
-            parent.spawn((Text::new("·"), body_font(), text_secondary()));
+            parent.spawn((Text::new("-"), body_font(), text_secondary()));
             parent.spawn((
                 StatusToolText,
                 Text::new("Build"),
@@ -289,6 +289,7 @@ fn tool_label(
         };
     }
     match tool {
+        BuildTool::Select => "Look",
         BuildTool::Build => "Build",
         BuildTool::Demolish => "Demolish",
     }

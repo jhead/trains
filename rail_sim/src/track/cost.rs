@@ -197,7 +197,7 @@ mod tests {
         let pricey = TRACK_COST_CENTS * 20;
         assert!(
             pricey / cheap >= 10,
-            "expected ≥10× spread, got {} / {} = {}",
+            "expected ≥10x spread, got {} / {} = {}",
             pricey,
             cheap,
             pricey / cheap

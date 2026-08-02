@@ -16,6 +16,40 @@ pub const MAX_DENSITY: f32 = 1.0;
 /// How quickly density approaches its service-driven target (per tick).
 const APPROACH_RATE: f32 = 0.04;
 
+/// Steepness of the fall from a town's core to its edge.
+///
+/// The ramp used to be linear, which left a thin skirt of density all the way
+/// out to the catchment boundary: every town read as the same soft blob, and
+/// the map filled with evenly scattered single buildings instead of a few
+/// distinct places. A power curve holds the core at full density and collapses
+/// the outskirts, which is what makes a town read as a town (brief 06 §7 —
+/// *town scale, not city scale*).
+const EDGE_FALLOFF_POW: f32 = 2.6;
+
+/// Below this, a tile is open country rather than outskirts.
+///
+/// This is the **hard edge**: past it a tile grows nothing, however good the
+/// service is. Empty land between towns is a feature, not a gap.
+const EDGE_CUTOFF: f32 = 0.16;
+
+/// Share of full density supported at `dist` tiles from a station of `radius`.
+///
+/// Steep, and it stops: for the four station tiers (catchment 3 / 5 / 6 / 8)
+/// this puts the last built ring at 2 / 3 / 3 / 4 tiles out. A better station
+/// still makes a bigger town — it just makes a town, not a haze.
+pub fn town_falloff(dist: i32, radius: i32) -> f32 {
+    if radius <= 0 || dist < 0 || dist > radius {
+        return 0.0;
+    }
+    let t = 1.0 - dist as f32 / (radius + 1) as f32;
+    let shaped = t.powf(EDGE_FALLOFF_POW);
+    if shaped < EDGE_CUTOFF {
+        0.0
+    } else {
+        shaped
+    }
+}
+
 /// Sparse building density keyed by tile.
 ///
 /// Values are in `0.0..=`[`MAX_DENSITY`]. Tiles with density near zero may be
@@ -57,7 +91,9 @@ impl TownDensity {
 
 /// Target density at `tile` from the strongest nearby station influence.
 ///
-/// `influence = (score / 100) * (1 - dist / (radius+1))` using Chebyshev distance.
+/// `influence = (score / 100) * town_falloff(dist, radius)` using Chebyshev
+/// distance. Service quality sets how *dense* a town gets; the falloff sets how
+/// *far* it spreads, and it has a hard edge.
 pub fn density_target_at(
     tile: TileCoord,
     stations: &StationRegistry,
@@ -66,9 +102,16 @@ pub fn density_target_at(
     let mut best = 0.0_f32;
     for station in stations.iter() {
         // Catchment comes from the station's tier, so an Interchange reaches
-        // further than a Halt.
-        let influence =
-            catchment_influence(station, service.score(station.id).score, tile).min(MAX_DENSITY);
+        // further than a Halt. Asking at full quality keeps that one rule in
+        // one place: this call answers *does the station reach here at all*.
+        if catchment_influence(station, 100, tile) <= 0.0 {
+            continue;
+        }
+        let dist = (station.tile.x - tile.x)
+            .abs()
+            .max((station.tile.y - tile.y).abs());
+        let quality = f32::from(service.score(station.id).score) / 100.0;
+        let influence = (quality * town_falloff(dist, station.tier.catchment())).min(MAX_DENSITY);
         if influence > best {
             best = influence;
         }
@@ -215,5 +258,63 @@ mod tests {
             density += (low - density) * APPROACH_RATE;
         }
         assert!(density < high * 0.7);
+    }
+
+    #[test]
+    fn falloff_is_steep_and_then_stops() {
+        // A core at full density, a couple of rings of visible outskirts, and
+        // then nothing — not a gradient reaching the catchment boundary.
+        assert_eq!(town_falloff(0, 5), 1.0);
+        let mut last = 1.0;
+        for d in 1..=5 {
+            let f = town_falloff(d, 5);
+            assert!(f < last || f == 0.0, "falloff must decrease at {d}: {f} !< {last}");
+            last = f;
+        }
+        assert_eq!(town_falloff(4, 5), 0.0, "the edge has to be hard");
+        assert_eq!(town_falloff(5, 5), 0.0);
+        assert_eq!(town_falloff(6, 5), 0.0, "nothing grows outside the catchment");
+
+        // Halfway out, the outskirts are well under half the core's density.
+        assert!(town_falloff(2, 5) < 0.5);
+    }
+
+    #[test]
+    fn a_bigger_station_still_makes_a_bigger_town() {
+        let built = |radius: i32| (0..=radius).filter(|d| town_falloff(*d, radius) > 0.0).count();
+        assert!(built(3) < built(5));
+        assert!(built(5) <= built(8));
+        assert!(built(8) < 8, "even an interchange must leave open country");
+    }
+
+    #[test]
+    fn a_town_is_a_core_not_a_carpet() {
+        let tile = TileCoord { x: 20, y: 20 };
+        let (stations, id) = registry_with(tile, "Eastgate");
+        let mut service = StationService::default();
+        service.scores.insert(
+            id,
+            StationServiceScore {
+                score: 100,
+                ..Default::default()
+            },
+        );
+
+        let radius = 8;
+        let mut built = 0;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let t = TileCoord {
+                    x: tile.x + dx,
+                    y: tile.y + dy,
+                };
+                if density_target_at(t, &stations, &service) > 0.0 {
+                    built += 1;
+                }
+            }
+        }
+        // A default station's catchment is 11×11 = 121 tiles. The town it grows
+        // must sit well inside that, with open country the rest of the way out.
+        assert_eq!(built, 49, "a town should be a 7x7 core, got {built} tiles");
     }
 }

@@ -6,6 +6,11 @@
 //! tile centre, and it draws four directions × a two-frame walk cycle from the
 //! art manifest (01 §7).
 //!
+//! The lane is a real one: the sim walks a peep tile to tile along a cached
+//! route over walkable ground (`rail_sim::peeps::WalkRoute`), so the position
+//! this module rounds to whole texels never sits on water, and the facing it
+//! draws is the direction the peep is actually travelling along that route.
+//!
 //! # Pixel contract (art 01 §2)
 //!
 //! - Positions round to **whole world texels** after the sim's fractional
@@ -500,6 +505,86 @@ mod tests {
         assert!(
             b.translation.z < PEEP_Z_BASE + 1.0,
             "must stay under trains"
+        );
+    }
+
+    /// The playtest fix, seen from the renderer: the drawn peep walks the route
+    /// the sim planned, tile by tile, on whole texels, facing where it is going
+    /// — and never over water.
+    #[test]
+    fn the_sprite_follows_the_walk_route_round_the_water() {
+        use rail_sim::peeps::{WalkRoute, WalkRouter, WalkStep, WalkWorld, WALK_TILES_PER_TICK};
+        use rail_sim::TrackTerrain;
+
+        // A river at x = 3 with a single dry ford at y = 4.
+        let (w, h) = (8u32, 6u32);
+        let terrain = TrackTerrain::new(
+            w,
+            h,
+            (0..w * h).map(|i| {
+                let x = (i % w) as i32;
+                let y = (i / w) as i32;
+                (x == 3 && y != 4, 0i8)
+            }),
+        );
+        let world = WalkWorld::new(&terrain, None);
+        let mut router = WalkRouter::default();
+        let mut route = WalkRoute::default();
+        let mut pos = PeepPosition::at_tile(TileCoord { x: 1, y: 1 }, 5);
+        let stage = journey(JourneyStage::WalkingToStation);
+        let walker = peep(Mood::Content, 0);
+        let goal = TileCoord { x: 6, y: 1 };
+
+        let mut visited: Vec<TileCoord> = Vec::new();
+        let mut facings: Vec<Facing> = Vec::new();
+        let mut arrived = false;
+        for _ in 0..4_000 {
+            router.begin_tick();
+            let step = route.advance(&mut pos, goal, WALK_TILES_PER_TICK, &world, &mut router);
+            assert_ne!(step, WalkStep::NoRoute, "the ford should be reachable");
+
+            let pose = pose_for(&walker, &pos, &stage, h);
+            // Pixel contract: sub-tile motion is the sim's, whole texels are ours.
+            assert_eq!(pose.translation.x, pose.translation.x.round());
+            assert_eq!(pose.translation.y, pose.translation.y.round());
+            assert!(
+                !terrain.is_water(pos.tile()),
+                "drew a peep standing on water at {:?}",
+                pos.tile()
+            );
+
+            if visited.last() != Some(&pos.tile()) {
+                visited.push(pos.tile());
+            }
+            if facings.last() != Some(&pos.facing) {
+                facings.push(pos.facing);
+            }
+            if step == WalkStep::Arrived {
+                arrived = true;
+                break;
+            }
+        }
+
+        assert!(arrived, "the peep never finished the route");
+        assert_eq!(
+            visited,
+            route.tiles(),
+            "the sprite did not follow the planned route tile by tile"
+        );
+        assert_eq!(visited.last(), Some(&goal));
+        assert!(
+            facings.contains(&Facing::North) && facings.contains(&Facing::East),
+            "facing must come from the direction of travel: {facings:?}"
+        );
+
+        // Turning is a different arrangement of parts, never a rotation.
+        let mut north = pos;
+        north.facing = Facing::North;
+        let mut east = pos;
+        east.facing = Facing::East;
+        assert_ne!(
+            pose_for(&walker, &north, &stage, h).head.offset.x,
+            pose_for(&walker, &east, &stage, h).head.offset.x
         );
     }
 

@@ -138,7 +138,7 @@ pub fn setup_inspector_panel(mut commands: Commands) {
                     BorderColor::all(OUTLINE),
                 ))
                 .with_children(|btn| {
-                    btn.spawn((Text::new("✕"), body_font(), text_secondary()));
+                    btn.spawn((Text::new("x"), body_font(), text_secondary()));
                 });
             });
 
@@ -354,7 +354,7 @@ fn build_view(
                     id.0, score.score, delta, score.waiting_passengers, cause
                 ),
                 name,
-                type_line: "Station · Tier 1".into(),
+                type_line: "Station - Tier 1".into(),
                 headline: format!("Service      {}/100", score.score),
                 trend: spark,
                 cause,
@@ -383,16 +383,16 @@ fn build_view(
                 "Running"
             };
             let job = match cargo {
-                TrainCargo::Empty => "Empty — seeking work".into(),
+                TrainCargo::Empty => "Empty - seeking work".into(),
                 TrainCargo::Passengers { from, to } => {
                     let a = stations.get(*from).map(|s| s.name.as_str()).unwrap_or("?");
                     let b = stations.get(*to).map(|s| s.name.as_str()).unwrap_or("?");
-                    format!("Passengers {a} → {b}")
+                    format!("Passengers {a} -> {b}")
                 }
                 TrainCargo::Goods { kind, from, to } => {
                     let a = industries.get(*from).map(|i| i.name.as_str()).unwrap_or("?");
                     let b = industries.get(*to).map(|i| i.name.as_str()).unwrap_or("?");
-                    format!("{} {a} → {b}", kind.label())
+                    format!("{} {a} -> {b}", kind.label())
                 }
             };
             let blocker_line = occupancy
@@ -419,7 +419,7 @@ fn build_view(
                     occupancy.blocked_by.get(&train.id)
                 ),
                 name: format!("Train {}", id.0),
-                type_line: format!("Train · {kind}"),
+                type_line: format!("Train - {kind}"),
                 headline: format!("Status      {status}"),
                 trend: String::new(),
                 cause: blocker_line.clone(),
@@ -461,7 +461,7 @@ fn build_view(
                     id.0, mood_label, waiting.wait_secs, station_name
                 ),
                 name: peep.name.clone(),
-                type_line: "Peep · Resident".into(),
+                type_line: "Peep - Resident".into(),
                 headline: format!("Mood      {mood_label}"),
                 trend: String::new(),
                 cause: cause.clone(),
@@ -481,11 +481,11 @@ fn build_view(
             let produces = ind
                 .produces
                 .map(|g| g.label())
-                .unwrap_or("—");
+                .unwrap_or("-");
             let consumes = ind
                 .consumes
                 .map(|g| g.label())
-                .unwrap_or("—");
+                .unwrap_or("-");
             InspectorView {
                 fingerprint: format!("in:{}:{}:{}", id.0, produces, consumes),
                 name: ind.name.clone(),
@@ -512,13 +512,13 @@ fn build_view(
                     id.0, piece.paid_cents, piece.max_grade, piece.curve
                 ),
                 name: format!("Track {}", id.0),
-                type_line: format!("Track · {kind}"),
+                type_line: format!("Track - {kind}"),
                 headline: format!("Cost paid      {cost}"),
                 trend: String::new(),
-                cause: format!("Grade {} · Curve {}", piece.max_grade, piece.curve),
+                cause: format!("Grade {} - Curve {}", piece.max_grade, piece.curve),
                 cause_tone: CauseTone::Neutral,
                 body: format!(
-                    "Paid: {cost}\nGrade: {}\nCurve: {}\nTile: {}, {} · layer {}",
+                    "Paid: {cost}\nGrade: {}\nCurve: {}\nTile: {}, {} - layer {}",
                     piece.max_grade,
                     piece.curve,
                     piece.tile.x,
@@ -535,7 +535,7 @@ fn missing(kind: &str, name: String) -> InspectorView {
         fingerprint: format!("missing:{kind}:{}", name),
         name,
         type_line: kind.into(),
-        headline: "—".into(),
+        headline: "-".into(),
         trend: String::new(),
         cause: "No longer in the world.".into(),
         cause_tone: CauseTone::Warn,

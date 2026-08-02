@@ -52,7 +52,8 @@ pub struct StationTierSpec {
     pub capacity: u32,
     /// Construction cost in cents.
     pub build_cents: i64,
-    /// Maintenance per Advance tick in cents.
+    /// Maintenance in cents per **sim-minute**, spread smoothly across ticks by
+    /// [`crate::economy::apply_track_maintenance`].
     pub maint_cents: i64,
     /// Score added per arrival (bigger stops turn service into reputation faster).
     pub arrival_gain: u8,
@@ -67,7 +68,7 @@ pub const HALT_SPEC: StationTierSpec = StationTierSpec {
     dwell_percent: 150,
     capacity: 6,
     build_cents: HALT_COST_CENTS,
-    maint_cents: 1,
+    maint_cents: 100,
     arrival_gain: 6,
     through_running: true,
 };
@@ -79,7 +80,7 @@ pub const STATION_SPEC: StationTierSpec = StationTierSpec {
     dwell_percent: 100,
     capacity: 14,
     build_cents: STATION_COST_CENTS,
-    maint_cents: 3,
+    maint_cents: 300,
     arrival_gain: 8,
     through_running: true,
 };
@@ -91,7 +92,7 @@ pub const INTERCHANGE_SPEC: StationTierSpec = StationTierSpec {
     dwell_percent: 60,
     capacity: 32,
     build_cents: INTERCHANGE_COST_CENTS,
-    maint_cents: 8,
+    maint_cents: 800,
     arrival_gain: 12,
     through_running: true,
 };
@@ -103,7 +104,7 @@ pub const TERMINUS_SPEC: StationTierSpec = StationTierSpec {
     dwell_percent: 90,
     capacity: 24,
     build_cents: TERMINUS_COST_CENTS,
-    maint_cents: 6,
+    maint_cents: 600,
     arrival_gain: 10,
     through_running: false,
 };

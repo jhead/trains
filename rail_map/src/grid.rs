@@ -4,6 +4,7 @@ use bevy_ecs::prelude::Resource;
 use rail_sim::ids::TileCoord;
 use serde::{Deserialize, Serialize};
 
+use crate::features::MapFeatures;
 use crate::portal::Portal;
 use crate::tile::Tile;
 
@@ -19,6 +20,8 @@ pub const DEFAULT_MAP_SEED: u64 = 42;
 /// - [`MapGrid::get`] / [`MapGrid::tile`] — tile at [`TileCoord`]
 /// - [`Tile::water`] / [`Tile::height`] / [`Tile::is_walkable_for_track`]
 /// - [`MapGrid::portals`] / [`MapGrid::portal_at`] — edge portal stubs
+/// - [`MapGrid::features`] — what generation *meant*: the opening beat, growth
+///   sites, river crossings, ridge passes
 ///
 /// Indexing is row-major: `index = y * width + x` with `0 <= x < width`, `0 <= y < height`.
 #[derive(Debug, Clone, Resource, Serialize, Deserialize)]
@@ -28,6 +31,10 @@ pub struct MapGrid {
     pub seed: u64,
     tiles: Vec<Tile>,
     portals: Vec<Portal>,
+    /// Generator notes. `serde(default)` so a blob written before features
+    /// existed still loads — every consumer falls back to measuring.
+    #[serde(default)]
+    features: MapFeatures,
 }
 
 impl MapGrid {
@@ -49,6 +56,7 @@ impl MapGrid {
                 len
             ],
             portals: Vec::new(),
+            features: MapFeatures::default(),
         }
     }
 
@@ -104,6 +112,24 @@ impl MapGrid {
     /// Portal on a border tile, if any.
     pub fn portal_at(&self, coord: TileCoord) -> Option<&Portal> {
         self.portals.iter().find(|p| p.tile == coord)
+    }
+
+    /// What generation meant by this map — see [`MapFeatures`].
+    ///
+    /// Empty on a hand-built grid or one restored from a blob that predates the
+    /// record; [`crate::measure`] falls back to geometry in that case.
+    pub fn features(&self) -> &MapFeatures {
+        &self.features
+    }
+
+    pub fn features_mut(&mut self) -> &mut MapFeatures {
+        &mut self.features
+    }
+
+    /// Sites anchor placement should seed itself from, best first: the home
+    /// town, its near neighbour, then the rest (design 02 §4.1).
+    pub fn anchor_hints(&self) -> Vec<TileCoord> {
+        self.features.anchor_hints()
     }
 
     /// Whether this coordinate sits on the map border.

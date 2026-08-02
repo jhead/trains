@@ -47,12 +47,29 @@
 //! that still needs telling. Order a system `.after(WorldRebuildSet)` in `Update`
 //! with `.run_if(world_rebuild_pending)` and it will run on exactly the frame a
 //! new world is installed, whether that came from New Map or from a load.
+//!
+//! # Goals mode
+//!
+//! The New Map screen's Mode row is a real choice now, and the shell is the only
+//! thing that sets it: installing a world also installs its
+//! [`GoalBoard`](rail_sim::GoalBoard), started in the chosen mode with that
+//! world's effective seed (see [`goal_board_for`]). Deriving and evaluating the
+//! set is `rail_sim`'s job — the shell never invents an objective. The panel in
+//! [`goals_panel`] draws whatever the board says.
+//!
+//! **This module therefore requires `rail_sim::goals` to be reachable.** That
+//! costs three lines in `rail_sim/src/lib.rs`: `pub mod goals;`, a `pub use
+//! goals::{…}` re-export, and `goals::GoalsPlugin` in `SimPlugin`'s
+//! `add_plugins` tuple. Without them this file does not compile, and that is
+//! deliberate — a Mode row that silently did nothing is exactly what this
+//! change was made to remove.
 
 pub mod controls;
+mod goals_panel;
 mod map_options;
 mod new_map;
 mod pause;
-mod persist;
+pub(crate) mod persist;
 mod save;
 mod settings;
 mod settings_panel;
@@ -63,9 +80,9 @@ use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::input::InputSystems;
 use bevy::prelude::*;
 use rail_sim::{
-    AlertBoard, CommandBuffer, CommandHistory, DemandSpawner, EventDirector, IndustryRegistry,
-    JobBoard, LineRegistry, Money, MoneyLedger, Peep, StationRegistry, StationService,
-    TileOccupancy, TownDensity, TrackNetwork, TrainYard, WorldAnchorsSeeded,
+    AlertBoard, CommandBuffer, CommandHistory, DemandSpawner, EventDirector, GoalBoard,
+    IndustryRegistry, JobBoard, LineRegistry, Money, MoneyLedger, Peep, StationRegistry,
+    StationService, TileOccupancy, TownDensity, TrackNetwork, TrainYard, WorldAnchorsSeeded,
 };
 
 use crate::inspect::Selection;
@@ -201,6 +218,7 @@ impl Plugin for ShellPlugin {
             .insert_resource(DraftMapOptions(options))
             .init_resource::<MenuCursor>()
             .init_resource::<PreviewImage>()
+            .init_resource::<goals_panel::GoalsPanelCache>()
             .init_resource::<SettingsPanel>()
             .init_resource::<SaveStatus>()
             .init_resource::<ShellSaveRequest>()
@@ -263,6 +281,7 @@ impl Plugin for ShellPlugin {
                     settings::apply_display_settings,
                     settings::apply_audio_settings,
                     settings::persist_settings_on_change,
+                    goals_panel::rebuild_goals_panel,
                     hide_game_hud,
                     tick_autosave.run_if(in_state(ShellState::Playing)),
                 ),
@@ -294,6 +313,20 @@ fn shell_menu_visible(state: Res<State<ShellState>>, panel: Res<SettingsPanel>) 
 /// Replace the boot map with the shell's, before anything draws it.
 fn install_boot_world(mut commands: Commands, pending: Res<PendingWorld>) {
     commands.insert_resource(pending.options.generate());
+    commands.insert_resource(goal_board_for(&pending.options));
+}
+
+/// The goal board a world with these options starts from.
+///
+/// Sandbox is a board that exists and does nothing; Goals asks `rail_sim` to
+/// derive a set from this map as soon as its anchors are placed. The
+/// *effective* seed is used rather than the typed one, because that is what
+/// identifies the world — two maps that differ only by terrain style are
+/// different worlds and deserve different objectives.
+fn goal_board_for(options: &MapOptions) -> GoalBoard {
+    let mut board = GoalBoard::default();
+    board.start(options.mode.to_goal_mode(), options.effective_seed());
+    board
 }
 
 fn reset_cursor(mut cursor: ResMut<MenuCursor>) {
@@ -487,6 +520,9 @@ fn apply_pending_world(
     commands.insert_resource(TownDensity::default());
     commands.insert_resource(WorldAnchorsSeeded(false));
     commands.insert_resource(Selection::default());
+    // Goals are a lens on the sandbox, so they are installed with the world
+    // rather than switched on separately. Sandbox worlds get an inert board.
+    commands.insert_resource(goal_board_for(&options));
 
     if let Ok(mut transform) = cameras.single_mut() {
         title::centre_camera_on_map(&map, &mut transform);
@@ -776,6 +812,88 @@ mod tests {
             ShellState::Title,
             "closing settings must not also unwind the screen behind it"
         );
+    }
+
+    #[test]
+    fn beginning_a_goals_map_starts_the_board_for_that_world() {
+        let mut app = test_app();
+        app.update();
+        // Boot worlds are sandbox, so the board exists and does nothing.
+        assert!(!app.world().resource::<GoalBoard>().is_active());
+
+        go_to(&mut app, ShellState::NewMap);
+        {
+            let mut draft = app.world_mut().resource_mut::<DraftMapOptions>();
+            draft.0.seed = 777;
+            draft.0.mode = GameMode::Goals;
+        }
+        app.world_mut()
+            .write_message(MenuActivated(MenuAction::Begin));
+        app.update();
+        app.update();
+
+        let board = app.world().resource::<GoalBoard>();
+        assert!(board.is_active(), "the Mode row reaches the sim");
+        assert_eq!(
+            board.seed,
+            MapOptions {
+                seed: 777,
+                mode: GameMode::Goals,
+                ..MapOptions::default()
+            }
+            .effective_seed(),
+            "the set is derived from the world, not from the typed seed"
+        );
+        assert!(
+            board.needs_generation(),
+            "generation is `rail_sim`'s job, once the anchors land"
+        );
+    }
+
+    #[test]
+    fn the_goals_panel_follows_the_board_and_the_screen() {
+        let mut app = test_app();
+        app.update();
+        assert_eq!(count::<With<goals_panel::GoalsPanelRoot>>(&mut app), 0);
+
+        // A goals world with a set, in play.
+        let mut board = GoalBoard::default();
+        board.start(rail_sim::GoalMode::Goals, 1);
+        board.install(vec![rail_sim::Goal::new(
+            rail_sim::GoalId(0),
+            rail_sim::GoalKind::Deliveries,
+            "Complete 40 paid runs",
+            40,
+            8_640,
+        )]);
+        app.world_mut().insert_resource(board);
+        go_to(&mut app, ShellState::Playing);
+        app.update();
+        assert_eq!(count::<With<goals_panel::GoalsPanelRoot>>(&mut app), 1);
+
+        // Paused still shows it; the title screen does not.
+        go_to(&mut app, ShellState::Paused);
+        app.update();
+        assert_eq!(count::<With<goals_panel::GoalsPanelRoot>>(&mut app), 1);
+
+        go_to(&mut app, ShellState::Title);
+        app.update();
+        assert_eq!(
+            count::<With<goals_panel::GoalsPanelRoot>>(&mut app),
+            0,
+            "the shell owns the screen; nothing of the game's is left on it"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_world_never_draws_a_goals_panel() {
+        let mut app = test_app();
+        app.update();
+        go_to(&mut app, ShellState::Playing);
+        app.update();
+        app.update();
+        assert!(!app.world().resource::<GoalBoard>().is_active());
+        assert_eq!(count::<With<goals_panel::GoalsPanelRoot>>(&mut app), 0);
     }
 
     #[test]

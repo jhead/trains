@@ -85,7 +85,7 @@ pub fn setup_town_talk_ui(mut commands: Commands) {
                         ));
                         row.spawn((
                             TownTalkLineText,
-                            Text::new(if i == 0 { "Town is quiet…" } else { "" }),
+                            Text::new(if i == 0 { "Town is quiet..." } else { "" }),
                             micro_font(),
                             TextColor(RAIL_L),
                             Node {
@@ -150,7 +150,7 @@ pub fn refresh_town_talk_rows(
                     write_row_child(
                         &mut text_q,
                         child,
-                        Some(("Town is quiet…", BALLAST_L)),
+                        Some(("Town is quiet...", BALLAST_L)),
                         Some(""),
                         Some(("-", BALLAST_L)),
                     );

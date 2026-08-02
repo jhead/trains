@@ -15,12 +15,20 @@ pub use cost::{
     BRIDGE_COST_CENTS, BRIDGE_MAINT_CENTS, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_CURVE, MAX_GRADE,
     MOUNTAIN_HEIGHT_MIN, TRACK_COST_CENTS, TRACK_MAINT_CENTS,
 };
-pub use dir::{dir_index, opposite_dir, step, TrackLinks, DIR8};
+pub use dir::{
+    bearing_deg, bearing_separation_deg, clock_index, clock_separation, dir_from_clock, dir_index,
+    intermediate_tiles, is_half_step, length_sq, opposite_dir, step, straddled_dirs, TrackLinks,
+    DIR16, DIR8, DIR_COUNT, HALF_STEP_BASE,
+};
 pub use network::TrackNetwork;
 pub use piece::{curve_from_link_dirs, TrackKind, TrackPiece};
-pub use place::{straight_line, try_autofill_track, try_demolish, try_place_track, PlacedTrack};
+pub use place::{
+    run_direction, straight_line, try_autofill_track, try_demolish, try_place_track, PlacedTrack,
+};
 pub use rules::{
-    grade_to_neighbors_ok, path_bridge_spans_ok, path_grades_ok, validate_tile_empty, PlacementError,
+    grade_to_neighbors_ok, half_step_run_clear, path_bridge_spans_ok, path_grades_ok,
+    turnout_divergence_ok, validate_tile_empty, walk_path, PlacementError,
+    MIN_TURNOUT_DIVERGENCE_TENTHS,
 };
 pub use terrain::TrackTerrain;
 
@@ -191,23 +199,116 @@ mod tests {
     }
 
     #[test]
-    fn autofill_rejects_non_straight() {
+    fn autofill_rejects_a_run_off_all_sixteen_directions() {
         let terrain = land_map(8, 8);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(50_000);
         let mut ledger = MoneyLedger::default();
+        // (3, 1) is neither compass nor knight's move.
         assert_eq!(
             try_autofill_track(
                 &mut network,
                 &mut money,
-            &mut ledger,
+                &mut ledger,
                 &terrain,
                 TileCoord { x: 0, y: 0 },
-                TileCoord { x: 2, y: 1 },
+                TileCoord { x: 3, y: 1 },
                 GROUND_LAYER,
             ),
             Err(PlacementError::NotStraight)
         );
+    }
+
+    /// The widening in one test: a knight's move is now a run, and it lays a
+    /// *sparse* line whose gaps stay empty so the shallow links can exist.
+    #[test]
+    fn autofill_lays_a_sparse_half_step_run() {
+        let terrain = land_map(12, 12);
+        let mut network = TrackNetwork::new();
+        let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
+
+        let placed = try_autofill_track(
+            &mut network,
+            &mut money,
+            &mut ledger,
+            &terrain,
+            TileCoord { x: 1, y: 1 },
+            TileCoord { x: 5, y: 3 },
+            GROUND_LAYER,
+        )
+        .unwrap();
+
+        // (1,1) → (3,2) → (5,3): three tiles, not five.
+        assert_eq!(placed.len(), 3);
+        let tiles: Vec<_> = placed.iter().map(|p| p.piece.tile).collect();
+        assert_eq!(
+            tiles,
+            vec![
+                TileCoord { x: 1, y: 1 },
+                TileCoord { x: 3, y: 2 },
+                TileCoord { x: 5, y: 3 },
+            ]
+        );
+        // The tiles the run crosses stay bare.
+        for gap in [(2, 1), (2, 2), (4, 2), (4, 3)] {
+            assert!(
+                network
+                    .id_at(
+                        TileCoord {
+                            x: gap.0,
+                            y: gap.1
+                        },
+                        GROUND_LAYER
+                    )
+                    .is_none(),
+                "half-step run must not fill {gap:?}"
+            );
+        }
+        // And it is genuinely connected end to end.
+        let ids: Vec<_> = placed.iter().map(|p| p.id).collect();
+        assert_eq!(network.neighbor_ids(ids[0]), vec![ids[1]]);
+        assert_eq!(network.neighbor_ids(ids[1]).len(), 2);
+        assert!(network.piece(ids[1]).unwrap().links.has_half_step());
+    }
+
+    #[test]
+    fn autofill_refuses_a_half_step_run_across_existing_track() {
+        let terrain = land_map(12, 12);
+        let mut network = TrackNetwork::new();
+        let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
+
+        // A tile sitting in the middle of where the shallow run would pass.
+        try_place_track(
+            &mut network,
+            &mut money,
+            &mut ledger,
+            &terrain,
+            TileCoord { x: 2, y: 1 },
+            GROUND_LAYER,
+        )
+        .unwrap();
+        let before = money.cents();
+
+        let err = try_autofill_track(
+            &mut network,
+            &mut money,
+            &mut ledger,
+            &terrain,
+            TileCoord { x: 1, y: 1 },
+            TileCoord { x: 5, y: 3 },
+            GROUND_LAYER,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            PlacementError::HalfStepBlocked {
+                tile: TileCoord { x: 2, y: 1 }
+            }
+        );
+        assert_eq!(money.cents(), before, "a refused run costs nothing");
     }
 
     #[test]

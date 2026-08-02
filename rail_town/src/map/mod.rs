@@ -4,15 +4,21 @@
 //! navigates — no track placement or sim logic.
 
 mod camera;
+mod map_view;
 mod spawn;
 
 use bevy::prelude::*;
 use rail_map::{generate_map, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_SEED, DEFAULT_MAP_WIDTH};
 
-use camera::{camera_pan, camera_zoom, setup_map_camera};
+use camera::{apply_camera_focus, camera_pan, camera_zoom, setup_map_camera};
+use map_view::{
+    block_zoom_in_map_view, exit_map_view_before_focus, map_view_click_fly, setup_map_view_banner,
+    toggle_map_view,
+};
 use spawn::spawn_map_tiles;
 
-pub use camera::MapCamera;
+pub use camera::{CameraFocusRequest, MapCamera};
+pub use map_view::MapViewState;
 
 /// Inserts a generated [`MapGrid`] and registers spawn / camera systems.
 pub struct MapPlugin {
@@ -35,7 +41,25 @@ impl Plugin for MapPlugin {
     fn build(&self, app: &mut App) {
         let grid = generate_map(self.width, self.height, self.seed);
         app.insert_resource(grid)
-            .add_systems(Startup, (setup_map_camera, spawn_map_tiles).chain())
-            .add_systems(Update, (camera_pan, camera_zoom));
+            .init_resource::<CameraFocusRequest>()
+            .init_resource::<MapViewState>()
+            .add_systems(
+                Startup,
+                (setup_map_camera, spawn_map_tiles, setup_map_view_banner).chain(),
+            )
+            .add_systems(
+                Update,
+                (
+                    map_view_click_fly,
+                    exit_map_view_before_focus.after(map_view_click_fly),
+                    apply_camera_focus.after(exit_map_view_before_focus),
+                    camera_pan,
+                    camera_zoom,
+                    toggle_map_view.after(camera_zoom),
+                    block_zoom_in_map_view
+                        .after(toggle_map_view)
+                        .after(camera_zoom),
+                ),
+            );
     }
 }

@@ -16,7 +16,10 @@ use sync::sync_track_terrain_from_map;
 use tools::track_tool_input;
 use visuals::apply_track_sprites;
 
+use crate::inspect::SelectionInputSet;
+
 pub use tools::{BuildTool, TrackToolState};
+pub use visuals::TrackSprite;
 
 pub struct TrackPlugin;
 
@@ -27,7 +30,7 @@ impl Plugin for TrackPlugin {
             .add_systems(
                 Update,
                 (
-                    track_tool_input,
+                    track_tool_input.after(SelectionInputSet),
                     sync_track_ghosts.after(track_tool_input),
                     update_build_feedback_ui.after(track_tool_input),
                     sync_flash_sprites.after(update_build_feedback_ui),

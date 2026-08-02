@@ -8,6 +8,8 @@ use bevy::prelude::*;
 use buildings::sync_building_sprites;
 use peep_sprites::sync_peep_sprites;
 
+pub use peep_sprites::PeepSprite;
+
 pub struct TownPresentationPlugin;
 
 impl Plugin for TownPresentationPlugin {

@@ -18,6 +18,7 @@ use rail_sim::{
     CommandBuffer, CommandKind, Money, TrackNetwork, TrackTerrain, GROUND_LAYER,
 };
 
+use crate::inspect::WorldClickConsumed;
 use crate::map::MapCamera;
 use crate::ui::UiBlocksWorld;
 
@@ -96,6 +97,7 @@ pub fn track_tool_input(
     mut state: ResMut<TrackToolState>,
     mut feedback: ResMut<BuildFeedback>,
     ui_blocks: Res<UiBlocksWorld>,
+    click_consumed: Res<WorldClickConsumed>,
 ) {
     if keys.just_pressed(KeyCode::KeyB) {
         state.tool = BuildTool::Build;
@@ -136,7 +138,7 @@ pub fn track_tool_input(
         return;
     };
 
-    if mouse.just_pressed(MouseButton::Left) {
+    if mouse.just_pressed(MouseButton::Left) && !click_consumed.0 {
         if let Some(tile) = hover {
             match state.tool {
                 BuildTool::Build => {

@@ -30,15 +30,19 @@ pub use commands::{
 };
 pub use history::{CommandHistory, HistoryEntry, HistoryMode, HISTORY_DEPTH};
 pub use economy::{
-    apply_train_opex, assign_jobs, resolve_deliveries, spawn_demand_jobs, JobBoard, JobKind,
-    GOODS_DELIVERY_CENTS, PASSENGER_FARE_CENTS, TRAIN_OPEX_CENTS,
+    apply_train_opex, assign_jobs, refresh_alerts, resolve_deliveries, spawn_demand_jobs,
+    tick_money_ledger, Alert, AlertBoard, AlertFocus, AlertKind, AlertKey, JobBoard, JobKind,
+    MoneyCategory, MoneyLedger, ALERT_CASH_LOW_MINUTES, ALERT_SERVICE_LOW_SCORE,
+    ALERT_WAITING_OVERWHELMED, GOODS_DELIVERY_CENTS, LEDGER_HISTORY_LEN, LEDGER_SAMPLE_SIM_SECS,
+    PASSENGER_FARE_CENTS, TRAIN_OPEX_CENTS,
 };
 pub use event_director::EventDirector;
 pub use ids::{EntityId, StationId, TileCoord, TrackId, TrainId};
 pub use money::{InsufficientFunds, Money, STARTING_CASH_CENTS};
 pub use peeps::{
-    ComplaintEntry, ComplaintFeed, Mood, Peep, PeepId, PeepsPlugin, WaitingAtStation,
-    COMPLAINT_WAIT_SECS, PEEPS_PER_STATION, SIM_SECONDS_PER_TICK,
+    ComplaintEntry, ComplaintFeed, Mood, Peep, PeepId, PeepsPlugin, TalkKind, TownTalkEntry,
+    TownTalkFeed, WaitingAtStation, COMPLAINT_DEDUPE_TICKS, COMPLAINT_WAIT_SECS, MAX_COMPLAINTS,
+    MAX_TOWN_TALK, PEEPS_PER_STATION, SIM_SECONDS_PER_TICK,
 };
 pub use stations::{
     seed_stations_and_industries, GoodKind, Industry, IndustryId, IndustryRegistry, Station,
@@ -92,6 +96,8 @@ impl Plugin for SimPlugin {
             .init_resource::<TrainYard>()
             .init_resource::<TileOccupancy>()
             .init_resource::<JobBoard>()
+            .init_resource::<MoneyLedger>()
+            .init_resource::<AlertBoard>()
             .init_resource::<WorldAnchorsSeeded>()
             .insert_resource(Money::sandbox_starting())
             .add_message::<PendingWorldCommand>()
@@ -119,6 +125,8 @@ impl Plugin for SimPlugin {
                     resolve_deliveries.after(advance_trains),
                     apply_train_opex.after(resolve_deliveries),
                     tick_station_service.after(apply_train_opex),
+                    tick_money_ledger.after(tick_station_service),
+                    refresh_alerts.after(tick_money_ledger),
                 )
                     .in_set(SimSet::Advance)
                     .run_if(sim_is_running),

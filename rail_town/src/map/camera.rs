@@ -13,8 +13,9 @@ use rail_map::{map_center_world, MapGrid};
 pub const ZOOM_FACTORS: [u8; 3] = [1, 2, 3];
 /// Default zoom: 2× (brief 01 §2.1).
 pub const DEFAULT_ZOOM_FACTOR: u8 = 2;
-const DEFAULT_ZOOM_INDEX: usize = 1; // ZOOM_FACTORS[1] == 2
-const PAN_SPEED: f32 = 400.0;
+pub(crate) const PAN_SPEED: f32 = 400.0;
+/// Default index into [`ZOOM_FACTORS`] (2×).
+pub(crate) const DEFAULT_ZOOM_INDEX: usize = 1; // ZOOM_FACTORS[1] == 2
 
 /// Orthographic projection scale for a zoom multiplier (`1×` → `1.0`, `2×` → `0.5`, …).
 #[inline]
@@ -34,6 +35,10 @@ pub struct MapCamera;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CameraZoomIndex(pub usize);
 
+/// One-shot camera fly-to request (alerts / Town Talk). Consumed by [`apply_camera_focus`].
+#[derive(Resource, Debug, Default)]
+pub struct CameraFocusRequest(pub Option<Vec2>);
+
 pub fn setup_map_camera(mut commands: Commands, map: Res<MapGrid>) {
     let (cx, cy) = map_center_world(map.width, map.height);
     commands.spawn((
@@ -46,6 +51,20 @@ pub fn setup_map_camera(mut commands: Commands, map: Res<MapGrid>) {
             ..OrthographicProjection::default_2d()
         }),
     ));
+}
+
+pub fn apply_camera_focus(
+    mut request: ResMut<CameraFocusRequest>,
+    mut q: Query<&mut Transform, With<MapCamera>>,
+) {
+    let Some(target) = request.0.take() else {
+        return;
+    };
+    let Ok(mut transform) = q.single_mut() else {
+        return;
+    };
+    transform.translation.x = target.x.round();
+    transform.translation.y = target.y.round();
 }
 
 pub fn camera_pan(

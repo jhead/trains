@@ -19,10 +19,10 @@ Tracks work against [`docs/design/11-roadmap.md`](design/11-roadmap.md). Update 
 
 | Item | Status |
 | --- | --- |
-| Selection + Inspector | pending |
-| Station panel / Peep card / Town Talk | pending |
-| Overlays + Map View | pending |
-| Ledger + alerts | pending |
+| Selection + Inspector | done |
+| Station panel / Peep card / Town Talk | Town Talk done (dedupe, praise, age, click-to-fly + select); station/peep panels via inspect |
+| Overlays + Map View | done — service / congestion / density (`Tab`, `F1`–`F3`); Map View `M` @ 4 texels/tile |
+| Ledger + alerts | done |
 
 ## Phase C — The Loop
 

@@ -96,8 +96,14 @@ pub fn micro_font() -> TextFont {
     TextFont::from_font_size(FONT_MICRO)
 }
 
-/// True when the pointer is over any interactive chrome (buttons).
-pub fn pointer_blocks_world(interactions: &Query<&Interaction, With<Button>>) -> bool {
+/// Marker on opaque chrome that should swallow world clicks (inspector, etc.).
+#[derive(Component, Debug, Default, Clone, Copy)]
+pub struct WorldClickBlocker;
+
+/// True when the pointer is over interactive chrome (buttons or blockers).
+pub fn pointer_blocks_world(
+    interactions: &Query<&Interaction, Or<(With<Button>, With<WorldClickBlocker>)>>,
+) -> bool {
     interactions
         .iter()
         .any(|i| matches!(i, Interaction::Hovered | Interaction::Pressed))

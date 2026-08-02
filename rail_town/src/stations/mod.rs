@@ -9,6 +9,8 @@ use bevy::prelude::*;
 
 use visuals::sync_station_industry_sprites;
 
+pub use visuals::{IndustrySprite, StationSprite};
+
 pub struct StationsPlugin;
 
 impl Plugin for StationsPlugin {

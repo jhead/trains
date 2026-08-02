@@ -4,7 +4,9 @@
 //! clock / track / town / peeps), HUD, input bridge for pause / speed, and
 //! track build tools. Domain systems join `FixedUpdate` via [`rail_sim::SimSet`].
 
+mod inspect;
 mod map;
+mod overlays;
 mod palette;
 mod sim_bridge;
 mod stations;
@@ -14,7 +16,9 @@ mod trains;
 mod ui;
 
 use bevy::prelude::*;
+use inspect::InspectPlugin;
 use map::MapPlugin;
+use overlays::OverlaysPlugin;
 use palette::BG0;
 use rail_net::NeighborService;
 use rail_sim::SimPlugin;
@@ -43,6 +47,8 @@ fn main() {
         .add_plugins(StationsPlugin)
         .add_plugins(TrainsPlugin)
         .add_plugins(TownPresentationPlugin)
+        .add_plugins(InspectPlugin)
+        .add_plugins(OverlaysPlugin)
         .add_plugins(UiPlugin)
         // Null neighbor backend: single-player never blocks on edge handoff.
         .insert_resource(NeighborService::null())

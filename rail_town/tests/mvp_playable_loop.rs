@@ -361,8 +361,10 @@ fn mvp_playable_loop_delivers_and_complains() {
         "expected at least one peep wait complaint after long sim"
     );
     let line = feed.latest_line().expect("complaint line");
+    // Single voice: "Mara waited 11 min at Eastgate"
+    // Deduped: "N people are waiting at Eastgate"
     assert!(
-        line.contains("waited") && line.contains("min"),
+        (line.contains("waited") && line.contains("min")) || line.contains("are waiting at"),
         "unexpected complaint line: {line}"
     );
 }

@@ -14,6 +14,7 @@ use rail_sim::{
     TrackNetwork, GROUND_LAYER,
 };
 
+use crate::inspect::WorldClickConsumed;
 use crate::map::MapCamera;
 use crate::track::{BuildTool, TrackToolState};
 use crate::ui::UiBlocksWorld;
@@ -54,6 +55,7 @@ pub fn train_tool_input(
     mut train_state: ResMut<TrainToolState>,
     mut track_state: ResMut<TrackToolState>,
     ui_blocks: Res<UiBlocksWorld>,
+    click_consumed: Res<WorldClickConsumed>,
 ) {
     if keys.just_pressed(KeyCode::KeyT) {
         buffer.push(CommandKind::BuyTrain(BuyTrain {
@@ -87,7 +89,7 @@ pub fn train_tool_input(
         return;
     }
 
-    if ui_blocks.0 {
+    if ui_blocks.0 || click_consumed.0 {
         return;
     }
 

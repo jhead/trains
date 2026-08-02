@@ -4,6 +4,8 @@ Calm pixel-art railway sandbox. Design brief: [`DESIGN.md`](./DESIGN.md).
 
 ## Docs
 
+- [`docs/design/`](./docs/design/README.md) — **the design briefs**: art direction, world, UI, building, inspection, town, lines, economy, shell, audio, roadmap
+- [`docs/PROGRESS-AUDIT.md`](./docs/PROGRESS-AUDIT.md) — where the build stands against those briefs
 - [`docs/TECH_STACK.md`](./docs/TECH_STACK.md) — Bevy ECS, Steam + web targets, crate split
 - [`docs/IMPLEMENTATION_PLAN.md`](./docs/IMPLEMENTATION_PLAN.md) — MVP scope, MP seams, slices
 

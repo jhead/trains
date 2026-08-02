@@ -6,6 +6,7 @@ members = [
     "rail_map",
     "rail_net",
 ]
+default-members = ["rail_town"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Build Rail Town for wasm32 and serve it locally (Bevy CLI).
+# Usage:
+#   ./scripts/web           # http://127.0.0.1:4000
+#   ./scripts/web --open    # also open the browser
+#   ./scripts/web --release # smaller/faster; slower compile
+# Extra args after -- are passed through, e.g. ./scripts/web -- --port 8080
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+BEVY_CLI_TAG="${BEVY_CLI_TAG:-cli-v0.1.0-alpha.2}"
+OPEN=0
+RELEASE=0
+PASSTHRU=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --open) OPEN=1; shift ;;
+    --release) RELEASE=1; shift ;;
+    --) shift; PASSTHRU+=("$@"); break ;;
+    -h|--help)
+      sed -n '2,8p' "$0" | tr -d '#'
+      exit 0
+      ;;
+    *)
+      PASSTHRU+=("$1")
+      shift
+      ;;
+  esac
+done
+
+ensure_bevy_cli() {
+  if command -v bevy >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "Bevy CLI not found — installing ${BEVY_CLI_TAG} (one-time)…"
+  cargo install --git https://github.com/TheBevyFlock/bevy_cli \
+    --tag "${BEVY_CLI_TAG}" --locked bevy_cli
+}
+
+ensure_wasm_target() {
+  if ! rustup target list --installed | grep -q '^wasm32-unknown-unknown$'; then
+    echo "Adding wasm32-unknown-unknown rustup target…"
+    rustup target add wasm32-unknown-unknown
+  fi
+}
+
+ensure_bevy_cli
+ensure_wasm_target
+
+CMD=(bevy run -p rail_town --yes)
+if [[ "$RELEASE" -eq 1 ]]; then
+  CMD+=(--release)
+fi
+CMD+=(web)
+if [[ "$OPEN" -eq 1 ]]; then
+  CMD+=(--open)
+fi
+if [[ ${#PASSTHRU[@]} -gt 0 ]]; then
+  CMD+=("${PASSTHRU[@]}")
+fi
+
+echo "+ ${CMD[*]}"
+echo "Dev server default: http://127.0.0.1:4000  (e.g. ./scripts/web -- --port 8080)"
+exec "${CMD[@]}"

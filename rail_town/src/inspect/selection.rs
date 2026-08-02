@@ -120,6 +120,7 @@ pub fn selection_click_input(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<MapCamera>>,
     map: Res<MapGrid>,
+    map_view: Res<MapViewState>,
     ui_blocks: Res<UiBlocksWorld>,
     train_tool: Res<TrainToolState>,
     track_tool: Res<TrackToolState>,
@@ -141,6 +142,10 @@ pub fn selection_click_input(
         return;
     }
     if ui_blocks.0 {
+        return;
+    }
+    // Map View owns left-click (fly-to); don't pick undersampled sprites.
+    if map_view.active {
         return;
     }
     if train_tool.place_mode {

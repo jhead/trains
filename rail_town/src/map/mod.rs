@@ -12,6 +12,8 @@ use rail_map::{generate_map, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_SEED, DEFAULT_MAP_W
 use camera::{camera_pan, camera_zoom, setup_map_camera};
 use spawn::spawn_map_tiles;
 
+pub use camera::MapCamera;
+
 /// Inserts a generated [`MapGrid`] and registers spawn / camera systems.
 pub struct MapPlugin {
     pub width: u32,

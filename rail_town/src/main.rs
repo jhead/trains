@@ -5,6 +5,7 @@
 //! track build tools. Domain systems join `FixedUpdate` via [`rail_sim::SimSet`].
 
 mod atmosphere;
+mod audio;
 mod inspect;
 mod lines;
 mod map;
@@ -19,6 +20,7 @@ mod trains;
 mod ui;
 
 use atmosphere::AtmospherePlugin;
+use audio::AudioPlugin;
 use bevy::prelude::*;
 use inspect::InspectPlugin;
 use lines::LinesPlugin;
@@ -66,6 +68,9 @@ fn main() {
         .add_plugins(TownPresentationPlugin)
         // Time-of-day tint, lit windows, and world-anchored ambient motion.
         .add_plugins(AtmospherePlugin)
+        // Procedural ambience, railway sound, interface sound and the score.
+        // Reads the sim, map and atmosphere resources, so it follows them.
+        .add_plugins(AudioPlugin)
         .add_plugins(InspectPlugin)
         .add_plugins(OverlaysPlugin)
         .add_plugins(UiPlugin)

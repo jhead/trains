@@ -30,7 +30,7 @@ use super::bank::SfxBank;
 use super::dsp::{approach, lerp, Rng};
 use super::mixer::{gain, play, AudioClock, AudioMix, Cue, SoundCategory, VoiceBudget};
 use super::voice::{LiveVoice, VoiceKind};
-use super::voices::{spawn_positional, VoiceHandle};
+use super::voices::{spawn_positional, VoiceEmitter, VoiceHandle};
 
 /// Concurrent rolling voices. The nearest trains win; the rest of a busy
 /// network is carried by the town bed, which is where a distant network belongs.
@@ -179,7 +179,7 @@ pub fn drive_rolling_voices(
     mut audio: ResMut<TrainAudio>,
     mut budget: ResMut<VoiceBudget>,
     mut assets: ResMut<Assets<LiveVoice>>,
-    mut transforms: Query<&mut Transform>,
+    mut transforms: Query<&mut Transform, With<VoiceEmitter>>,
     mut sinks: Query<&mut AudioSink>,
     mut spatial: Query<&mut SpatialAudioSink>,
     mut commands: Commands,
@@ -207,27 +207,23 @@ pub fn drive_rolling_voices(
             continue;
         }
 
-        if !audio.voices.contains_key(&state.id.0) {
-            let handle = spawn_positional(
-                &mut commands,
-                &mut assets,
-                VoiceKind::Rolling,
-                state.id.0.wrapping_mul(2_654_435_761),
-                state.at,
-            );
-            audio.voices.insert(
-                state.id.0,
-                RollingVoice {
-                    handle,
-                    closing: 0.0,
-                    last_dist: (state.at - mix.listener).length(),
-                    keep: true,
-                },
-            );
-        }
-        let Some(voice) = audio.voices.get_mut(&state.id.0) else {
-            continue;
-        };
+        let seed = state.id.0.wrapping_mul(2_654_435_761);
+        let start_dist = (state.at - mix.listener).length();
+        let voice = audio
+            .voices
+            .entry(state.id.0)
+            .or_insert_with(|| RollingVoice {
+                handle: spawn_positional(
+                    &mut commands,
+                    &mut assets,
+                    VoiceKind::Rolling,
+                    seed,
+                    state.at,
+                ),
+                closing: 0.0,
+                last_dist: start_dist,
+                keep: true,
+            });
         voice.keep = true;
 
         voice.handle.params.set_motion(state.speed);

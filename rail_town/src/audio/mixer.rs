@@ -273,11 +273,14 @@ impl Duck {
     }
 }
 
+/// The farthest live instance in a category, and how far away it is.
+type Farthest = Option<(Entity, f32)>;
+
 /// Live one-shot voices per category, and the farthest of each.
 #[derive(Resource, Debug, Default)]
 pub struct VoiceBudget {
     live: [u16; CATEGORIES],
-    farthest: [Option<(Entity, f32)>; CATEGORIES],
+    farthest: [Farthest; CATEGORIES],
 }
 
 /// What the budget says about a requested sound.
@@ -326,9 +329,14 @@ pub fn spawn_listener(mut commands: Commands) {
     ));
 }
 
+/// The map camera, read for its position and its zoom, and excluded from the
+/// listener query so the two `Transform` borrows stay disjoint.
+type CameraView<'w, 's> =
+    Query<'w, 's, (&'static Transform, &'static Projection), (With<MapCamera>, Without<AudioListener>)>;
+
 /// Track the camera, and read zoom out of its projection.
 pub fn sync_listener(
-    camera: Query<(&Transform, &Projection), (With<MapCamera>, Without<AudioListener>)>,
+    camera: CameraView,
     map_view: Option<Res<MapViewState>>,
     mut listener: Query<&mut Transform, With<AudioListener>>,
     mut mix: ResMut<AudioMix>,

@@ -21,7 +21,7 @@ use bevy::asset::Asset;
 use bevy::audio::{Decodable, Source as RodioSource};
 use bevy::reflect::TypePath;
 
-use super::dsp::{exp_decay, lerp, raised_cosine, sine, soft_clip, svf_damp, svf_f, Rng, Svf};
+use super::dsp::{exp_decay, lerp, raised_cosine, sine, svf_damp, svf_f, Rng, Svf};
 
 /// Working sample rate for every synthesised sound.
 ///
@@ -147,6 +147,7 @@ impl Canvas {
     /// partial (`1.0` = steady). Real struck objects fall slightly in pitch as
     /// they settle; a touch of drift is most of the difference between "wood"
     /// and "sine wave".
+    #[allow(clippy::too_many_arguments)]
     pub fn partial(
         &mut self,
         start: f32,
@@ -264,6 +265,7 @@ impl Canvas {
     }
 
     /// Low-passed noise — settling debris, breath, air.
+    #[allow(clippy::too_many_arguments)]
     pub fn noise_soft(
         &mut self,
         rng: &mut Rng,
@@ -323,11 +325,13 @@ impl Canvas {
             self.buf[idx] *= raised_cosine(i as f32 / tail as f32);
         }
 
+        // Straight normalisation: the scale is exact, so the finished peak is
+        // exactly `NORMALISE_PEAK` and no saturation colours the result.
         let peak = self.buf.iter().fold(0.0f32, |acc, s| acc.max(s.abs()));
         if peak > 1e-6 {
             let scale = NORMALISE_PEAK / peak;
             for sample in self.buf.iter_mut() {
-                *sample = soft_clip(*sample * scale);
+                *sample *= scale;
             }
         }
 
@@ -337,32 +341,48 @@ impl Canvas {
     }
 }
 
-/// Worst frame-to-frame jump in a clip's short-term envelope, as a fraction of
-/// its peak.
+/// The attack every clip is allowed before [`worst_envelope_step`] starts
+/// looking. Percussion is *supposed* to arrive fast; what it must not do is
+/// arrive from a discontinuity, which [`HEAD_FADE_SECS`] and the soft-attack
+/// assertions cover instead.
+#[cfg(test)]
+pub const ATTACK_GRACE_SECS: f32 = 0.012;
+
+/// Worst frame-to-frame jump in a clip's envelope after its attack, as a
+/// fraction of its peak.
 ///
 /// **This, not the raw sample slope, is what a click is.** A 5 kHz partial at
 /// full scale legitimately moves almost the whole range between two samples at
-/// 22 kHz; what the ear reads as a crack is the *envelope* arriving instantly.
-/// Measuring 1 ms RMS windows catches a genuine discontinuity and ignores the
-/// waveform underneath it.
+/// 22 kHz; what the ear reads as a crack is the *envelope* arriving or
+/// vanishing instantly. Windowed RMS catches that and ignores the waveform
+/// underneath it. A hard cut anywhere — a layer starting at full level, a clip
+/// truncated mid-signal — shows up here as a step near `1.0`.
 #[cfg(test)]
 pub fn worst_envelope_step(clip: &SampleClip) -> f32 {
-    let window = (0.001 * SR) as usize;
+    // Twelve milliseconds is about one cycle of the lowest thing in the bank
+    // (a 70 Hz bridge thump). A shorter window would measure the waveform of a
+    // bass partial rather than its envelope and report a click that is not one.
+    let window = (0.012 * SR) as usize;
     let peak = clip.data.iter().fold(0.0f32, |a, s| a.max(s.abs()));
     if peak < 1e-6 || window == 0 {
         return 0.0;
     }
+    let skip = (ATTACK_GRACE_SECS * SR) as usize;
     let mut worst = 0.0f32;
-    let mut previous = 0.0f32;
-    for chunk in clip.data.chunks(window) {
+    let mut previous: Option<f32> = None;
+    for (i, chunk) in clip.data.chunks(window).enumerate() {
         let rms =
             (chunk.iter().map(|s| (s * s) as f64).sum::<f64>() / chunk.len() as f64).sqrt() as f32;
-        worst = worst.max((rms - previous).abs());
-        previous = rms;
+        if i * window >= skip {
+            if let Some(previous) = previous {
+                worst = worst.max((rms - previous).abs());
+            }
+            previous = Some(rms);
+        }
     }
-    // A clip that ends mid-signal would look like a step; the tail fade means
-    // it never does, and the final window is included on purpose.
-    worst.max(previous) / peak
+    // The last window is compared against silence too: a clip truncated
+    // mid-signal is exactly the failure this is here to catch.
+    worst.max(previous.unwrap_or(0.0)) / peak
 }
 
 #[cfg(test)]
@@ -392,6 +412,27 @@ mod tests {
         let clip = canvas.finish();
         let step = worst_envelope_step(&clip);
         assert!(step < 0.35, "envelope jumped by {step} of full scale");
+    }
+
+    #[test]
+    fn the_de_click_check_catches_a_real_cut() {
+        // Guard the guard: a clip truncated while it is still sounding must
+        // fail, or the check above proves nothing.
+        let mut canvas = Canvas::new(0.7);
+        canvas.partial(0.0, 300.0, 1.0, 0.01, 0.35, 0.7, 1.0);
+        let clip = canvas.finish();
+        assert!(
+            worst_envelope_step(&clip) < 0.35,
+            "the intact clip is fine: {}",
+            worst_envelope_step(&clip)
+        );
+        let cut = SampleClip {
+            data: clip.data[..clip.data.len() / 3].into(),
+        };
+        assert!(
+            worst_envelope_step(&cut) > 0.35,
+            "a truncated clip must be detected"
+        );
     }
 
     #[test]

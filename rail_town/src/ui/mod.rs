@@ -1,4 +1,6 @@
-//! Pixel UI kit, status strip, toolbar, undo input, Town Talk, ledger, alerts, SFX.
+//! Pixel UI kit, status strip, toolbar, undo input, Town Talk, ledger, alerts.
+//!
+//! Sound lives in the `audio` module, not here.
 //!
 //! **Bitmap font follow-up:** see [`kit`] — integer Bevy font sizes until a
 //! true bitmap pixel font ships.
@@ -6,8 +8,6 @@
 mod alerts;
 pub(crate) mod kit;
 mod ledger;
-#[cfg(feature = "sfx")]
-mod sfx;
 mod status_strip;
 mod toolbar;
 mod town_talk;
@@ -67,12 +67,6 @@ impl Plugin for UiPlugin {
                     undo_redo_input,
                 ),
             );
-
-        #[cfg(feature = "sfx")]
-        {
-            app.add_systems(Startup, sfx::setup_track_sfx)
-                .add_systems(Update, sfx::play_track_sfx);
-        }
     }
 }
 

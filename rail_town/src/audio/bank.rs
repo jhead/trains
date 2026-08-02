@@ -224,7 +224,7 @@ fn demolish(variant: usize, rng: &mut Rng) -> Canvas {
 /// 400 Hz is filtered off after the fact, so no amount of repetition can turn it
 /// into a buzz, and the 12 ms attack means it can never crack.
 fn invalid(variant: usize, rng: &mut Rng) -> Canvas {
-    let pitch = semitones(variant as f32 * -1.0);
+    let pitch = semitones(-(variant as f32));
     let mut c = Canvas::new(0.42);
     c.partial(0.0, 74.0 * pitch, 0.85, 0.012, 0.085, 0.36, 0.93);
     c.partial(0.0, 139.0 * pitch, 0.22, 0.014, 0.050, 0.22, 0.95);
@@ -438,7 +438,7 @@ mod tests {
             assert_eq!(clip.data[0], 0.0, "{name} starts on a step");
             assert_eq!(*clip.data.last().unwrap(), 0.0, "{name} ends on a step");
             let step = worst_envelope_step(&clip);
-            assert!(step < 0.4, "{name} has a {step} envelope discontinuity");
+            assert!(step < 0.35, "{name} has a {step} envelope discontinuity");
             let ms = (0.001 * SR) as usize;
             let early = clip.data[..ms].iter().fold(0.0f32, |a, s| a.max(s.abs()));
             assert!(

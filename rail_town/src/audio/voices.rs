@@ -19,6 +19,12 @@ const SPATIAL_SCALE: f32 = 1.0 / 8192.0;
 /// Below this the sink is left at zero rather than at an inaudible trickle.
 const SILENCE: f32 = 0.0008;
 
+/// Marks a positional voice's entity so its transform can be updated without a
+/// world-wide `Query<&mut Transform>` fighting the camera and sprite systems
+/// for scheduling.
+#[derive(Component, Debug)]
+pub struct VoiceEmitter;
+
 /// A spawned live voice and its controls.
 #[derive(Debug, Clone)]
 pub struct VoiceHandle {
@@ -108,6 +114,7 @@ pub fn spawn_positional(
                 .with_spatial(true)
                 .with_spatial_scale(SpatialScale::new_2d(SPATIAL_SCALE)),
             Transform::from_xyz(at.x, at.y, 0.0),
+            VoiceEmitter,
             Name::new(format!("audio:{}", kind.label())),
         ))
         .id();

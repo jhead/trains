@@ -251,7 +251,11 @@ pub fn watch_stations(
     let Some(bank) = bank else {
         return;
     };
-    let current: Vec<u64> = stations.iter().map(|s| s.id.0).collect();
+    // `StationRegistry::iter` walks a `HashMap`, so the order is arbitrary
+    // between frames; without the sort this comparison would report a change
+    // every frame and fire a phantom demolition whenever the order shifted.
+    let mut current: Vec<u64> = stations.iter().map(|s| s.id.0).collect();
+    current.sort_unstable();
     if current == audio.stations {
         return;
     }

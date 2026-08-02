@@ -66,7 +66,7 @@ impl Default for MusicDirector {
             stage: Stage::Silent,
             until: 0.0,
             began: 0.0,
-            rng: Rng::new(0x6d75_7369_63),
+            rng: Rng::new(0x006d_7573_6963),
             started: false,
         }
     }

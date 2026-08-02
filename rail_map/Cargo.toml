@@ -1,0 +1,9 @@
+[package]
+name = "rail_map"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rail Town map, terrain, and edge portal stubs"
+
+[dependencies]
+serde.workspace = true

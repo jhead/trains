@@ -114,6 +114,7 @@ pub fn sync_peep_sprites(
         Without<PeepSprite>,
     >,
 ) {
+    let _perf = crate::overlays::perf::scope("sync_peep_sprites");
     let mut live: std::collections::HashMap<PeepId, Pose> =
         std::collections::HashMap::with_capacity(peeps.iter().len());
     for (peep, pos, journey, detail) in &peeps {

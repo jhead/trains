@@ -23,14 +23,10 @@ use rail_sim::{CommandBuffer, TileCoord, TrackNetwork, TrackTerrain, Train, Trai
 
 use crate::palette::{BALLAST_L, BG1, HI, OUTLINE, RAIL_L};
 use crate::ui::kit::{
-    body_font, micro_font, panel_node, text_accent, text_primary, text_secondary, FONT_MICRO,
-    SPACE_1, SPACE_2, SPACE_3, STATUS_H,
+    micro_font, panel_node, text_primary, text_secondary, WorldClickBlocker, FONT_MICRO, SPACE_1,
+    SPACE_2,
 };
-
-#[derive(Resource, Debug, Default)]
-pub struct NeighboursPanelState {
-    pub open: bool,
-}
+use crate::ui::{UiWindow, WindowId, WindowManager};
 
 #[derive(Component)]
 pub struct NeighboursPanelRoot;
@@ -64,14 +60,13 @@ pub(crate) struct NeighboursUiCache {
 }
 
 pub fn setup_neighbours_panel(mut commands: Commands) {
-    commands.init_resource::<NeighboursPanelState>();
     commands.insert_resource(NeighboursUiCache::default());
 
+    // Position, open state and stacking belong to the window manager (03 §5);
+    // this panel only says how wide it is and what goes inside.
     let (node, bg, border) = panel_node(Node {
         position_type: PositionType::Absolute,
-        top: Val::Px(STATUS_H + SPACE_2),
-        right: Val::Px(SPACE_3),
-        width: Val::Px(320.0),
+        width: Val::Px(300.0),
         flex_direction: FlexDirection::Column,
         row_gap: Val::Px(SPACE_2),
         padding: UiRect::all(Val::Px(SPACE_2)),
@@ -80,20 +75,17 @@ pub fn setup_neighbours_panel(mut commands: Commands) {
     });
 
     commands
-        .spawn((NeighboursPanelRoot, node, bg, border, ZIndex(12)))
+        .spawn((
+            NeighboursPanelRoot,
+            UiWindow::new(WindowId::Neighbours),
+            WorldClickBlocker,
+            Interaction::default(),
+            node,
+            bg,
+            border,
+        ))
         .with_children(|panel| {
-            panel
-                .spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    justify_content: JustifyContent::SpaceBetween,
-                    align_items: AlignItems::Center,
-                    width: Val::Percent(100.0),
-                    ..default()
-                })
-                .with_children(|row| {
-                    row.spawn((Text::new("Neighbours"), body_font(), text_accent()));
-                    row.spawn((Text::new("N"), micro_font(), text_secondary()));
-                });
+            panel.spawn((Text::new("Press N to reopen"), micro_font(), text_secondary()));
 
             for edge in BorderEdge::ALL {
                 panel
@@ -166,38 +158,28 @@ fn spawn_action(
         });
 }
 
+/// `N` toggles the window. `Esc` is handled by the window manager, which closes
+/// the topmost window and consumes the key (03 §10.1) — this must not also try.
 pub fn neighbours_panel_input(
     keys: Res<ButtonInput<KeyCode>>,
-    mut state: ResMut<NeighboursPanelState>,
+    mut manager: ResMut<WindowManager>,
 ) {
-    if keys.just_pressed(KeyCode::Escape) && state.open {
-        state.open = false;
-        return;
-    }
     if keys.just_pressed(KeyCode::KeyN) {
-        state.open = !state.open;
+        manager.toggle(WindowId::Neighbours);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_neighbours_panel(
-    state: Res<NeighboursPanelState>,
+    manager: Res<WindowManager>,
     registry: Res<BorderRegistry>,
     network: Res<TrackNetwork>,
     terrain: Option<Res<TrackTerrain>>,
     mut cache: ResMut<NeighboursUiCache>,
-    mut root_q: Query<&mut Node, (With<NeighboursPanelRoot>, Without<NeighbourButton>)>,
     mut text_q: Query<(&NeighbourRowText, &mut Text)>,
     mut button_q: Query<(&NeighbourButton, &mut Node), Without<NeighboursPanelRoot>>,
 ) {
-    if let Ok(mut node) = root_q.single_mut() {
-        node.display = if state.open {
-            Display::Flex
-        } else {
-            Display::None
-        };
-    }
-    if !state.open {
+    if !manager.is_open(WindowId::Neighbours) {
         return;
     }
 

@@ -9,9 +9,11 @@ mod selection;
 
 use bevy::prelude::*;
 
-use hover::{hover_pick, setup_hover, sync_hover_brackets, update_hover_tooltip, Hovered};
+use hover::{
+    hover_pick, setup_hover, sync_hover_brackets, update_hover_tooltip, HoverProbe, Hovered,
+};
 use outline::{setup_selection_outline, sync_selection_outline};
-use panel::{inspector_close_clicks, setup_inspector_panel, update_inspector_panel};
+use panel::{setup_inspector_panel, update_inspector_panel};
 use selection::{
     follow_selection, sample_service_history, selection_click_input, ServiceScoreHistory,
 };
@@ -31,6 +33,7 @@ impl Plugin for InspectPlugin {
             .init_resource::<WorldClickConsumed>()
             .init_resource::<ServiceScoreHistory>()
             .init_resource::<Hovered>()
+            .init_resource::<HoverProbe>()
             .configure_sets(Update, SelectionInputSet)
             .add_systems(
                 Startup,
@@ -43,12 +46,18 @@ impl Plugin for InspectPlugin {
                     follow_selection,
                     sample_service_history,
                     sync_selection_outline,
+                    // Closing the Inspector is the window manager's job now
+                    // (`ui::window` owns the close box, `ui::adapters` turns a
+                    // close back into a cleared selection), so this only fills
+                    // the rows in.
                     update_inspector_panel,
-                    inspector_close_clicks,
                 ),
             )
             // Hover is the middle tier of interrogation (brief 05 §1): pick,
-            // then draw the bracket and the tooltip from what was picked.
+            // then draw the bracket and the chip from what was picked.
+            //
+            // `hover_pick` gates itself on pointer / camera / window movement,
+            // so on a still frame this whole chain costs three early returns.
             .add_systems(
                 Update,
                 (

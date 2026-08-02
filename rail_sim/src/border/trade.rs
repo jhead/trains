@@ -186,13 +186,24 @@ pub fn advance_border_trade(
     mut commands: Commands,
     mut edits: MessageWriter<BorderEdit>,
 ) {
-    registry.tick = registry.tick.saturating_add(1);
-    let tick = registry.tick;
-    let seed = registry.seed;
+    // The tick is a clock, not an edit.
+    //
+    // Bumping it through change detection marked `BorderRegistry` changed on
+    // every sim tick, including solo play with no border ever opened — and a
+    // consumer that reasonably read `is_changed()` as "a link moved" then did
+    // its work every frame forever. (Presentation's portal mirror did exactly
+    // that, and it cost two thirds of the frame.) Advance the clock without
+    // announcing it, and announce only once there is real border work.
+    let clock = registry.bypass_change_detection();
+    clock.tick = clock.tick.saturating_add(1);
+    let tick = clock.tick;
+    let seed = clock.seed;
     // Solo play with no border ever opened costs one increment a tick.
-    if registry.is_empty() && registry.trains_in_transit() == 0 {
+    if clock.is_empty() && clock.trains_in_transit() == 0 {
         return;
     }
+    // Past here the links are walked mutably, so report the change honestly.
+    registry.set_changed();
 
     // ── Their side: the cache, their rhythm, and what they are asking for ──
     for link in registry.iter_mut() {

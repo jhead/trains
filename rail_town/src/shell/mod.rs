@@ -123,6 +123,16 @@ impl ShellState {
     pub fn is_menu(self) -> bool {
         !matches!(self, Self::Playing)
     }
+
+    /// Whether the title's slow camera drift should own the view.
+    ///
+    /// Deliberately **not** [`Self::is_menu`]. Pause is a menu, but it is drawn
+    /// over the player's own view of their own world — drifting there wanders
+    /// the camera off wherever they were standing, and resuming dumps them
+    /// somewhere else entirely. Pause holds the camera exactly still.
+    pub fn drifts_background(self) -> bool {
+        matches!(self, Self::Title | Self::NewMap)
+    }
 }
 
 /// Where the world the shell boots into comes from.
@@ -177,6 +187,11 @@ pub fn world_rebuild_pending(pending: Res<PendingWorld>) -> bool {
 /// Run condition: the shell owns the screen.
 pub fn shell_owns_screen(state: Res<State<ShellState>>) -> bool {
     state.get().is_menu()
+}
+
+/// Run condition for the title's background drift.
+pub fn shell_drifts_background(state: Res<State<ShellState>>) -> bool {
+    state.get().drifts_background()
 }
 
 /// Title, new map, pause menu, settings, and the state machine behind them.
@@ -241,6 +256,9 @@ impl Plugin for ShellPlugin {
             )
             .add_systems(OnEnter(ShellState::Paused), pause_sim)
             .add_systems(OnEnter(ShellState::Playing), resume_sim)
+            // `Esc` reaches an open window before it reaches the pause menu
+            // (design 03 §10.1). `ui::WindowEscSet` closes the top window and
+            // consumes the key, so ordering after it is the whole coordination.
             .add_systems(
                 PreUpdate,
                 (
@@ -249,7 +267,8 @@ impl Plugin for ShellPlugin {
                     menu_keyboard_nav.run_if(shell_menu_visible),
                 )
                     .chain()
-                    .after(InputSystems),
+                    .after(InputSystems)
+                    .after(crate::ui::WindowEscSet),
             )
             .add_systems(
                 Update,
@@ -288,7 +307,7 @@ impl Plugin for ShellPlugin {
             )
             .add_systems(
                 PostUpdate,
-                title::drift_background_world.run_if(shell_owns_screen),
+                title::drift_background_world.run_if(shell_drifts_background),
             )
             .add_systems(Last, finish_world_rebuild);
 
@@ -610,6 +629,22 @@ fn mark_rebuild_after_load(
 
 #[cfg(test)]
 mod tests {
+    use super::ShellState;
+
+    #[test]
+    fn pause_holds_the_camera_where_the_player_left_it() {
+        // Pause is a menu, but it is drawn over the player's own view. Drifting
+        // there wanders the camera off and resuming dumps them somewhere else.
+        assert!(ShellState::Paused.is_menu());
+        assert!(
+            !ShellState::Paused.drifts_background(),
+            "pausing must not hand the camera to the title drift"
+        );
+        assert!(ShellState::Title.drifts_background());
+        assert!(ShellState::NewMap.drifts_background());
+        assert!(!ShellState::Playing.drifts_background());
+    }
+
     use super::*;
     use bevy::asset::AssetPlugin;
     use bevy::input::keyboard::{Key, KeyboardInput};

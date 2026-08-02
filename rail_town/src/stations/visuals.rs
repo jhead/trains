@@ -45,6 +45,7 @@ pub fn sync_station_industry_sprites(
     existing_industries: Query<(Entity, &IndustrySprite, Option<&NewDemandMarker>)>,
     mut sprites: Query<&mut Sprite>,
 ) {
+    let _perf = crate::overlays::perf::scope("sync_station_industry_sprites");
     let station_sprites: Vec<(Entity, StationId, bool)> = existing_stations
         .iter()
         .map(|(e, s, m)| (e, s.id, m.is_some()))

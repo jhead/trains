@@ -1,20 +1,33 @@
-//! Top-right alert strip — non-modal, clickable, dismissible.
+//! Alerts window — non-modal, clickable, dismissible.
+//!
+//! Alerts were the primary way the player found out the railway was unwell,
+//! which is why the very first frame of a new game shouted "Westbrook service
+//! low (0)" at someone who had done nothing wrong. Health is now a permanent
+//! readout ([`super::health`]), and this window is what it always should have
+//! been: a list of things that changed for the worse and can be acted on.
+//!
+//! Brief 05 §7's rule is enforced by [`alert_is_actionable`]: an alert about a
+//! station that has never been served is not shown here and is not counted on
+//! the status strip's bell.
 
 use bevy::prelude::*;
 use rail_map::tile_to_world;
-use rail_sim::{AlertBoard, AlertFocus, StationRegistry};
+use rail_sim::{AlertBoard, AlertFocus, StationRegistry, StationService};
 
 use crate::inspect::{Selectable, Selection};
-use crate::map::CameraFocusRequest;
-use crate::palette::{BG1, HI, OUTLINE, WARN};
+use crate::palette::{BG1, OUTLINE};
+use crate::ui::health::alert_is_actionable;
 use crate::ui::kit::{
-    body_font, micro_font, text_primary, text_secondary, text_warn, SPACE_2, SPACE_3, STATUS_H,
+    chrome_button_node, control_border, micro_font, text_primary, text_secondary, text_warn,
+    SPACE_1,
 };
-
-const MAX_VISIBLE: usize = 3;
+use crate::ui::window::{window_root, WindowId, WindowManager};
 
 #[derive(Component)]
 pub struct AlertStripRoot;
+
+#[derive(Component)]
+pub struct AlertListBody;
 
 #[derive(Component)]
 pub struct AlertRow {
@@ -24,9 +37,6 @@ pub struct AlertRow {
 #[derive(Component)]
 pub struct AlertDismissAllButton;
 
-#[derive(Component)]
-pub struct AlertCountText;
-
 #[derive(Resource, Debug, Default)]
 pub(crate) struct AlertUiCache {
     fingerprint: String,
@@ -34,32 +44,42 @@ pub(crate) struct AlertUiCache {
 
 pub fn setup_alerts_ui(mut commands: Commands) {
     commands.insert_resource(AlertUiCache::default());
-    commands.spawn((
-        AlertStripRoot,
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(STATUS_H + SPACE_2),
-            right: Val::Px(SPACE_3),
-            width: Val::Px(320.0),
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(4.0),
-            align_items: AlignItems::Stretch,
-            ..default()
-        },
-        ZIndex(11),
-    ));
+    commands
+        .spawn((AlertStripRoot, window_root(WindowId::Alerts, 300.0)))
+        .with_children(|panel| {
+            panel.spawn((
+                AlertListBody,
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(SPACE_1),
+                    ..default()
+                },
+            ));
+        });
 }
 
 pub fn update_alerts_ui(
+    manager: Res<WindowManager>,
     board: Res<AlertBoard>,
+    service: Res<StationService>,
     mut cache: ResMut<AlertUiCache>,
     mut commands: Commands,
-    root_q: Query<Entity, With<AlertStripRoot>>,
-    children_q: Query<&Children, With<AlertStripRoot>>,
+    body_q: Query<Entity, With<AlertListBody>>,
+    children_q: Query<&Children, With<AlertListBody>>,
 ) {
-    let fingerprint = board
+    if !manager.is_open(WindowId::Alerts) {
+        return;
+    }
+    let visible: Vec<(u64, String)> = board
         .iter()
-        .map(|a| format!("{}:{}", a.id, a.message))
+        .filter(|a| alert_is_actionable(a, &service))
+        .map(|a| (a.id, a.message.clone()))
+        .collect();
+
+    let fingerprint = visible
+        .iter()
+        .map(|(id, message)| format!("{id}:{message}"))
         .collect::<Vec<_>>()
         .join("|");
     if fingerprint == cache.fingerprint {
@@ -67,73 +87,47 @@ pub fn update_alerts_ui(
     }
     cache.fingerprint = fingerprint;
 
-    let Ok(root) = root_q.single() else {
+    let Ok(body) = body_q.single() else {
         return;
     };
-
-    if let Ok(children) = children_q.get(root) {
+    if let Ok(children) = children_q.get(body) {
         for child in children.iter() {
             commands.entity(child).despawn();
         }
     }
 
-    let total = board.len();
-    if total == 0 {
-        return;
-    }
-
-    commands.entity(root).with_children(|strip| {
-        let visible: Vec<_> = board.iter().take(MAX_VISIBLE).collect();
-        for alert in &visible {
-            strip
-                .spawn((
-                    Button,
-                    AlertRow {
-                        alert_id: alert.id,
-                    },
-                    Node {
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(SPACE_2),
-                        padding: UiRect::axes(Val::Px(SPACE_2), Val::Px(4.0)),
-                        border: UiRect::all(Val::Px(1.0)),
-                        border_radius: BorderRadius::ZERO,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    BackgroundColor(BG1),
-                    BorderColor::all(OUTLINE),
-                ))
-                .with_children(|row| {
-                    row.spawn((Text::new("!"), body_font(), text_warn()));
-                    row.spawn((
-                        Text::new(alert.message.clone()),
-                        micro_font(),
-                        text_primary(),
-                    ));
-                });
-        }
-        if total > MAX_VISIBLE {
-            strip.spawn((
-                AlertCountText,
-                Text::new(format!("+{} more", total - MAX_VISIBLE)),
+    commands.entity(body).with_children(|list| {
+        if visible.is_empty() {
+            list.spawn((
+                Text::new("Nothing needs you right now."),
                 micro_font(),
                 text_secondary(),
             ));
+            return;
         }
-        strip
-            .spawn((
+        for (id, message) in &visible {
+            list.spawn((
                 Button,
-                AlertDismissAllButton,
+                AlertRow { alert_id: *id },
                 Node {
-                    padding: UiRect::axes(Val::Px(SPACE_2), Val::Px(2.0)),
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(SPACE_1),
+                    padding: UiRect::axes(Val::Px(SPACE_1), Val::Px(1.0)),
                     border: UiRect::all(Val::Px(1.0)),
                     border_radius: BorderRadius::ZERO,
-                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
                     ..default()
                 },
                 BackgroundColor(BG1),
                 BorderColor::all(OUTLINE),
             ))
+            .with_children(|row| {
+                row.spawn((Text::new("!"), micro_font(), text_warn()));
+                row.spawn((Text::new(message.clone()), micro_font(), text_primary()));
+            });
+        }
+        let (node, bg, border) = chrome_button_node(SPACE_1, 1.0);
+        list.spawn((Button, AlertDismissAllButton, node, bg, border))
             .with_children(|b| {
                 b.spawn((Text::new("Dismiss all"), micro_font(), text_secondary()));
             });
@@ -144,7 +138,7 @@ pub fn alert_row_clicks(
     interactions: Query<(&Interaction, &AlertRow), (Changed<Interaction>, With<Button>)>,
     board: Res<AlertBoard>,
     stations: Res<StationRegistry>,
-    mut focus: ResMut<CameraFocusRequest>,
+    mut focus: ResMut<crate::map::CameraFocusRequest>,
     mut selection: ResMut<Selection>,
 ) {
     for (interaction, row) in &interactions {
@@ -178,31 +172,22 @@ pub fn alert_dismiss_all_clicks(
 }
 
 pub fn update_alert_row_hover(
-    mut q: Query<(&Interaction, &mut BorderColor), (With<AlertRow>, With<Button>)>,
+    mut q: Query<
+        (&Interaction, &mut BorderColor),
+        (Changed<Interaction>, Or<(With<AlertRow>, With<AlertDismissAllButton>)>),
+    >,
 ) {
     for (interaction, mut border) in &mut q {
-        *border = if matches!(*interaction, Interaction::Hovered | Interaction::Pressed) {
-            BorderColor::all(HI)
-        } else {
-            BorderColor::all(OUTLINE)
-        };
+        let hovered = matches!(interaction, Interaction::Hovered | Interaction::Pressed);
+        *border = control_border(false, hovered);
     }
 }
 
-fn focus_tile(
-    focus: AlertFocus,
-    stations: &StationRegistry,
-) -> Option<rail_sim::TileCoord> {
+fn focus_tile(focus: AlertFocus, stations: &StationRegistry) -> Option<rail_sim::TileCoord> {
     match focus {
         AlertFocus::Tile(t) => Some(t),
         AlertFocus::Station(id) => stations.get(id).map(|s| s.tile),
         AlertFocus::Train(_) => None, // tile already preferred when parked
         AlertFocus::None => None,
     }
-}
-
-// Keep WARN referenced for kit parity.
-#[allow(dead_code)]
-fn _warn() -> Color {
-    WARN
 }

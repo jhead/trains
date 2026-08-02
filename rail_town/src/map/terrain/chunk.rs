@@ -37,6 +37,39 @@ pub struct TerrainDirty {
     cols: u32,
     rows: u32,
     any: bool,
+    /// Signature of the terrain the chunks were last composited from.
+    ///
+    /// Bevy change detection answers *did anybody write this resource*, which is
+    /// not the same question as *did the terrain move*. Any system that borrows
+    /// [`MapGrid`] mutably for a non-terrain reason — the border slice's portal
+    /// mirror did, once per frame — would otherwise trigger a full-map
+    /// re-composite plus a sixteen-megabyte texture re-upload every frame.
+    /// Hashing the tiles is cheap next to compositing them, so the flag is the
+    /// gate and this is the truth.
+    signature: Option<u64>,
+}
+
+/// FNV-1a over every tile's drawn properties.
+///
+/// Only what [`super::autotile::resolve_tile`] reads: elevation, water and
+/// material. Portals, features and the seed are deliberately absent — none of
+/// them changes a texel, so none of them should cost a rebuild.
+fn terrain_signature(map: &MapGrid) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |byte: u8| {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    eat(map.width as u8);
+    eat((map.width >> 8) as u8);
+    eat(map.height as u8);
+    eat((map.height >> 8) as u8);
+    for tile in map.tiles() {
+        eat(tile.height as u8);
+        eat(tile.water as u8);
+        eat(tile.kind as u8);
+    }
+    hash
 }
 
 impl TerrainDirty {
@@ -183,6 +216,9 @@ fn spawn_chunks(
     let cols = map.width.div_ceil(CHUNK_TILES);
     let rows = map.height.div_ceil(CHUNK_TILES);
     dirty.resize(cols, rows);
+    // These chunks are composited from this terrain, so record what they were
+    // built from — the first Update must not redo the startup composite.
+    dirty.signature = Some(terrain_signature(map));
 
     for cy in 0..rows {
         for cx in 0..cols {
@@ -225,9 +261,14 @@ pub fn setup_terrain(
 /// Re-composite chunks whose tiles changed. Idle when nothing has.
 ///
 /// Replacing the whole [`MapGrid`] — a new game, a reloaded save — is enough on
-/// its own: the grid's change tick rebuilds every chunk, and a grid of a
-/// different size rebuilds the chunk entities too. Nothing else has to
-/// re-register terrain when the world is swapped.
+/// its own: the grid's change tick brings us to look, the terrain signature
+/// confirms the tiles really moved, and a grid of a different size rebuilds the
+/// chunk entities too. Nothing else has to re-register terrain when the world is
+/// swapped.
+///
+/// The signature is what makes this safe to leave in a hot loop. A write to
+/// `MapGrid` for a reason that has nothing to do with terrain must not cost a
+/// full re-composite and a full texture re-upload; see [`TerrainDirty`].
 pub fn rebuild_dirty_terrain(
     mut commands: Commands,
     map: Res<MapGrid>,
@@ -236,9 +277,17 @@ pub fn rebuild_dirty_terrain(
     mut images: ResMut<Assets<Image>>,
     chunks: Query<(Entity, &TerrainChunk, &Sprite)>,
 ) {
-    let swapped = map.is_changed() && !map.is_added();
-    if swapped {
-        dirty.mark_all();
+    let _perf = crate::overlays::perf::scope("rebuild_dirty_terrain");
+    let mut swapped = false;
+    if map.is_changed() {
+        let signature = terrain_signature(&map);
+        // `is_added` is the startup composite, which already ran; record its
+        // signature so the first ordinary frame does not redo it.
+        swapped = !map.is_added() && dirty.signature != Some(signature);
+        dirty.signature = Some(signature);
+        if swapped {
+            dirty.mark_all();
+        }
     }
     if !dirty.any {
         return;
@@ -455,6 +504,59 @@ mod tests {
         app.update();
         app.update();
         assert!(!app.world().resource::<TerrainDirty>().any);
+    }
+
+    /// Writing to `MapGrid` for a reason that is not terrain must cost nothing.
+    ///
+    /// This is the regression that made the game unplayable. Bevy change
+    /// detection answers *did anybody write this resource*, and the border
+    /// slice's portal mirror wrote a portal record every frame. Keyed on that
+    /// flag alone, this system re-composited all sixteen chunks and re-uploaded
+    /// their textures every frame — 79.6 ms of a 118 ms debug frame, and about
+    /// 1.7 ms plus the upload in release. Portals, features and the seed do not
+    /// change a single texel, so none of them may cost a rebuild.
+    #[test]
+    fn a_non_terrain_write_to_the_map_does_not_recomposite() {
+        let mut app = test_app(32, 32);
+        app.update();
+
+        let before: Vec<Handle<Image>> = chunk_sprites(&mut app).into_iter().map(|c| c.1).collect();
+        for _ in 0..8 {
+            // Touch the grid the way the portal mirror does: a mutable borrow
+            // that leaves every tile exactly as it was.
+            let mut map = app.world_mut().resource_mut::<MapGrid>();
+            map.close_portals_facing(rail_map::EdgeFacing::North);
+            app.update();
+            assert!(
+                !app.world().resource::<TerrainDirty>().any,
+                "a portal write dirtied the terrain"
+            );
+        }
+        let after: Vec<Handle<Image>> = chunk_sprites(&mut app).into_iter().map(|c| c.1).collect();
+        assert_eq!(before, after, "chunk images must not have been rebuilt");
+    }
+
+    /// The other half of the contract: terrain that really moves still rebuilds.
+    #[test]
+    fn an_edited_tile_still_rebuilds_the_terrain() {
+        let mut app = test_app(32, 32);
+        app.update();
+        assert!(!app.world().resource::<TerrainDirty>().any);
+
+        {
+            let mut map = app.world_mut().resource_mut::<MapGrid>();
+            let tile = map.get_mut(TileCoord { x: 4, y: 4 }).expect("in bounds");
+            tile.height = tile.height.saturating_add(4);
+            tile.kind = rail_map::TerrainKind::Mountain;
+        }
+        app.update();
+        // The rebuild ran and cleared itself in the same frame.
+        assert!(!app.world().resource::<TerrainDirty>().any);
+        assert_eq!(
+            app.world().resource::<TerrainDirty>().signature,
+            Some(terrain_signature(app.world().resource::<MapGrid>())),
+            "the composited art must match the terrain it was built from"
+        );
     }
 
     #[test]

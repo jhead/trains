@@ -1,4 +1,13 @@
-//! Town Talk ticker — bottom-left living feed with click-to-locate.
+//! Town Talk — the living feed, in a window.
+//!
+//! **Closed by default.** It was a permanent panel in the bottom-left corner,
+//! which put chatter on screen at all times whether or not the player had asked
+//! for any. 03 §1: nothing is permanent unless it is permanently relevant, and
+//! flavour is by definition not. It opens from the menu row or `Y`, and it
+//! remembers where the player left it.
+//!
+//! Rows stay click-to-locate: a complaint that cannot take you to its source is
+//! just noise.
 
 use bevy::prelude::*;
 use rail_map::tile_to_world;
@@ -7,10 +16,11 @@ use rail_sim::{ComplaintFeed, StationService, TalkKind};
 use crate::inspect::{Selectable, Selection};
 use crate::map::CameraFocusRequest;
 use crate::palette::{BALLAST_L, BG1, HI, OK, OUTLINE, RAIL_L, WARN};
-use crate::ui::kit::{body_font, micro_font, SPACE_2, SPACE_3};
+use crate::ui::kit::{micro_font, SPACE_1};
+use crate::ui::window::{window_root, WindowId, WindowManager};
 
-/// How many ticker rows are visible at once (design: up to four).
-pub const TOWN_TALK_VISIBLE: usize = 4;
+/// How many rows the window shows at once.
+pub const TOWN_TALK_VISIBLE: usize = 8;
 
 #[derive(Component)]
 pub struct TownTalkRoot;
@@ -38,26 +48,8 @@ pub(crate) struct TownTalkCache {
 pub fn setup_town_talk_ui(mut commands: Commands) {
     commands.insert_resource(TownTalkCache::default());
     commands
-        .spawn((
-            TownTalkRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(SPACE_3 + 52.0),
-                left: Val::Px(SPACE_3),
-                width: Val::Px(340.0),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(4.0),
-                padding: UiRect::all(Val::Px(SPACE_2)),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::ZERO,
-                ..default()
-            },
-            BackgroundColor(BG1),
-            BorderColor::all(OUTLINE),
-            ZIndex(5),
-        ))
+        .spawn((TownTalkRoot, window_root(WindowId::TownTalk, 300.0)))
         .with_children(|parent| {
-            parent.spawn((Text::new("Town Talk"), body_font(), TextColor(HI)));
             for i in 0..TOWN_TALK_VISIBLE {
                 parent
                     .spawn((
@@ -66,9 +58,9 @@ pub fn setup_town_talk_ui(mut commands: Commands) {
                         Node {
                             width: Val::Percent(100.0),
                             flex_direction: FlexDirection::Row,
-                            column_gap: Val::Px(6.0),
+                            column_gap: Val::Px(SPACE_1),
                             align_items: AlignItems::Center,
-                            padding: UiRect::axes(Val::Px(4.0), Val::Px(2.0)),
+                            padding: UiRect::axes(Val::Px(SPACE_1), Val::Px(1.0)),
                             border: UiRect::all(Val::Px(1.0)),
                             border_radius: BorderRadius::ZERO,
                             ..default()
@@ -104,11 +96,17 @@ pub fn setup_town_talk_ui(mut commands: Commands) {
         });
 }
 
+/// Rows hide with `Display`, never with `Visibility`.
+///
+/// An explicit `Visibility::Visible` on a child *overrides* a hidden parent in
+/// Bevy, which is how the old ticker used to show through the title screen.
+/// `Display::None` folds the row out of layout and cannot escape its parent.
 pub fn refresh_town_talk_rows(
+    manager: Res<WindowManager>,
     feed: Res<ComplaintFeed>,
     service: Res<StationService>,
     mut cache: ResMut<TownTalkCache>,
-    mut rows: Query<(Entity, &TownTalkRow, &Children, &mut Visibility, &mut BorderColor)>,
+    mut rows: Query<(Entity, &TownTalkRow, &Children, &mut Node, &mut BorderColor)>,
     mut text_q: Query<(
         Option<&TownTalkLineText>,
         Option<&TownTalkAgeText>,
@@ -117,6 +115,10 @@ pub fn refresh_town_talk_rows(
         &mut TextColor,
     )>,
 ) {
+    // A closed window costs one resource read per frame and nothing else.
+    if !manager.is_open(WindowId::TownTalk) {
+        return;
+    }
     let now = service.tick;
     let signature: String = feed
         .iter()
@@ -140,11 +142,11 @@ pub fn refresh_town_talk_rows(
     let mut row_list: Vec<_> = rows.iter_mut().collect();
     row_list.sort_by_key(|(_, r, _, _, _)| r.index);
 
-    for (_entity, row, children, vis, border) in &mut row_list {
+    for (_entity, row, children, node, border) in &mut row_list {
         let entry = feed.get(row.index);
         match entry {
             None if row.index == 0 && feed.is_empty() => {
-                **vis = Visibility::Visible;
+                node.display = Display::Flex;
                 **border = BorderColor::all(OUTLINE);
                 for child in children.iter() {
                     write_row_child(
@@ -157,10 +159,10 @@ pub fn refresh_town_talk_rows(
                 }
             }
             None => {
-                **vis = Visibility::Hidden;
+                node.display = Display::None;
             }
             Some(entry) => {
-                **vis = Visibility::Visible;
+                node.display = Display::Flex;
                 let (icon_ch, accent) = match entry.kind {
                     TalkKind::Complaint => ("x", WARN),
                     TalkKind::Praise => ("+", OK),

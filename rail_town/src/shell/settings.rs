@@ -94,7 +94,17 @@ impl TownTalkVerbosity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplaySettings {
     pub window_mode: WindowModeChoice,
-    /// Integer UI scale, 1×–3× (design 03 §2 — never fractional).
+    /// Integer UI scale, `1`–`3`, or `0` for [`UI_SCALE_AUTO`].
+    ///
+    /// **Never fractional** (design 03 §2). Every metric in the kit is a whole
+    /// number of texels, so a whole-number scale keeps every border, gap and
+    /// glyph on whole pixels; `1.25×` would put a 1-texel border on 1.25 px and
+    /// undo the pixel contract at a stroke.
+    ///
+    /// The default is `Auto`, which reads the window's **logical** size — that
+    /// is already corrected for display density, so a HiDPI screen does not need
+    /// a bigger number here. On the shipping 1280×720 window Auto resolves to
+    /// `1×`, which is where the playtest's "at least 25% smaller" lands.
     pub ui_scale: u32,
     /// World zoom a new game starts at, 1×–3×.
     pub world_zoom_default: u32,
@@ -111,11 +121,36 @@ pub struct DisplaySettings {
     pub flashes_and_shake: bool,
 }
 
+/// Sentinel for "pick the UI scale from the window size".
+pub const UI_SCALE_AUTO: u32 = 0;
+
+/// Largest scale the ladder offers.
+pub const UI_SCALE_MAX: u32 = 4;
+
+/// Resolve [`DisplaySettings::ui_scale`] against a window's logical size.
+///
+/// Logical size is already divided by the display's scale factor, so this is a
+/// judgement about how much room there is, not about pixel density. The
+/// thresholds are generous: too-small chrome is a much worse first impression
+/// than slightly-small chrome, and the setting is right there either way.
+pub fn resolve_ui_scale(setting: u32, logical_width: f32, logical_height: f32) -> u32 {
+    if setting != UI_SCALE_AUTO {
+        return setting.clamp(1, UI_SCALE_MAX);
+    }
+    if logical_height >= 2000.0 || logical_width >= 3200.0 {
+        3
+    } else if logical_height >= 1300.0 || logical_width >= 2100.0 {
+        2
+    } else {
+        1
+    }
+}
+
 impl Default for DisplaySettings {
     fn default() -> Self {
         Self {
             window_mode: WindowModeChoice::Windowed,
-            ui_scale: 2,
+            ui_scale: UI_SCALE_AUTO,
             world_zoom_default: 2,
             vsync: true,
             frame_cap: 0,
@@ -309,7 +344,13 @@ impl SettingId {
         let g = &settings.gameplay;
         match self {
             Self::WindowMode => d.window_mode.label().into(),
-            Self::UiScale => format!("{}x", d.ui_scale),
+            Self::UiScale => {
+                if d.ui_scale == UI_SCALE_AUTO {
+                    "Auto".into()
+                } else {
+                    format!("{}x", d.ui_scale)
+                }
+            }
             Self::WorldZoomDefault => format!("{}x", d.world_zoom_default),
             Self::Vsync => on_off(d.vsync),
             Self::FrameCap => {
@@ -355,7 +396,8 @@ impl SettingId {
             Self::WindowMode => {
                 d.window_mode = cycle_list(WindowModeChoice::ALL, d.window_mode, delta)
             }
-            Self::UiScale => d.ui_scale = cycle_range(d.ui_scale, 1, 3, 1, delta),
+            // The ladder includes Auto, so the row wraps Auto → 1× → … → 4×.
+            Self::UiScale => d.ui_scale = cycle_range(d.ui_scale, UI_SCALE_AUTO, UI_SCALE_MAX, 1, delta),
             Self::WorldZoomDefault => {
                 d.world_zoom_default = cycle_range(d.world_zoom_default, 1, 3, 1, delta)
             }
@@ -513,7 +555,10 @@ impl Settings {
                     WindowModeChoice::label,
                 )
                 .unwrap_or(d.window_mode),
-                ui_scale: doc.int("display_ui_scale", d.ui_scale as i64).clamp(1, 3) as u32,
+                ui_scale: doc
+                    .int("display_ui_scale", d.ui_scale as i64)
+                    .clamp(UI_SCALE_AUTO as i64, UI_SCALE_MAX as i64)
+                    as u32,
                 world_zoom_default: doc
                     .int("display_world_zoom_default", d.world_zoom_default as i64)
                     .clamp(1, 3) as u32,
@@ -570,15 +615,26 @@ fn label_of<T: Copy>(all: &[T], needle: &str, label: fn(T) -> &'static str) -> O
 // ─ Live application ────────────────────────────────────────
 
 /// Window mode, vsync and UI scale, applied the moment they change.
+///
+/// UI scale is re-resolved on a window resize as well as on a settings change,
+/// because `Auto` is a function of the window's size.
 pub fn apply_display_settings(
     settings: Res<Settings>,
     mut ui_scale: ResMut<UiScale>,
     mut windows: Query<&mut Window>,
+    mut last_size: Local<(f32, f32)>,
 ) {
-    if !settings.is_changed() {
+    let size = windows
+        .iter()
+        .next()
+        .map(|w| (w.width(), w.height()))
+        .unwrap_or((1280.0, 720.0));
+    let resized = size != *last_size;
+    if !settings.is_changed() && !resized {
         return;
     }
-    let target = settings.display.ui_scale as f32;
+    *last_size = size;
+    let target = resolve_ui_scale(settings.display.ui_scale, size.0, size.1) as f32;
     if ui_scale.0 != target {
         ui_scale.0 = target;
     }
@@ -706,7 +762,7 @@ mod tests {
     fn a_corrupt_file_degrades_to_defaults_instead_of_failing() {
         let restored = Settings::from_doc(&KvDoc::parse("(\n  display_ui_scale: 99,\n  junk\n)"));
         assert_eq!(
-            restored.display.ui_scale, 3,
+            restored.display.ui_scale, UI_SCALE_MAX,
             "out-of-range value is clamped"
         );
         assert_eq!(restored.audio, AudioSettings::default());
@@ -714,10 +770,42 @@ mod tests {
 
     #[test]
     fn ui_scale_is_only_ever_a_whole_number() {
+        // Design 03 §2. A fractional scale puts 1-texel borders on fractions of
+        // a pixel, which is the single fastest way to make a pixel game look
+        // cheap — so the ladder has no half steps to reach for.
         let mut settings = Settings::default();
-        for _ in 0..8 {
+        for _ in 0..12 {
             SettingId::UiScale.cycle(&mut settings, 1);
-            assert!((1..=3).contains(&settings.display.ui_scale));
+            let scale = settings.display.ui_scale;
+            assert!(scale <= UI_SCALE_MAX);
+            let resolved = resolve_ui_scale(scale, 1280.0, 720.0);
+            assert!((1..=UI_SCALE_MAX).contains(&resolved), "{resolved}");
+        }
+    }
+
+    #[test]
+    fn the_default_ui_scale_is_at_least_a_quarter_smaller_than_it_was() {
+        // The playtest asked for "at least a 25% reduction in scale". The old
+        // default was a hard 2x; Auto resolves to 1x on the shipping window,
+        // and the row still offers 2x-4x for anyone who wants it back.
+        assert_eq!(DisplaySettings::default().ui_scale, UI_SCALE_AUTO);
+        assert_eq!(resolve_ui_scale(UI_SCALE_AUTO, 1280.0, 720.0), 1);
+        assert_eq!(resolve_ui_scale(UI_SCALE_AUTO, 640.0, 360.0), 1);
+    }
+
+    #[test]
+    fn auto_grows_on_a_genuinely_large_desktop() {
+        // Logical size is already density-corrected, so this is about room, not
+        // about a retina panel.
+        assert_eq!(resolve_ui_scale(UI_SCALE_AUTO, 2560.0, 1440.0), 2);
+        assert_eq!(resolve_ui_scale(UI_SCALE_AUTO, 3840.0, 2160.0), 3);
+    }
+
+    #[test]
+    fn an_explicit_scale_ignores_the_window_entirely() {
+        for scale in 1..=UI_SCALE_MAX {
+            assert_eq!(resolve_ui_scale(scale, 640.0, 360.0), scale);
+            assert_eq!(resolve_ui_scale(scale, 3840.0, 2160.0), scale);
         }
     }
 

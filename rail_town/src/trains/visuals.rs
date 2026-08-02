@@ -71,6 +71,7 @@ pub fn sync_train_sprites(
     trains: Query<(&Train, &TrainLocation)>,
     mut sprites: Query<(Entity, &TrainSprite, &mut Transform, &mut Sprite)>,
 ) {
+    let _perf = crate::overlays::perf::scope("sync_train_sprites");
     let overstep = if clock.paused {
         0.0
     } else {
@@ -140,6 +141,7 @@ pub fn sync_train_stop_indicators(
     occupancy: Res<TileOccupancy>,
     mut indicators: Query<(&TrainStopIndicator, &mut Visibility)>,
 ) {
+    let _perf = crate::overlays::perf::scope("sync_train_stop_indicators");
     for (indicator, mut visibility) in indicators.iter_mut() {
         let held = occupancy.held_ticks(indicator.id) >= STOP_INDICATOR_AFTER_TICKS;
         let wanted = if held {
@@ -165,6 +167,7 @@ pub fn sync_train_smoke(
     mut puffs: Query<(Entity, &mut SmokePuff, &mut Transform, &mut Sprite)>,
     mut last_step: Local<HashMap<TrainId, usize>>,
 ) {
+    let _perf = crate::overlays::perf::scope("sync_train_smoke");
     let dt = time.delta_secs();
     for (entity, mut puff, mut transform, mut sprite) in puffs.iter_mut() {
         puff.age += dt;

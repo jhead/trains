@@ -3,6 +3,7 @@
 //! `Tab` cycles; direct keys: `F1` service, `F2` congestion, `F3` density, `F4` off.
 //! Overlays tint with palette diagnostics (`OK` / `HI` / `WARN`) only.
 
+pub(crate) mod perf;
 mod render;
 mod score;
 
@@ -51,6 +52,8 @@ pub struct OverlaysPlugin;
 impl Plugin for OverlaysPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActiveOverlay>()
+            // Opt-in frame-time instrumentation; a no-op without `RAIL_TOWN_PERF`.
+            .add_plugins(perf::PerfPlugin)
             .add_systems(Startup, setup_overlay_legend)
             .add_systems(
                 Update,

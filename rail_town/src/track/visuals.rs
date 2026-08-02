@@ -433,6 +433,7 @@ pub fn apply_track_sprites(
     mut art: Local<TrackArt>,
     existing: Query<(Entity, &TrackSprite)>,
 ) {
+    let _perf = crate::overlays::perf::scope("apply_track_sprites");
     let mut touched: HashSet<TrackId> = HashSet::new();
     let mut gone: HashSet<TrackId> = HashSet::new();
 
@@ -548,6 +549,7 @@ pub fn polish_railheads(
     mut heat: Local<HashMap<TrackId, f32>>,
     mut seen_tick: Local<u64>,
 ) {
+    let _perf = crate::overlays::perf::scope("polish_railheads");
     // Crossings recorded since the last frame we looked (FixedUpdate may have
     // run any number of times, or none).
     for (&id, &tick) in occupancy.last_crossed.iter() {

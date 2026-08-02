@@ -70,6 +70,7 @@ pub(crate) fn sync_lit_windows(
     lots: Query<(Entity, &Transform, &BuildingWindows)>,
     mut lights: Query<(Entity, &LitWindow, &mut Sprite, &mut Transform), Without<BuildingWindows>>,
 ) {
+    let _perf = crate::overlays::perf::scope("sync_lit_windows");
     let Some(atlas) = atlas else {
         return;
     };
@@ -132,6 +133,7 @@ pub(crate) fn step_window_light(
     mut layer: ResMut<WindowLayer>,
     mut windows: Query<(&LitWindow, &mut Sprite, &mut Visibility)>,
 ) {
+    let _perf = crate::overlays::perf::scope("step_window_light");
     let step = fade_step(tod.window_lit);
     if layer.step == Some(step) {
         return;

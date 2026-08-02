@@ -22,6 +22,7 @@ mod yard;
 use bevy::prelude::*;
 use rail_map::{EdgeFacing, MapGrid};
 use rail_sim::border::{BorderEdge, BorderRegistry};
+use rail_sim::TileCoord;
 
 use panel::{
     neighbour_button_clicks, neighbour_button_hover, neighbours_panel_input,
@@ -90,23 +91,57 @@ pub fn seed_border_registry(grid: Option<Res<MapGrid>>, mut registry: ResMut<Bor
     registry.seed = grid.seed;
 }
 
+/// The door the registry wants on each edge, in [`BorderEdge::ALL`] order.
+///
+/// Comparing this against the last one applied is what keeps the mirror off the
+/// per-frame path. See [`sync_portals_from_registry`].
+type PortalPlan = [Option<TileCoord>; 4];
+
+fn portal_plan(registry: &BorderRegistry) -> PortalPlan {
+    let mut plan: PortalPlan = [None; 4];
+    for (slot, edge) in BorderEdge::ALL.into_iter().enumerate() {
+        plan[slot] = registry.get(edge).map(|link| link.portal_tile);
+    }
+    plan
+}
+
 /// Mirror open links onto the map's portal records.
 ///
 /// The registry is the source of truth (it is what the save carries), so this
-/// only ever writes in one direction. It is cheap: four edges, and it early-outs
-/// unless the registry changed.
-pub fn sync_portals_from_registry(registry: Res<BorderRegistry>, grid: Option<ResMut<MapGrid>>) {
-    if !registry.is_changed() {
+/// only ever writes in one direction.
+///
+/// # Why this compares a plan instead of trusting `is_changed`
+///
+/// [`BorderRegistry`] carries the border clock, and `advance_border_trade` bumps
+/// that tick every sim tick — so `is_changed()` is true on essentially every
+/// frame even in solo play with no border ever opened. Taking `ResMut<MapGrid>`
+/// on the strength of it wrote to the map every frame, which marked the map
+/// changed, which made `map::terrain` re-composite all sixteen chunks and
+/// re-upload sixteen megabytes of texture **per frame**. That single line was
+/// two thirds of the frame budget.
+///
+/// So the gate is the thing that actually matters: *which door is open on each
+/// edge*. It changes when a link opens or closes and at no other time, and the
+/// grid is only borrowed mutably when it has genuinely moved.
+pub fn sync_portals_from_registry(
+    registry: Res<BorderRegistry>,
+    grid: Option<ResMut<MapGrid>>,
+    mut applied: Local<Option<PortalPlan>>,
+) {
+    let _perf = crate::overlays::perf::scope("sync_portals_from_registry");
+    let plan = portal_plan(&registry);
+    if *applied == Some(plan) {
         return;
     }
     let Some(mut grid) = grid else {
+        // No map yet — try again next frame rather than recording this plan as
+        // applied against a grid that was never told.
         return;
     };
-    for edge in BorderEdge::ALL {
+    for (slot, edge) in BorderEdge::ALL.into_iter().enumerate() {
         let facing = facing_of(edge);
-        match registry.get(edge) {
-            Some(link) => {
-                let tile = link.portal_tile;
+        match plan[slot] {
+            Some(tile) => {
                 // Exactly one door per edge, at the tile the line reached.
                 grid.close_portals_facing(facing);
                 grid.open_portal_at(tile);
@@ -116,11 +151,14 @@ pub fn sync_portals_from_registry(registry: Res<BorderRegistry>, grid: Option<Re
             }
         }
     }
+    *applied = Some(plan);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use rail_map::generate_map;
 
     #[test]
     fn the_two_edge_enums_agree() {
@@ -132,6 +170,65 @@ mod tests {
         }
         for facing in EdgeFacing::ALL {
             assert_eq!(facing_of(edge_of(facing)), facing);
+        }
+    }
+
+    /// A world with a map and an empty registry, running only the mirror.
+    fn mirror_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(generate_map(24, 24, 42));
+        app.insert_resource(BorderRegistry::new(42));
+        app.add_systems(Update, sync_portals_from_registry);
+        app
+    }
+
+    #[test]
+    fn a_closed_border_plans_no_doors() {
+        let registry = BorderRegistry::new(42);
+        assert_eq!(portal_plan(&registry), [None, None, None, None]);
+    }
+
+    /// The regression this system's shape exists for.
+    ///
+    /// `advance_border_trade` bumps the registry's tick every sim tick, so
+    /// `Res<BorderRegistry>::is_changed()` was true on essentially every frame
+    /// — including solo play with no border ever opened, which is what almost
+    /// every session is. Mirroring on the strength of that borrowed `MapGrid`
+    /// mutably every frame, which marked the map changed, which made
+    /// `map::terrain` re-composite all sixteen chunks and re-upload their
+    /// textures: 79.6 ms of a 118 ms frame. The mirror must key on the doors,
+    /// not on the clock.
+    #[test]
+    fn a_ticking_registry_does_not_touch_the_map() {
+        let mut app = mirror_app();
+        app.update();
+
+        // Watch the map across a run of frames in which the only thing that
+        // moves is the border clock — exactly what solo play does forever.
+        for _ in 0..8 {
+            app.world_mut().clear_trackers();
+            app.world_mut().resource_mut::<BorderRegistry>().tick += 1;
+            app.update();
+            assert!(
+                !app.world().resource_ref::<MapGrid>().is_changed(),
+                "the portal mirror wrote to the map on a tick-only frame"
+            );
+        }
+    }
+
+    /// Even a *changed* registry must not write when the doors land the same.
+    #[test]
+    fn re_announcing_the_same_doors_is_not_a_map_edit() {
+        let mut app = mirror_app();
+        app.update();
+        for _ in 0..4 {
+            app.world_mut().clear_trackers();
+            // A full change announcement, with the plan unmoved.
+            app.world_mut()
+                .resource_mut::<BorderRegistry>()
+                .set_changed();
+            app.update();
+            assert!(!app.world().resource_ref::<MapGrid>().is_changed());
         }
     }
 }

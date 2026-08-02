@@ -19,9 +19,9 @@ use rail_sim::{GoalBoard, GoalStatus, StationService};
 
 use crate::palette::{BALLAST_D, BALLAST_M, BG0, HI, OK, OUTLINE, RAIL_L, WARN};
 use crate::ui::kit::{
-    body_font, micro_font, panel_node, text_accent, text_secondary, SPACE_1, SPACE_2, SPACE_3,
-    STATUS_H,
+    micro_font, panel_node, text_secondary, WorldClickBlocker, SPACE_1, SPACE_2,
 };
+use crate::ui::{UiWindow, WindowId};
 
 use super::ShellState;
 
@@ -80,36 +80,33 @@ pub fn rebuild_goals_panel(
     // Unwrap is safe: an empty signature is the only way past the filter above.
     let board = board.expect("a signature means a board");
 
+    // Position, open state and stacking belong to the window manager (03 §5).
     let (node, bg, border) = panel_node(Node {
         position_type: PositionType::Absolute,
-        top: Val::Px(STATUS_H + SPACE_2),
-        right: Val::Px(SPACE_3),
         width: Val::Px(PANEL_W),
         flex_direction: FlexDirection::Column,
         row_gap: Val::Px(SPACE_2),
         padding: UiRect::all(Val::Px(SPACE_2)),
+        display: Display::None,
         ..default()
     });
 
     commands
-        .spawn((GoalsPanelRoot, node, bg, border, ZIndex(11)))
+        .spawn((
+            GoalsPanelRoot,
+            UiWindow::new(WindowId::Goals),
+            WorldClickBlocker,
+            Interaction::default(),
+            node,
+            bg,
+            border,
+        ))
         .with_children(|panel| {
-            panel
-                .spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    justify_content: JustifyContent::SpaceBetween,
-                    align_items: AlignItems::Center,
-                    width: Val::Percent(100.0),
-                    ..default()
-                })
-                .with_children(|row| {
-                    row.spawn((Text::new("Goals"), body_font(), text_accent()));
-                    row.spawn((
-                        Text::new(board.summary_line()),
-                        micro_font(),
-                        text_secondary(),
-                    ));
-                });
+            panel.spawn((
+                Text::new(board.summary_line()),
+                micro_font(),
+                text_secondary(),
+            ));
 
             for goal in board.iter() {
                 spawn_goal_row(

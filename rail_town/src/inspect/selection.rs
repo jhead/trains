@@ -18,7 +18,7 @@ use crate::trains::{TrainSprite, TrainToolState};
 use crate::town::PeepSprite;
 use crate::ui::UiBlocksWorld;
 
-use super::pick::{point_hits_sprite, resolve_pick, Selectable};
+use super::pick::{better_pick, point_hits_sprite, Selectable};
 
 /// Current single selection (Phase B — no multi-select yet).
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -81,11 +81,17 @@ impl ServiceScoreHistory {
         last as i16 - older as i16
     }
 
+    /// Trend as text, until the real 24x8 sparkline widget lands (03 §8.5).
+    ///
+    /// ASCII only. The shipped font is Bevy's default at integer sizes and has
+    /// no block-drawing glyphs, so `U+2581..U+2588` rendered as tofu boxes in
+    /// the Inspector's trend row — a row of empty rectangles reads as a bug,
+    /// not as a trend. This ramp says the same thing in glyphs that exist.
     pub fn sparkline(&self, id: StationId) -> String {
         let Some(q) = self.samples.get(&id) else {
             return "-".into();
         };
-        const BARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        const BARS: &[char] = &['.', ':', '-', '=', '+', '*', '#', '@'];
         q.iter()
             .map(|&s| {
                 let idx = ((s as usize) * (BARS.len() - 1)) / 100;
@@ -103,6 +109,61 @@ pub struct WorldPickSprites<'w, 's> {
     stations: Query<'w, 's, (&'static StationSprite, &'static Transform, &'static Sprite)>,
     industries: Query<'w, 's, (&'static IndustrySprite, &'static Transform, &'static Sprite)>,
     tracks: Query<'w, 's, (&'static TrackSprite, &'static Transform, &'static Sprite)>,
+}
+
+/// Fallback footprint for each sprite kind, when it carries no `custom_size`.
+///
+/// One table, read by both the hit test and the hover bracket, so the shape the
+/// player points at is the shape they see framed.
+fn default_size(sel: Selectable) -> Vec2 {
+    match sel {
+        Selectable::Peep(_) => Vec2::splat(TILE_SIZE * 0.28),
+        Selectable::Train(_) => Vec2::new(TILE_SIZE * 0.55, TILE_SIZE * 0.22),
+        Selectable::Station(_) => Vec2::splat(TILE_SIZE * 0.55),
+        Selectable::Industry(_) => Vec2::splat(TILE_SIZE * 0.5),
+        Selectable::Track(_) => Vec2::new(TILE_SIZE * 0.7, TILE_SIZE * 0.35),
+    }
+}
+
+impl WorldPickSprites<'_, '_> {
+    /// Where `sel`'s sprite actually is, in world texels.
+    ///
+    /// [`super::hover`] frames the hovered object with this rather than with the
+    /// tile it stands on: peeps and trains move continuously and are a fraction
+    /// of a tile across, so a tile-sized bracket around one reads as a selection
+    /// of the ground, not of the thing.
+    pub(super) fn rect_of(&self, sel: Selectable) -> Option<Rect> {
+        let found = match sel {
+            Selectable::Peep(id) => self
+                .peeps
+                .iter()
+                .find(|(s, _, _)| s.id == id)
+                .map(|(_, tf, spr)| (tf, spr)),
+            Selectable::Train(id) => self
+                .trains
+                .iter()
+                .find(|(s, _, _)| s.id == id)
+                .map(|(_, tf, spr)| (tf, spr)),
+            Selectable::Station(id) => self
+                .stations
+                .iter()
+                .find(|(s, _, _)| s.id == id)
+                .map(|(_, tf, spr)| (tf, spr)),
+            Selectable::Industry(id) => self
+                .industries
+                .iter()
+                .find(|(s, _, _)| s.id == id)
+                .map(|(_, tf, spr)| (tf, spr)),
+            Selectable::Track(id) => self
+                .tracks
+                .iter()
+                .find(|(s, _, _)| s.id == id)
+                .map(|(_, tf, spr)| (tf, spr)),
+        };
+        let (tf, spr) = found?;
+        let size = spr.custom_size.unwrap_or_else(|| default_size(sel));
+        Some(Rect::from_center_size(tf.translation.truncate(), size))
+    }
 }
 
 pub fn sample_service_history(
@@ -187,6 +248,10 @@ pub fn selection_click_input(
 
 /// Shared with [`super::hover`] so the hover tier picks exactly what a click
 /// would pick, rather than growing a second, subtly different hit test.
+///
+/// Hover calls this whenever the pointer moves, so it keeps the running best
+/// rather than collecting candidates and sorting them: the answer is the same
+/// (first-wins on a priority tie, as [`resolve_pick`]) with no allocation.
 pub(super) fn pick_world(
     world: Vec2,
     tile: rail_sim::TileCoord,
@@ -195,55 +260,57 @@ pub(super) fn pick_world(
     industries: &IndustryRegistry,
     sprites: &WorldPickSprites,
 ) -> Option<Selectable> {
-    let mut candidates = Vec::new();
+    let mut best: Option<Selectable> = None;
+    let mut offer = |candidate: Selectable| best = better_pick(best, candidate);
 
     for (sprite, tf, spr) in sprites.peeps.iter() {
-        let size = spr.custom_size.unwrap_or(Vec2::splat(TILE_SIZE * 0.28));
+        let sel = Selectable::Peep(sprite.id);
+        let size = spr.custom_size.unwrap_or_else(|| default_size(sel));
         if point_hits_sprite(world, tf.translation.truncate(), size) {
-            candidates.push(Selectable::Peep(sprite.id));
+            offer(sel);
         }
     }
     for (sprite, tf, spr) in sprites.trains.iter() {
-        let size = spr
-            .custom_size
-            .unwrap_or(Vec2::new(TILE_SIZE * 0.55, TILE_SIZE * 0.22));
+        let sel = Selectable::Train(sprite.id);
+        let size = spr.custom_size.unwrap_or_else(|| default_size(sel));
         let pad = Vec2::splat(4.0);
         if point_hits_sprite(world, tf.translation.truncate(), size + pad) {
-            candidates.push(Selectable::Train(sprite.id));
+            offer(sel);
         }
     }
     for (sprite, tf, spr) in sprites.stations.iter() {
-        let size = spr.custom_size.unwrap_or(Vec2::splat(TILE_SIZE * 0.55));
+        let sel = Selectable::Station(sprite.id);
+        let size = spr.custom_size.unwrap_or_else(|| default_size(sel));
         if point_hits_sprite(world, tf.translation.truncate(), size) {
-            candidates.push(Selectable::Station(sprite.id));
+            offer(sel);
         }
     }
     if let Some(st) = stations.at(tile, GROUND_LAYER) {
-        candidates.push(Selectable::Station(st.id));
+        offer(Selectable::Station(st.id));
     }
     for (sprite, tf, spr) in sprites.industries.iter() {
-        let size = spr.custom_size.unwrap_or(Vec2::splat(TILE_SIZE * 0.5));
+        let sel = Selectable::Industry(sprite.id);
+        let size = spr.custom_size.unwrap_or_else(|| default_size(sel));
         if point_hits_sprite(world, tf.translation.truncate(), size) {
-            candidates.push(Selectable::Industry(sprite.id));
+            offer(sel);
         }
     }
     if let Some(ind) = industries.at(tile) {
-        candidates.push(Selectable::Industry(ind.id));
+        offer(Selectable::Industry(ind.id));
     }
     for (sprite, tf, spr) in sprites.tracks.iter() {
-        let size = spr
-            .custom_size
-            .unwrap_or(Vec2::new(TILE_SIZE * 0.7, TILE_SIZE * 0.35));
+        let sel = Selectable::Track(sprite.id);
+        let size = spr.custom_size.unwrap_or_else(|| default_size(sel));
         let pad = Vec2::new(0.0, 6.0);
         if point_hits_sprite(world, tf.translation.truncate(), size + pad) {
-            candidates.push(Selectable::Track(sprite.id));
+            offer(sel);
         }
     }
     if let Some(id) = network.id_at(tile, GROUND_LAYER) {
-        candidates.push(Selectable::Track(id));
+        offer(Selectable::Track(id));
     }
 
-    resolve_pick(&candidates)
+    best
 }
 
 /// `F` requests a texel-snapped camera cut to the selection.
@@ -324,5 +391,42 @@ pub fn train_is_blocked(
     match occupancy.by_track.get(&next) {
         Some(other) if *other != train_id => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_trend_ramp_is_ascii_and_rises() {
+        let mut history = ServiceScoreHistory::default();
+        let id = StationId(1);
+        for score in [0, 14, 28, 42, 57, 71, 85, 100] {
+            history.push(id, score);
+        }
+        let line = history.sparkline(id);
+        assert!(
+            line.is_ascii(),
+            "the shipped font draws non-ASCII as tofu: {line:?}"
+        );
+        // Monotonic input has to produce a monotonic ramp, or it is decoration.
+        let ranks: Vec<usize> = line
+            .chars()
+            .map(|c| ".:-=+*#@".find(c).expect("ramp glyph"))
+            .collect();
+        assert!(
+            ranks.windows(2).all(|w| w[0] <= w[1]),
+            "ramp {line:?} does not rise with the score"
+        );
+        assert_eq!(ranks.first(), Some(&0));
+        assert_eq!(ranks.last(), Some(&7));
+    }
+
+    #[test]
+    fn an_unknown_station_has_no_trend() {
+        let history = ServiceScoreHistory::default();
+        assert_eq!(history.sparkline(StationId(9)), "-");
+        assert_eq!(history.delta(StationId(9)), 0);
     }
 }

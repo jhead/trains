@@ -25,6 +25,7 @@ pub fn sync_overlay_sprites(
     density: Res<TownDensity>,
     existing: Query<(Entity, &OverlayTileSprite)>,
 ) {
+    let _perf = crate::overlays::perf::scope("sync_overlay_sprites");
     // Rebuild each frame while an overlay is active — map is small (64²) and
     // sets are ring / track scoped. Clears cleanly when toggled off.
     for (entity, _) in &existing {

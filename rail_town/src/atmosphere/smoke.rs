@@ -69,6 +69,7 @@ pub(crate) fn bake_chimney_smoke(
     levels: Res<DensityLevels>,
     mut layer: ResMut<SmokeLayer>,
 ) {
+    let _perf = crate::overlays::perf::scope("bake_chimney_smoke");
     if levels.changed().is_empty() {
         return;
     }
@@ -127,6 +128,7 @@ pub(crate) fn step_chimney_smoke(
     ambient: Res<AmbientClock>,
     mut plumes: Query<(&mut ChimneySmoke, &mut Sprite, &mut Transform)>,
 ) {
+    let _perf = crate::overlays::perf::scope("step_chimney_smoke");
     for (mut smoke, mut sprite, mut transform) in plumes.iter_mut() {
         let frame = frame_at(
             ambient.secs,

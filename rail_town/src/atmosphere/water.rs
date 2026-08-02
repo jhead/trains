@@ -180,6 +180,7 @@ pub(crate) fn step_water_shimmer(
     ambient: Res<AmbientClock>,
     mut shimmers: Query<(&mut WaterShimmer, &mut Sprite, &mut Transform)>,
 ) {
+    let _perf = crate::overlays::perf::scope("step_water_shimmer");
     for (mut shimmer, mut sprite, mut transform) in shimmers.iter_mut() {
         let frame = frame_at(
             ambient.secs,
@@ -204,6 +205,7 @@ pub(crate) fn step_coast_foam(
     ambient: Res<AmbientClock>,
     mut foam: Query<(&mut CoastFoam, &mut Sprite)>,
 ) {
+    let _perf = crate::overlays::perf::scope("step_coast_foam");
     for (mut foam, mut sprite) in foam.iter_mut() {
         let frame = frame_at(
             ambient.secs,

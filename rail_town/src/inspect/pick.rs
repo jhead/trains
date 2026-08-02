@@ -35,12 +35,17 @@ impl Selectable {
     }
 }
 
-/// Choose the highest-priority selectable from a candidate list.
-pub fn resolve_pick(candidates: &[Selectable]) -> Option<Selectable> {
-    candidates
-        .iter()
-        .copied()
-        .min_by_key(|c| c.priority())
+/// Fold one candidate into the running best.
+///
+/// Lower priority wins; a tie keeps the incumbent, so a caller that offers
+/// candidates in a fixed order gets a stable answer without collecting or
+/// sorting them. Both the click path and the hover path fold through here, so
+/// the two tiers cannot drift apart.
+pub fn better_pick(best: Option<Selectable>, candidate: Selectable) -> Option<Selectable> {
+    match best {
+        Some(b) if b.priority() <= candidate.priority() => Some(b),
+        _ => Some(candidate),
+    }
 }
 
 /// Axis-aligned hit test in world space (sprite-centered).
@@ -56,6 +61,10 @@ pub fn point_hits_sprite(point: bevy::math::Vec2, center: bevy::math::Vec2, size
 mod tests {
     use super::*;
 
+    fn resolve(candidates: &[Selectable]) -> Option<Selectable> {
+        candidates.iter().copied().fold(None, better_pick)
+    }
+
     #[test]
     fn pick_priority_peep_over_train_over_station() {
         let peep = Selectable::Peep(PeepId(1));
@@ -64,15 +73,23 @@ mod tests {
         let industry = Selectable::Industry(IndustryId(4));
         let track = Selectable::Track(TrackId(5));
 
-        assert_eq!(
-            resolve_pick(&[track, industry, station, train, peep]),
-            Some(peep)
-        );
-        assert_eq!(resolve_pick(&[track, station, train]), Some(train));
-        assert_eq!(resolve_pick(&[track, industry, station]), Some(station));
-        assert_eq!(resolve_pick(&[track, industry]), Some(industry));
-        assert_eq!(resolve_pick(&[track]), Some(track));
-        assert_eq!(resolve_pick(&[]), None);
+        assert_eq!(resolve(&[track, industry, station, train, peep]), Some(peep));
+        assert_eq!(resolve(&[track, station, train]), Some(train));
+        assert_eq!(resolve(&[track, industry, station]), Some(station));
+        assert_eq!(resolve(&[track, industry]), Some(industry));
+        assert_eq!(resolve(&[track]), Some(track));
+        assert_eq!(resolve(&[]), None);
+    }
+
+    /// Order matters when two things of the same kind overlap: the first one
+    /// offered wins, so a sprite hit beats the registry fallback behind it.
+    #[test]
+    fn a_tie_keeps_whoever_was_offered_first() {
+        let first = Selectable::Station(StationId(1));
+        let second = Selectable::Station(StationId(2));
+        assert_eq!(resolve(&[first, second]), Some(first));
+        assert_eq!(better_pick(Some(first), second), Some(first));
+        assert_eq!(better_pick(None, second), Some(second));
     }
 
     #[test]

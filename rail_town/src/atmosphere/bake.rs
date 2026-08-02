@@ -82,6 +82,7 @@ impl DensityLevels {
 /// Runs before the bakers each frame; on a settled town it produces an empty
 /// change list and every consumer returns immediately.
 pub(crate) fn track_density_levels(density: Res<TownDensity>, mut levels: ResMut<DensityLevels>) {
+    let _perf = crate::overlays::perf::scope("track_density_levels");
     levels.changed.clear();
 
     for (tile, d) in density.iter() {

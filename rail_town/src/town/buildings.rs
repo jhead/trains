@@ -224,6 +224,7 @@ pub fn sync_building_sprites(
     props: Query<(Entity, &RuralProp)>,
     mut state: Local<TownState>,
 ) {
+    let _perf = crate::overlays::perf::scope("sync_building_sprites");
     let Some(atlas) = atlas else {
         // First run: bake the whole atlas once, then never again.
         let baked = bake_atlas(&mut images, &mut layouts);

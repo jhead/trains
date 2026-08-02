@@ -1,4 +1,11 @@
-//! Right-side inspector panel (280px) — identity, type, headline, body.
+//! The Inspector — identity, type, headline, body (brief 05 §3).
+//!
+//! A window, not a fixed panel: it carries [`UiWindow`] and everything about
+//! where it sits, how it stacks, its title bar and its close box belongs to
+//! `ui::window`. It is the one window nothing on the menu row opens — selecting
+//! something in the world is what opens it, and `ui::adapters` keeps the two in
+//! step in both directions, so `Esc` and the close box clear the selection
+//! rather than leaving a panel describing something no longer selected.
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -7,23 +14,27 @@ use rail_sim::{
     TileOccupancy, TrackNetwork, Train, TrainCargo, TrainLocation, WaitingAtStation,
 };
 
-use crate::palette::{BALLAST_D, BG1, OK, OUTLINE};
+use crate::palette::{BALLAST_D, OK};
 use crate::ui::kit::{
     body_font, display_font, micro_font, panel_node, text_accent, text_primary, text_secondary,
-    text_warn, WorldClickBlocker, FONT_BODY, SPACE_2, SPACE_3,
+    text_warn, WorldClickBlocker, FONT_BODY, SPACE_1,
 };
+use crate::ui::{UiWindow, WindowId};
 
 use super::cause::{peep_mood_line, station_cause_line, StationCauseInput};
 use super::pick::Selectable;
 use super::selection::{Selection, ServiceScoreHistory, LONG_WAIT_MINUTES};
 
+/// Brief 05 §3: 280 texels, right side, clear of the centre of the world.
+/// `ui::window` reads the same number for the Inspector's default corner.
 pub const INSPECTOR_W: f32 = 280.0;
 
 #[derive(Component)]
 pub struct InspectorRoot;
 
+/// Holds the rows, so the window's title bar stays put while they scroll.
 #[derive(Component)]
-pub struct InspectorCloseButton;
+struct InspectorBody;
 
 #[derive(Component)]
 struct InspectorNameText;
@@ -63,7 +74,6 @@ macro_rules! inspector_row {
 
 #[derive(SystemParam)]
 pub(crate) struct InspectorUi<'w, 's> {
-    root: Query<'w, 's, &'static mut Node, With<InspectorRoot>>,
     name: inspector_row!('w, 's, InspectorNameText, InspectorTypeText, InspectorHeadlineText,
         InspectorTrendText, InspectorCauseText, InspectorBodyText),
     type_line: inspector_row!('w, 's, InspectorTypeText, InspectorNameText, InspectorHeadlineText,
@@ -79,132 +89,114 @@ pub(crate) struct InspectorUi<'w, 's> {
     cause_color: Query<'w, 's, &'static mut TextColor, With<InspectorCauseText>>,
 }
 
+/// The Inspector's window root.
+///
+/// Position, stacking, the title bar and the close box are all the window
+/// manager's (`ui::window`), so nothing about placement lives here — the only
+/// job left is to be the right width and to start hidden, because a window that
+/// showed itself before the player selected anything would be an empty panel on
+/// screen from the first frame.
+fn inspector_window() -> impl Bundle {
+    let (node, bg, border) = panel_node(Node {
+        position_type: PositionType::Absolute,
+        width: Val::Px(INSPECTOR_W),
+        max_height: Val::Percent(70.0),
+        flex_direction: FlexDirection::Column,
+        row_gap: Val::Px(SPACE_1),
+        padding: UiRect::all(Val::Px(SPACE_1)),
+        display: Display::None,
+        ..default()
+    });
+    (
+        InspectorRoot,
+        UiWindow::new(WindowId::Inspector),
+        WorldClickBlocker,
+        Interaction::default(),
+        node,
+        bg,
+        border,
+    )
+}
+
+/// A 1-texel rule between sections.
+fn spawn_divider(parent: &mut ChildSpawnerCommands) {
+    parent.spawn((
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Px(1.0),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor(BALLAST_D),
+    ));
+}
+
 pub fn setup_inspector_panel(mut commands: Commands) {
     commands.insert_resource(InspectorCache::default());
 
-    let (node, bg, border) = panel_node(Node {
-        position_type: PositionType::Absolute,
-        top: Val::Px(28.0),
-        right: Val::Px(SPACE_3),
-        width: Val::Px(INSPECTOR_W),
-        max_height: Val::Percent(85.0),
-        flex_direction: FlexDirection::Column,
-        row_gap: Val::Px(SPACE_2),
-        padding: UiRect::all(Val::Px(SPACE_3)),
-        display: Display::None,
-        overflow: Overflow::scroll_y(),
-        ..default()
-    });
-
     commands
-        .spawn((
-            InspectorRoot,
-            WorldClickBlocker,
-            Interaction::default(),
-            node,
-            bg,
-            border,
-            ZIndex(20),
-        ))
+        .spawn(inspector_window())
         .with_children(|root| {
-            // Identity row
-            root.spawn(Node {
-                width: Val::Percent(100.0),
-                flex_direction: FlexDirection::Row,
-                justify_content: JustifyContent::SpaceBetween,
-                align_items: AlignItems::Center,
-                ..default()
-            })
-            .with_children(|row| {
-                row.spawn((
+            // The rows live one level down so `dress_new_windows` can put its
+            // title bar above them, and so overflow scrolls the content rather
+            // than the bar the player drags the window by.
+            root.spawn((
+                InspectorBody,
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(SPACE_1),
+                    padding: UiRect::all(Val::Px(SPACE_1)),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+            ))
+            .with_children(|body| {
+                // Identity. The title bar says "Inspector"; this says which one.
+                body.spawn((
                     InspectorNameText,
                     Text::new(""),
                     display_font(),
                     text_primary(),
                 ));
-                row.spawn((
-                    Button,
-                    InspectorCloseButton,
-                    Node {
-                        width: Val::Px(24.0),
-                        height: Val::Px(24.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        border: UiRect::all(Val::Px(1.0)),
-                        border_radius: BorderRadius::ZERO,
-                        ..default()
-                    },
-                    BackgroundColor(BG1),
-                    BorderColor::all(OUTLINE),
-                ))
-                .with_children(|btn| {
-                    btn.spawn((Text::new("x"), body_font(), text_secondary()));
-                });
+                body.spawn((
+                    InspectorTypeText,
+                    Text::new(""),
+                    micro_font(),
+                    text_secondary(),
+                ));
+
+                spawn_divider(body);
+
+                body.spawn((
+                    InspectorHeadlineText,
+                    Text::new(""),
+                    body_font(),
+                    text_accent(),
+                ));
+                body.spawn((
+                    InspectorTrendText,
+                    Text::new(""),
+                    micro_font(),
+                    text_secondary(),
+                ));
+                body.spawn((
+                    InspectorCauseText,
+                    Text::new(""),
+                    body_font(),
+                    text_primary(),
+                ));
+
+                spawn_divider(body);
+
+                body.spawn((
+                    InspectorBodyText,
+                    Text::new(""),
+                    TextFont::from_font_size(FONT_BODY),
+                    text_primary(),
+                ));
             });
-
-            root.spawn((
-                InspectorTypeText,
-                Text::new(""),
-                micro_font(),
-                text_secondary(),
-            ));
-
-            // Divider
-            root.spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Px(1.0),
-                    ..default()
-                },
-                BackgroundColor(BALLAST_D),
-            ));
-
-            root.spawn((
-                InspectorHeadlineText,
-                Text::new(""),
-                body_font(),
-                text_accent(),
-            ));
-            root.spawn((
-                InspectorTrendText,
-                Text::new(""),
-                micro_font(),
-                text_secondary(),
-            ));
-            root.spawn((
-                InspectorCauseText,
-                Text::new(""),
-                body_font(),
-                text_primary(),
-            ));
-
-            root.spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Px(1.0),
-                    ..default()
-                },
-                BackgroundColor(BALLAST_D),
-            ));
-
-            root.spawn((
-                InspectorBodyText,
-                Text::new(""),
-                TextFont::from_font_size(FONT_BODY),
-                text_primary(),
-            ));
         });
-}
-
-pub fn inspector_close_clicks(
-    interactions: Query<&Interaction, (Changed<Interaction>, With<InspectorCloseButton>)>,
-    mut selection: ResMut<Selection>,
-) {
-    for interaction in &interactions {
-        if *interaction == Interaction::Pressed {
-            selection.clear();
-        }
-    }
 }
 
 pub fn update_inspector_panel(
@@ -221,17 +213,15 @@ pub fn update_inspector_panel(
     mut cache: ResMut<InspectorCache>,
     mut ui: InspectorUi,
 ) {
-    let Ok(mut root) = ui.root.single_mut() else {
-        return;
-    };
-
+    // Showing and hiding is the window manager's, driven off `Selection` by
+    // `ui::adapters::sync_inspector_window`. Two owners of one `display` would
+    // fight every frame, so this system only ever writes the contents.
     let Some(sel) = selection.0 else {
-        root.display = Display::None;
-        cache.fingerprint.clear();
+        if !cache.fingerprint.is_empty() {
+            cache.fingerprint.clear();
+        }
         return;
     };
-
-    root.display = Display::Flex;
 
     let view = build_view(
         sel,
@@ -547,4 +537,67 @@ fn format_cents(cents: i64) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     let abs = cents.unsigned_abs();
     format!("{sign}${}.{:02}", abs / 100, abs % 100)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::MinimalPlugins;
+
+    fn spawned() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Startup, setup_inspector_panel);
+        app.update();
+        app
+    }
+
+    /// The Inspector is a window like every other panel, so the manager can
+    /// place it, stack it, drag it and close it. If this ever comes back
+    /// `None`, `ui::adapters` is syncing a slot that nothing renders.
+    #[test]
+    fn the_inspector_is_a_window() {
+        let mut app = spawned();
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&UiWindow, With<InspectorRoot>>();
+        let window = q.single(app.world()).expect("one inspector root");
+        assert_eq!(window.id, WindowId::Inspector);
+    }
+
+    /// Nothing is selected at boot, so nothing should be on screen. The window
+    /// manager opens it when `Selection` fills in.
+    #[test]
+    fn the_inspector_starts_hidden_and_is_only_as_wide_as_the_brief_says() {
+        let mut app = spawned();
+        let mut q = app.world_mut().query_filtered::<&Node, With<InspectorRoot>>();
+        let node = q.single(app.world()).expect("one inspector root");
+        assert_eq!(node.display, Display::None);
+        assert_eq!(node.width, Val::Px(INSPECTOR_W));
+    }
+
+    /// Every row the update system writes has to exist, or a panel silently
+    /// stops reporting one of its lines.
+    #[test]
+    fn every_row_the_update_system_writes_exists() {
+        let mut app = spawned();
+        let world = app.world_mut();
+        assert_eq!(world.query::<&InspectorNameText>().iter(world).count(), 1);
+        assert_eq!(world.query::<&InspectorTypeText>().iter(world).count(), 1);
+        assert_eq!(
+            world.query::<&InspectorHeadlineText>().iter(world).count(),
+            1
+        );
+        assert_eq!(world.query::<&InspectorTrendText>().iter(world).count(), 1);
+        assert_eq!(world.query::<&InspectorCauseText>().iter(world).count(), 1);
+        assert_eq!(world.query::<&InspectorBodyText>().iter(world).count(), 1);
+        assert_eq!(world.query::<&InspectorBody>().iter(world).count(), 1);
+    }
+
+    #[test]
+    fn money_reads_as_money() {
+        assert_eq!(format_cents(0), "$0.00");
+        assert_eq!(format_cents(1234), "$12.34");
+        assert_eq!(format_cents(-509), "-$5.09");
+    }
 }

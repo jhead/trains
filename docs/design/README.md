@@ -23,6 +23,7 @@ For a snapshot of progress against these, see [`docs/PROGRESS-AUDIT.md`](../PROG
 | 09 | [Shell & Menus](09-shell-and-menus.md) | Title, new map, settings, saves, first run. |
 | 10 | [Audio & Feel](10-audio-and-feel.md) | What does calm sound like? |
 | 11 | [Roadmap](11-roadmap.md) | In what order, and how do we know each phase landed? |
+| 12 | [Multiplayer: Neighbour Maps](12-multiplayer.md) | How do maps sit next to other players' maps? |
 
 **01 and 03 are binding standards** — the pixel contract, the palette and the UI kit are constraints, not suggestions. 02 and 04–10 are feature design. 11 sequences them.
 

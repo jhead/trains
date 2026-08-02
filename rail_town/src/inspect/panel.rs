@@ -48,52 +48,34 @@ pub(crate) struct InspectorCache {
     fingerprint: String,
 }
 
+/// Every row of the panel is a separate `&mut Text` query, so each one must
+/// exclude *all* of the others.
+///
+/// The markers are mutually exclusive by construction — a row carries exactly
+/// one — but the borrow checker cannot know that, and a partial `Without` set
+/// compiles fine and then panics on the first frame the system runs. Spelling
+/// the exclusions out in full is what keeps that from happening.
+macro_rules! inspector_row {
+    ($lw:lifetime, $ls:lifetime, $marker:ty $(, $other:ty)* $(,)?) => {
+        Query<$lw, $ls, &'static mut Text, (With<$marker> $(, Without<$other>)*)>
+    };
+}
+
 #[derive(SystemParam)]
 pub(crate) struct InspectorUi<'w, 's> {
     root: Query<'w, 's, &'static mut Node, With<InspectorRoot>>,
-    name: Query<'w, 's, &'static mut Text, (With<InspectorNameText>, Without<InspectorTypeText>)>,
-    type_line: Query<
-        'w,
-        's,
-        &'static mut Text,
-        (
-            With<InspectorTypeText>,
-            Without<InspectorNameText>,
-            Without<InspectorHeadlineText>,
-        ),
-    >,
-    headline: Query<
-        'w,
-        's,
-        &'static mut Text,
-        (
-            With<InspectorHeadlineText>,
-            Without<InspectorNameText>,
-            Without<InspectorTypeText>,
-            Without<InspectorTrendText>,
-        ),
-    >,
-    trend: Query<
-        'w,
-        's,
-        &'static mut Text,
-        (
-            With<InspectorTrendText>,
-            Without<InspectorHeadlineText>,
-            Without<InspectorCauseText>,
-        ),
-    >,
-    cause: Query<
-        'w,
-        's,
-        &'static mut Text,
-        (
-            With<InspectorCauseText>,
-            Without<InspectorTrendText>,
-            Without<InspectorBodyText>,
-        ),
-    >,
-    body: Query<'w, 's, &'static mut Text, (With<InspectorBodyText>, Without<InspectorCauseText>)>,
+    name: inspector_row!('w, 's, InspectorNameText, InspectorTypeText, InspectorHeadlineText,
+        InspectorTrendText, InspectorCauseText, InspectorBodyText),
+    type_line: inspector_row!('w, 's, InspectorTypeText, InspectorNameText, InspectorHeadlineText,
+        InspectorTrendText, InspectorCauseText, InspectorBodyText),
+    headline: inspector_row!('w, 's, InspectorHeadlineText, InspectorNameText, InspectorTypeText,
+        InspectorTrendText, InspectorCauseText, InspectorBodyText),
+    trend: inspector_row!('w, 's, InspectorTrendText, InspectorNameText, InspectorTypeText,
+        InspectorHeadlineText, InspectorCauseText, InspectorBodyText),
+    cause: inspector_row!('w, 's, InspectorCauseText, InspectorNameText, InspectorTypeText,
+        InspectorHeadlineText, InspectorTrendText, InspectorBodyText),
+    body: inspector_row!('w, 's, InspectorBodyText, InspectorNameText, InspectorTypeText,
+        InspectorHeadlineText, InspectorTrendText, InspectorCauseText),
     cause_color: Query<'w, 's, &'static mut TextColor, With<InspectorCauseText>>,
 }
 

@@ -5,7 +5,7 @@
 
 mod camera;
 mod map_view;
-mod spawn;
+mod terrain;
 
 use bevy::prelude::*;
 use rail_map::{generate_map, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_SEED, DEFAULT_MAP_WIDTH};
@@ -15,7 +15,7 @@ use map_view::{
     block_zoom_in_map_view, exit_map_view_before_focus, map_view_click_fly, setup_map_view_banner,
     toggle_map_view,
 };
-use spawn::spawn_map_tiles;
+use terrain::{rebuild_dirty_terrain, setup_terrain, TerrainDirty};
 
 pub use camera::{CameraFocusRequest, MapCamera};
 pub use map_view::MapViewState;
@@ -43,13 +43,15 @@ impl Plugin for MapPlugin {
         app.insert_resource(grid)
             .init_resource::<CameraFocusRequest>()
             .init_resource::<MapViewState>()
+            .init_resource::<TerrainDirty>()
             .add_systems(
                 Startup,
-                (setup_map_camera, spawn_map_tiles, setup_map_view_banner).chain(),
+                (setup_map_camera, setup_terrain, setup_map_view_banner).chain(),
             )
             .add_systems(
                 Update,
                 (
+                    rebuild_dirty_terrain,
                     map_view_click_fly,
                     exit_map_view_before_focus.after(map_view_click_fly),
                     apply_camera_focus.after(exit_map_view_before_focus),

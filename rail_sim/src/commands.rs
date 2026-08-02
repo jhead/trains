@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{LineId, StationId, TileCoord, TrackId, TrainId};
+use crate::stations::{DemolishStation, PlaceStation, UpgradeStation};
 
 /// Stable command envelope for buffering / replay / future networking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +41,9 @@ pub enum CommandKind {
     CreateLine(CreateLine),
     AssignTrainToLine(AssignTrainToLine),
     UnassignTrain(UnassignTrain),
+    PlaceStation(PlaceStation),
+    DemolishStation(DemolishStation),
+    UpgradeStation(UpgradeStation),
     SetSpeed(SetSpeed),
     Pause(Pause),
 }

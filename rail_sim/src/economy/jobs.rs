@@ -1,10 +1,12 @@
 //! Passenger and goods demand jobs.
 
 use bevy_ecs::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::commands::TrainKind;
 use crate::ids::{StationId, TrackId};
 use crate::lines::LineRegistry;
+use crate::peeps::DistrictFlow;
 use crate::stations::{GoodKind, IndustryId, IndustryRegistry, StationRegistry, StationService};
 use crate::track::{TrackNetwork, GROUND_LAYER};
 use crate::trains::find_path_for_kind;
@@ -13,7 +15,7 @@ use crate::trains::{track_for_station, Train, TrainCargo, TrainLocation, TrainOn
 use super::payout::{GOODS_DELIVERY_CENTS, PASSENGER_FARE_CENTS};
 
 /// Pending demand the player can fulfill with trains.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobKind {
     Passenger {
         from: StationId,
@@ -26,14 +28,14 @@ pub enum JobKind {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub kind: JobKind,
     pub reward_cents: i64,
 }
 
 /// Open jobs waiting for a train.
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Resource, Serialize, Deserialize)]
 pub struct JobBoard {
     pub jobs: Vec<Job>,
     /// Ticks since last spawn wave.
@@ -122,6 +124,50 @@ pub fn spawn_demand_jobs(
     }
 
     refresh_waiting(&board, &stations, &mut service);
+}
+
+/// Publish the peep platform queue into the service score.
+///
+/// Must run *before* [`spawn_demand_jobs`], whose `refresh_waiting` charges the
+/// tick's crowding penalty from the blended total.
+pub fn sync_peep_platform_pressure(
+    flow: Res<DistrictFlow>,
+    stations: Res<StationRegistry>,
+    mut service: ResMut<StationService>,
+) {
+    for s in stations.iter() {
+        service.set_peep_waiting(s.id, flow.get(s.id).waiting);
+    }
+}
+
+/// Turn peep departures into real passenger jobs.
+///
+/// This is the join between the two demand models: routines decide *when*
+/// people travel, and this drains those intents onto the board so trains
+/// actually serve them. Without it a morning peak is visible in the town and
+/// invisible to the railway.
+pub fn drain_peep_demand(mut board: ResMut<JobBoard>, mut flow: ResMut<DistrictFlow>) {
+    for (from, to) in flow.take_pending() {
+        if from == to {
+            continue;
+        }
+        if board.jobs.len() >= MAX_PASSENGER_JOBS + MAX_GOODS_JOBS {
+            break;
+        }
+        let already = board.jobs.iter().any(|j| {
+            matches!(
+                &j.kind,
+                JobKind::Passenger { from: f, to: t } if *f == from && *t == to
+            )
+        });
+        if already {
+            continue;
+        }
+        board.jobs.push(Job {
+            kind: JobKind::Passenger { from, to },
+            reward_cents: PASSENGER_FARE_CENTS,
+        });
+    }
 }
 
 fn refresh_waiting(board: &JobBoard, stations: &StationRegistry, service: &mut StationService) {

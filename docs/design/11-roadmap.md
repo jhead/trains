@@ -121,7 +121,7 @@ The world stops being a diagram.
 Deliberately out of scope until the phases above are complete, and none of them are blocked by that:
 
 - **Underground and elevated construction.** The interaction is designed in [04 — Building & Tools](04-building-and-tools.md) §7 so it slots in without re-teaching, but tunnels are a Phase C+ luxury.
-- **Neighbour maps and asynchronous multiplayer.** The edge-portal and command seams exist precisely so this stays cheap to add later; nothing in these briefs should compromise them.
+- **Neighbour maps and asynchronous multiplayer.** Designed in [12 — Multiplayer](12-multiplayer.md) and sequenced as MP-1 through MP-3 there. MP-1 needs no networking at all and can follow Phase E directly. The edge-portal and command seams exist precisely so this stays cheap to add; nothing in these briefs should compromise them.
 - **Signals in full.** Passing loops and double track cover congestion adequately for a first pass; block signalling is the depth extension after.
 - **Seasons and weather as mechanics**, beyond the visual and audio layer.
 

@@ -22,7 +22,7 @@ pub fn buy_cost(kind: TrainKind) -> i64 {
 }
 
 /// Bought trains waiting to be placed at a station.
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, PartialEq, Resource, Serialize, Deserialize)]
 pub struct TrainYard {
     next_id: u64,
     /// FIFO unplaced stock.
@@ -74,7 +74,7 @@ pub struct Train {
 }
 
 /// Position along the track graph + remaining path.
-#[derive(Debug, Clone, PartialEq, Eq, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Component, Serialize, Deserialize)]
 pub struct TrainLocation {
     pub track: TrackId,
     /// Full path including current tile; `path_index` points at `track`.
@@ -111,6 +111,22 @@ impl TrainLocation {
             self.path_index = 0;
         }
         self.progress = 0;
+    }
+
+    /// Replace the route from the current tile onward, keeping the travelled
+    /// prefix and `path_index`.
+    ///
+    /// `ahead[0]` must be the current tile. Unlike [`Self::set_path`] this never
+    /// re-searches for our position, so a detour route may legitimately repeat a
+    /// tile (duck into a passing loop and come back) without rewinding the train.
+    /// Progress into the current tile is kept: a train that has already earned
+    /// its crossing time leaves as soon as the new next tile is free.
+    pub fn set_route_ahead(&mut self, ahead: Vec<TrackId>) {
+        if ahead.first() != Some(&self.track) {
+            return;
+        }
+        self.path.truncate(self.path_index);
+        self.path.extend(ahead);
     }
 
     pub fn destination(&self) -> Option<TrackId> {

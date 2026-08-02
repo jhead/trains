@@ -87,7 +87,7 @@ impl Line {
 }
 
 /// All player lines.
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, PartialEq, Resource, Serialize, Deserialize)]
 pub struct LineRegistry {
     lines: HashMap<LineId, Line>,
     next_id: u64,

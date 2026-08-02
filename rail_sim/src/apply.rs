@@ -40,7 +40,10 @@ pub fn apply_commands(
             | CommandKind::PlaceTrain(_)
             | CommandKind::CreateLine(_)
             | CommandKind::AssignTrainToLine(_)
-            | CommandKind::UnassignTrain(_) => {
+            | CommandKind::UnassignTrain(_)
+            | CommandKind::PlaceStation(_)
+            | CommandKind::DemolishStation(_)
+            | CommandKind::UpgradeStation(_) => {
                 pending.write(PendingWorldCommand {
                     command: command.clone(),
                 });

@@ -1,6 +1,7 @@
 //! Periodic spawn of new settlements / industries outside served coverage.
 
 use bevy_ecs::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::ids::{StationId, TileCoord};
 use crate::peeps::{ComplaintEntry, ComplaintFeed, TalkKind, SIM_SECONDS_PER_TICK};
@@ -49,14 +50,14 @@ fn minutes_to_ticks(minutes: u32) -> u32 {
 }
 
 /// What kind of new demand was revealed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DemandOpportunityKind {
     Settlement(StationId),
     Industry(IndustryId),
 }
 
 /// An open opportunity until the player connects it (or dismisses the alert).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DemandOpportunity {
     pub kind: DemandOpportunityKind,
     pub name: String,
@@ -64,7 +65,7 @@ pub struct DemandOpportunity {
 }
 
 /// Tunable session state for new-demand spawning.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, PartialEq, Resource, Serialize, Deserialize)]
 pub struct DemandSpawner {
     /// Ticks remaining until the next spawn attempt.
     pub ticks_until_next: u32,

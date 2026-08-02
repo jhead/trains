@@ -6,6 +6,7 @@
 use std::collections::VecDeque;
 
 use bevy_ecs::prelude::Resource;
+use serde::{Deserialize, Serialize};
 
 use crate::money::{InsufficientFunds, Money};
 
@@ -71,7 +72,7 @@ impl MoneyCategory {
 const LEDGER_CATS: usize = 6;
 
 /// Session + recent-window category accounting.
-#[derive(Debug, Clone, Resource)]
+#[derive(Debug, Clone, PartialEq, Resource, Serialize, Deserialize)]
 pub struct MoneyLedger {
     /// Signed cents for the whole session (credits positive, debits negative).
     totals: [i64; LEDGER_CATS],

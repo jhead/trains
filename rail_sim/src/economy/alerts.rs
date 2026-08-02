@@ -1,6 +1,7 @@
 //! Actionable, non-modal alerts for things needing attention off-screen.
 
 use bevy_ecs::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::demand::{DemandOpportunityKind, DemandSpawner};
 use crate::ids::{StationId, TileCoord, TrainId};
@@ -18,7 +19,7 @@ pub const ALERT_WAITING_OVERWHELMED: u32 = 8;
 /// Cash below this many minutes of active-train opex → “cash low”.
 pub const ALERT_CASH_LOW_MINUTES: i64 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AlertKind {
     StationServiceLow,
     StationOverwhelmed,
@@ -41,7 +42,7 @@ impl AlertKind {
 }
 
 /// Where clicking an alert should fly the camera.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlertFocus {
     Tile(TileCoord),
     Station(StationId),
@@ -49,7 +50,7 @@ pub enum AlertFocus {
     None,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Alert {
     pub id: u64,
     pub kind: AlertKind,
@@ -59,7 +60,7 @@ pub struct Alert {
     pub key: AlertKey,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AlertKey {
     StationService(StationId),
     StationWaiting(StationId),
@@ -69,7 +70,7 @@ pub enum AlertKey {
     NewIndustry(IndustryId),
 }
 
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Resource, Serialize, Deserialize)]
 pub struct AlertBoard {
     alerts: Vec<Alert>,
     next_id: u64,

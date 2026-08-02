@@ -8,4 +8,5 @@ description = "Rail Town simulation types and systems (no rendering)"
 [dependencies]
 bevy_app.workspace = true
 bevy_ecs.workspace = true
+bincode.workspace = true
 serde.workspace = true

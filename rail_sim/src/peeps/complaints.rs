@@ -24,6 +24,19 @@ pub const COMPLAINT_WAIT_SECS: u32 = 11 * 60;
 /// Sim ticks within which identical-station complaints merge into one line.
 pub const COMPLAINT_DEDUPE_TICKS: u64 = 120;
 
+/// High bit of `wait_minutes` marking *"…then walked"* rather than a plain wait.
+///
+/// [`TalkKind`] and [`ComplaintEntry`]'s field set are shared with the demand,
+/// save and HUD slices, so a walk-off is expressed with the fields that already
+/// exist rather than by growing the type. The remaining 31 bits still carry the
+/// real wait, because a Town Talk line wants a name, a number and a place.
+pub const GAVE_UP_WAIT_FLAG: u32 = 1 << 31;
+
+/// Pack a wait (in whole minutes) as a *gave up and walked* complaint.
+pub fn gave_up_minutes(minutes: u32) -> u32 {
+    (minutes.max(1) & !GAVE_UP_WAIT_FLAG) | GAVE_UP_WAIT_FLAG
+}
+
 /// Kind of Town Talk entry (diagnostic + emotional ambient voice).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TalkKind {
@@ -57,10 +70,16 @@ impl ComplaintEntry {
     pub fn display_line(&self) -> String {
         match self.kind {
             TalkKind::Complaint => {
+                // Several voices about one platform collapse to the summary the
+                // player can act on; a single voice keeps its detail.
                 if self.count > 1 {
+                    format!("{} people are waiting at {}", self.count, self.station_name)
+                } else if self.gave_up() {
                     format!(
-                        "{} people are waiting at {}",
-                        self.count, self.station_name
+                        "{} waited {} min at {}, then walked",
+                        self.peep_name,
+                        self.minutes_waited(),
+                        self.station_name
                     )
                 } else {
                     format!(
@@ -69,10 +88,9 @@ impl ComplaintEntry {
                     )
                 }
             }
-            TalkKind::Praise => format!(
-                "{} · smooth ride via {}",
-                self.peep_name, self.station_name
-            ),
+            TalkKind::Praise => {
+                format!("{} · smooth ride via {}", self.peep_name, self.station_name)
+            }
             TalkKind::Opportunity => {
                 if self.station_name.is_empty() {
                     self.peep_name.clone()
@@ -80,10 +98,16 @@ impl ComplaintEntry {
                     format!("{} · {}", self.peep_name, self.station_name)
                 }
             }
-            TalkKind::Warning => format!(
-                "{} · trouble at {}",
-                self.peep_name, self.station_name
-            ),
+            // A warning with no station carries its own whole sentence — that is
+            // how a household departure reads: *"The Aldertons left Westbrook —
+            // 22 minutes to anywhere."*
+            TalkKind::Warning => {
+                if self.station_name.is_empty() {
+                    self.peep_name.clone()
+                } else {
+                    format!("{} · trouble at {}", self.peep_name, self.station_name)
+                }
+            }
         }
     }
 
@@ -103,6 +127,16 @@ impl ComplaintEntry {
 
     pub fn is_complaint(&self) -> bool {
         self.kind == TalkKind::Complaint
+    }
+
+    /// True when this line is *somebody walked off*, not somebody still waiting.
+    pub fn gave_up(&self) -> bool {
+        self.kind == TalkKind::Complaint && self.wait_minutes & GAVE_UP_WAIT_FLAG != 0
+    }
+
+    /// Whole minutes waited, with the walk-off marker stripped.
+    pub fn minutes_waited(&self) -> u32 {
+        self.wait_minutes & !GAVE_UP_WAIT_FLAG
     }
 }
 
@@ -130,7 +164,9 @@ impl ComplaintFeed {
                         && entry.sim_tick.saturating_sub(e.sim_tick) <= COMPLAINT_DEDUPE_TICKS
                 }) {
                     existing.count = existing.count.saturating_add(entry.count.max(1));
-                    existing.wait_minutes = existing.wait_minutes.max(entry.wait_minutes);
+                    // The merged line is the plain summary, so the walk-off
+                    // marker comes off with it.
+                    existing.wait_minutes = existing.minutes_waited().max(entry.minutes_waited());
                     existing.sim_tick = entry.sim_tick;
                     // Keep a concrete peep for click-to-locate when possible.
                     if existing.peep_id.is_none() {
@@ -205,10 +241,7 @@ mod tests {
             });
         }
         assert_eq!(feed.len(), MAX_COMPLAINTS);
-        assert_eq!(
-            feed.latest_line().unwrap(),
-            "P11 waited 11 min at Eastgate"
-        );
+        assert_eq!(feed.latest_line().unwrap(), "P11 waited 11 min at Eastgate");
     }
 
     #[test]
@@ -241,6 +274,52 @@ mod tests {
             count: 1,
         };
         assert_eq!(e.display_line(), "Mara · smooth ride via Eastgate");
+    }
+
+    #[test]
+    fn gave_up_reads_as_walking_away_and_keeps_its_number() {
+        let mut e = complaint("Nia", "Eastgate", 0, 1, 1);
+        e.wait_minutes = gave_up_minutes(14);
+        assert!(e.gave_up());
+        assert_eq!(e.minutes_waited(), 14);
+        assert_eq!(
+            e.display_line(),
+            "Nia waited 14 min at Eastgate, then walked"
+        );
+    }
+
+    #[test]
+    fn merging_a_walk_off_falls_back_to_the_actionable_summary() {
+        let mut feed = ComplaintFeed::default();
+        feed.push(complaint("Mara", "Eastgate", 11, 10, 1));
+        let mut walked = complaint("Nia", "Eastgate", 0, 20, 1);
+        walked.wait_minutes = gave_up_minutes(14);
+        feed.push(walked);
+
+        assert_eq!(feed.len(), 1);
+        let merged = feed.get(0).unwrap();
+        assert_eq!(merged.count, 2);
+        assert!(!merged.gave_up(), "the marker comes off with the merge");
+        assert_eq!(merged.display_line(), "2 people are waiting at Eastgate");
+    }
+
+    #[test]
+    fn a_household_departure_carries_its_own_sentence() {
+        let e = ComplaintEntry {
+            kind: TalkKind::Warning,
+            peep_name: "The Aldertons left Westbrook — 22 minutes to anywhere".into(),
+            station_name: String::new(),
+            wait_minutes: 0,
+            sim_tick: 4,
+            peep_id: None,
+            station_id: Some(StationId(2)),
+            tile: Some(TileCoord { x: 3, y: 3 }),
+            count: 1,
+        };
+        assert_eq!(
+            e.display_line(),
+            "The Aldertons left Westbrook — 22 minutes to anywhere"
+        );
     }
 
     #[test]

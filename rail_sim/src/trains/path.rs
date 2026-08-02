@@ -1,6 +1,6 @@
 //! Station↔station (and track↔track) pathfinding on [`TrackNetwork`].
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::commands::TrainKind;
 use crate::ids::TrackId;
@@ -12,7 +12,7 @@ use super::profile::TrainProfile;
 /// Returns a path including both `from` and `to`. Empty / single-node when
 /// `from == to`. `None` when disconnected or either id is missing.
 pub fn find_path(network: &TrackNetwork, from: TrackId, to: TrackId) -> Option<Vec<TrackId>> {
-    find_path_for(network, from, to, None)
+    find_path_for(network, from, to, None, &|_| false)
 }
 
 /// Pathfinding that refuses tiles steeper than the train's grade tolerance.
@@ -22,7 +22,30 @@ pub fn find_path_for_kind(
     to: TrackId,
     kind: TrainKind,
 ) -> Option<Vec<TrackId>> {
-    find_path_for(network, from, to, Some(TrainProfile::for_kind(kind)))
+    find_path_for(network, from, to, Some(TrainProfile::for_kind(kind)), &|_| false)
+}
+
+/// Pathfinding that also treats `avoid` as impassable — the way round a block.
+///
+/// `from` and `to` are always allowed, so a train standing nose-to-tail in a
+/// queue can still route out of a busy tile and into a station that is taken.
+/// This is what turns a passing loop or a second running line into a usable
+/// alternative rather than decoration (see `docs/design/07-trains-and-lines.md`
+/// §4.3 and §4.4).
+pub fn find_path_avoiding(
+    network: &TrackNetwork,
+    from: TrackId,
+    to: TrackId,
+    kind: TrainKind,
+    avoid: &HashSet<TrackId>,
+) -> Option<Vec<TrackId>> {
+    find_path_for(
+        network,
+        from,
+        to,
+        Some(TrainProfile::for_kind(kind)),
+        &|id| id != from && id != to && avoid.contains(&id),
+    )
 }
 
 fn find_path_for(
@@ -30,6 +53,7 @@ fn find_path_for(
     from: TrackId,
     to: TrackId,
     profile: Option<TrainProfile>,
+    blocked: &dyn Fn(TrackId) -> bool,
 ) -> Option<Vec<TrackId>> {
     if network.piece(from).is_none() || network.piece(to).is_none() {
         return None;
@@ -51,8 +75,14 @@ fn find_path_for(
     prev.insert(from, from);
 
     while let Some(cur) = queue.pop_front() {
-        for next in network.neighbor_ids(cur) {
+        // Sorted so the chosen route is stable regardless of hash order.
+        let mut neighbors = network.neighbor_ids(cur);
+        neighbors.sort_unstable_by_key(|id| id.0);
+        for next in neighbors {
             if prev.contains_key(&next) {
+                continue;
+            }
+            if blocked(next) {
                 continue;
             }
             if let Some(p) = profile {

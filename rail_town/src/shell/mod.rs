@@ -1,0 +1,814 @@
+#![allow(dead_code)] // Shell surface — `main.rs` wires a subset; the rest is API.
+//! Game shell — title, new map, pause, settings.
+//!
+//! Phase E of [`docs/BURNDOWN.md`]. The shell is what turns the build into a
+//! product: a way in, a way out, and a way to choose what you are playing.
+//! Design brief: [`docs/design/09-shell-and-menus.md`](../../../docs/design/09-shell-and-menus.md).
+//!
+//! # Shape
+//!
+//! [`ShellState`] is the whole state machine: `Title → NewMap → Playing →
+//! Paused`. Settings is an overlay ([`settings_panel::SettingsPanel`]) rather
+//! than a fifth state, because it opens from two different screens and returns to
+//! whichever one called it.
+//!
+//! The world is generated and drawn from boot, so the title screen is the actual
+//! game running quietly behind the menu (design §2) rather than a still. Nothing
+//! in the shell hides it.
+//!
+//! # How the shell keeps gameplay out of the menus
+//!
+//! Two mechanisms, both self-contained, so adding [`ShellPlugin`] is enough to
+//! get correct behaviour without editing any gameplay plugin:
+//!
+//! 1. **Pointer** — every shell screen roots a full-window
+//!    [`WorldClickBlocker`](crate::ui::kit::WorldClickBlocker). The existing
+//!    `UiBlocksWorld` resource therefore reads `true` whenever a menu is up, and
+//!    the build / demolish / select / map-view tools already respect it.
+//! 2. **Keyboard, wheel** — [`suppress_world_input`] clears the input resources
+//!    at the end of `PreUpdate` while the shell owns the screen. Shell input runs
+//!    earlier in the same chain, so menus read keys the game never sees.
+//!
+//! Suppression is a safety net, not a substitute for state gating. Where the
+//! integrator can add `.run_if(in_state(ShellState::Playing))` to a gameplay
+//! plugin's `Update` systems, that is strictly better and this plugin does not
+//! conflict with it. See [`ShellPlugin::suppress_world_input`].
+//!
+//! # New Map, Load, and the world rebuild
+//!
+//! Beginning a new map (or restoring a save) replaces the world's definition —
+//! `MapGrid`, `TrackTerrain`, starting cash — and clears the sim registries.
+//! Presentation follows on its own: `map::terrain` re-composites when `MapGrid`
+//! changes, and the station / industry / train / building / peep sprites all
+//! reconcile against their registries every frame. Track sprites are the one
+//! exception (they are `TrackEdit`-driven), so the shell despawns those directly.
+//!
+//! [`WorldRebuildSet`] and [`world_rebuild_pending`] are the seam for anything
+//! that still needs telling. Order a system `.after(WorldRebuildSet)` in `Update`
+//! with `.run_if(world_rebuild_pending)` and it will run on exactly the frame a
+//! new world is installed, whether that came from New Map or from a load.
+
+pub mod controls;
+mod map_options;
+mod new_map;
+mod pause;
+mod persist;
+mod save;
+mod settings;
+mod settings_panel;
+mod title;
+mod widgets;
+
+use bevy::input::mouse::AccumulatedMouseScroll;
+use bevy::input::InputSystems;
+use bevy::prelude::*;
+use rail_sim::{
+    AlertBoard, CommandBuffer, CommandHistory, DemandSpawner, EventDirector, IndustryRegistry,
+    JobBoard, LineRegistry, Money, MoneyLedger, Peep, StationRegistry, StationService,
+    TileOccupancy, TownDensity, TrackNetwork, TrainYard, WorldAnchorsSeeded,
+};
+
+use crate::inspect::Selection;
+use crate::map::MapCamera;
+use crate::track::{TrackSprite, TrackToolState};
+
+// The shell's public surface. `rail_town` is a binary, so items the app has not
+// wired yet read as unused imports; they are the module's API all the same.
+#[allow(unused_imports)]
+pub use map_options::{
+    GameMode, MapOptions, MapReadouts, MapSize, OptionField, ResourceSpread, StartingCash,
+    TerrainStyle, WaterStyle,
+};
+#[allow(unused_imports)]
+pub use save::{AutosaveTimer, SaveStatus, ShellSaveRequest};
+#[allow(unused_imports)]
+pub use settings::{Settings, SettingsTab};
+#[allow(unused_imports)]
+pub use settings_panel::SettingsPanel;
+#[allow(unused_imports)]
+pub use widgets::{MenuAction, MenuActivated, MenuCursor, ShellUi};
+
+use new_map::{DraftMapOptions, PreviewImage};
+use widgets::{menu_keyboard_nav, menu_pointer, paint_menu_items, sync_menu_cursor};
+
+/// The shell state machine. Everything outside `Playing` is a menu.
+#[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ShellState {
+    #[default]
+    Title,
+    NewMap,
+    Playing,
+    Paused,
+}
+
+impl ShellState {
+    /// `true` while the shell owns the screen and gameplay input must not fire.
+    pub fn is_menu(self) -> bool {
+        !matches!(self, Self::Playing)
+    }
+}
+
+/// Where the world the shell boots into comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BootSeed {
+    /// A fresh seed every launch, so the title screen is a new world each time
+    /// (design §2: "the title screen looks better every time the game does").
+    #[default]
+    Rolled,
+    /// A fixed seed — for reproducible runs, screenshots and tests.
+    Fixed(u64),
+}
+
+/// World setup waiting to be applied, plus where it is in the rebuild handshake.
+///
+/// Two flags rather than one, because the request and the rebuild happen on
+/// different frames: Begin asks during `Update`, and the state transition that
+/// installs the world does not run until the frame after.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct PendingWorld {
+    pub options: MapOptions,
+    /// Begin asked for a new world; consumed on the next entry into `Playing`.
+    requested: bool,
+    /// `true` for exactly the frame the world was installed in. Presentation
+    /// rebuild hooks read this through [`world_rebuild_pending`].
+    rebuilding: bool,
+}
+
+impl PendingWorld {
+    /// Ask for `options` to become the world on the next entry into `Playing`.
+    pub fn request(&mut self, options: MapOptions) {
+        self.options = options;
+        self.requested = true;
+    }
+
+    /// `true` while presentation still has to be rebuilt for a new world.
+    pub fn is_rebuilding(&self) -> bool {
+        self.rebuilding
+    }
+}
+
+/// The shell's world-rebuild work. Anything the app adds to reconstruct
+/// presentation (terrain sprites) must be ordered `.after(WorldRebuildSet)`.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WorldRebuildSet;
+
+/// Run condition: a new world was just installed and presentation must be rebuilt.
+pub fn world_rebuild_pending(pending: Res<PendingWorld>) -> bool {
+    pending.is_rebuilding()
+}
+
+/// Run condition: the shell owns the screen.
+pub fn shell_owns_screen(state: Res<State<ShellState>>) -> bool {
+    state.get().is_menu()
+}
+
+/// Title, new map, pause menu, settings, and the state machine behind them.
+pub struct ShellPlugin {
+    /// World the shell generates at boot. See [`BootSeed`].
+    pub boot_seed: BootSeed,
+    /// Clear keyboard / wheel input while a menu is up. Leave this on unless the
+    /// gameplay plugins are already gated on [`ShellState::Playing`].
+    pub suppress_world_input: bool,
+}
+
+impl Default for ShellPlugin {
+    fn default() -> Self {
+        Self {
+            boot_seed: BootSeed::default(),
+            suppress_world_input: true,
+        }
+    }
+}
+
+impl Plugin for ShellPlugin {
+    fn build(&self, app: &mut App) {
+        let options = MapOptions {
+            seed: match self.boot_seed {
+                BootSeed::Rolled => map_options::roll_seed(),
+                BootSeed::Fixed(seed) => seed,
+            },
+            ..MapOptions::default()
+        };
+
+        app.init_state::<ShellState>()
+            // Settings are read from disk here so the very first frame already
+            // honours them — a UI scale that pops one frame in looks broken.
+            .insert_resource(Settings::load())
+            .insert_resource(PendingWorld {
+                options,
+                ..PendingWorld::default()
+            })
+            .insert_resource(DraftMapOptions(options))
+            .init_resource::<MenuCursor>()
+            .init_resource::<PreviewImage>()
+            .init_resource::<SettingsPanel>()
+            .init_resource::<SaveStatus>()
+            .init_resource::<ShellSaveRequest>()
+            .init_resource::<AutosaveTimer>()
+            .init_resource::<title::DriftClock>()
+            .add_message::<MenuActivated>()
+            // The set exists in both schedules: a new map installs its world
+            // during the state transition, a load installs one mid-`Update`.
+            .configure_sets(OnEnter(ShellState::Playing), WorldRebuildSet)
+            .configure_sets(Update, WorldRebuildSet)
+            // Runs after every plugin's `build`, before `Startup` spawns tiles —
+            // so the world the game draws is the world the shell chose.
+            .add_systems(PreStartup, install_boot_world)
+            .add_systems(OnEnter(ShellState::Title), reset_cursor)
+            .add_systems(OnEnter(ShellState::NewMap), reset_cursor)
+            .add_systems(OnEnter(ShellState::Paused), reset_cursor)
+            .add_systems(
+                OnEnter(ShellState::Playing),
+                apply_pending_world.in_set(WorldRebuildSet),
+            )
+            .add_systems(OnEnter(ShellState::Paused), pause_sim)
+            .add_systems(OnEnter(ShellState::Playing), resume_sim)
+            .add_systems(
+                PreUpdate,
+                (
+                    shell_hotkeys,
+                    settings_panel::capture_rebind,
+                    menu_keyboard_nav.run_if(shell_menu_visible),
+                )
+                    .chain()
+                    .after(InputSystems),
+            )
+            .add_systems(
+                Update,
+                (
+                    menu_pointer,
+                    dispatch_menu_actions.after(menu_pointer),
+                    sync_menu_cursor.after(dispatch_menu_actions),
+                    paint_menu_items.after(sync_menu_cursor),
+                ),
+            )
+            .add_systems(
+                Update,
+                (
+                    save::service_save_requests.after(dispatch_menu_actions),
+                    mark_rebuild_after_load.after(save::service_save_requests),
+                )
+                    .in_set(WorldRebuildSet),
+            )
+            .add_systems(
+                Update,
+                (
+                    title::spawn_title_if_missing.run_if(in_state(ShellState::Title)),
+                    pause::spawn_pause_if_missing.run_if(in_state(ShellState::Paused)),
+                    new_map::seed_typing.run_if(in_state(ShellState::NewMap)),
+                    new_map::rebuild_new_map_screen
+                        .after(new_map::seed_typing)
+                        .run_if(in_state(ShellState::NewMap)),
+                    settings_panel::rebuild_settings_panel,
+                    settings::apply_display_settings,
+                    settings::apply_audio_settings,
+                    settings::persist_settings_on_change,
+                    hide_game_hud,
+                    tick_autosave.run_if(in_state(ShellState::Playing)),
+                ),
+            )
+            .add_systems(
+                PostUpdate,
+                title::drift_background_world.run_if(shell_owns_screen),
+            )
+            .add_systems(Last, finish_world_rebuild);
+
+        if self.suppress_world_input {
+            app.add_systems(
+                PreUpdate,
+                suppress_world_input
+                    .after(InputSystems)
+                    .after(menu_keyboard_nav)
+                    .after(shell_hotkeys)
+                    .run_if(shell_owns_screen),
+            );
+        }
+    }
+}
+
+/// `true` when a navigable shell menu is on screen.
+fn shell_menu_visible(state: Res<State<ShellState>>, panel: Res<SettingsPanel>) -> bool {
+    panel.open || state.get().is_menu()
+}
+
+/// Replace the boot map with the shell's, before anything draws it.
+fn install_boot_world(mut commands: Commands, pending: Res<PendingWorld>) {
+    commands.insert_resource(pending.options.generate());
+}
+
+fn reset_cursor(mut cursor: ResMut<MenuCursor>) {
+    cursor.0 = 0;
+}
+
+/// Pause / resume go through the command buffer, never straight at [`SimClock`],
+/// so the shell obeys the same intent path as every other control.
+fn pause_sim(mut buffer: ResMut<CommandBuffer>) {
+    buffer.push(rail_sim::CommandKind::pause(true));
+}
+
+fn resume_sim(mut buffer: ResMut<CommandBuffer>) {
+    buffer.push(rail_sim::CommandKind::pause(false));
+}
+
+/// `Esc` unwinds one layer per press, and `Tab` walks the settings tabs.
+///
+/// Design 03 §10.1: never more than one layer per press, and never two things at
+/// once. A build drag in progress belongs to the track tool, so the pause menu
+/// stays out of its way.
+fn shell_hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    state: Res<State<ShellState>>,
+    track: Option<Res<TrackToolState>>,
+    mut panel: ResMut<SettingsPanel>,
+    mut next: ResMut<NextState<ShellState>>,
+    mut cursor: ResMut<MenuCursor>,
+) {
+    if panel.open {
+        // A pending rebind owns the next key press, including Escape.
+        if panel.rebinding.is_some() {
+            return;
+        }
+        if keys.just_pressed(KeyCode::Tab) {
+            let index = SettingsTab::ALL
+                .iter()
+                .position(|t| *t == panel.tab)
+                .unwrap_or(0);
+            panel.tab = SettingsTab::ALL[(index + 1) % SettingsTab::ALL.len()];
+            cursor.0 = 0;
+        }
+        if keys.just_pressed(KeyCode::Escape) {
+            panel.close();
+            cursor.0 = 0;
+        }
+        return;
+    }
+
+    if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    match state.get() {
+        ShellState::Playing => {
+            let dragging = track.is_some_and(|t| t.drag.is_some());
+            if !dragging {
+                next.set(ShellState::Paused);
+            }
+        }
+        ShellState::Paused => next.set(ShellState::Playing),
+        ShellState::NewMap => next.set(ShellState::Title),
+        // Escape on the title does nothing. Quitting is a menu item, never a
+        // stray keypress.
+        ShellState::Title => {}
+    }
+}
+
+/// One place where every shell button is answered.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_menu_actions(
+    mut activated: MessageReader<MenuActivated>,
+    state: Res<State<ShellState>>,
+    mut next: ResMut<NextState<ShellState>>,
+    mut panel: ResMut<SettingsPanel>,
+    mut settings: ResMut<Settings>,
+    mut draft: ResMut<DraftMapOptions>,
+    mut pending: ResMut<PendingWorld>,
+    mut status: ResMut<SaveStatus>,
+    mut save_request: ResMut<ShellSaveRequest>,
+    mut cursor: ResMut<MenuCursor>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    for MenuActivated(action) in activated.read().copied() {
+        if new_map::apply_new_map_action(&mut draft, action) {
+            continue;
+        }
+        match action {
+            MenuAction::Continue => {
+                // With a save, resume it; without one, play the world already on
+                // screen (design §2 — the background map is playable as it is).
+                if let Some(info) = save::newest_slot() {
+                    save::request_load(&mut save_request, info.slot);
+                }
+                next.set(ShellState::Playing);
+            }
+            MenuAction::NewMap => {
+                draft.0 = pending.options;
+                next.set(ShellState::NewMap);
+            }
+            // One-click Load takes the newest save. A slot picker with
+            // thumbnails (design §6) is the next thing to build here.
+            MenuAction::Load => match save::newest_slot() {
+                Some(info) => {
+                    save::request_load(&mut save_request, info.slot);
+                    next.set(ShellState::Playing);
+                }
+                None => status.set("No saves yet"),
+            },
+            MenuAction::OpenSettings => {
+                panel.open_from(*state.get());
+                cursor.0 = 0;
+            }
+            MenuAction::Quit => {
+                exit.write(AppExit::Success);
+            }
+            MenuAction::Resume => next.set(ShellState::Playing),
+            MenuAction::Save => save::request_save(&mut save_request, None),
+            MenuAction::QuitToTitle => {
+                status.clear();
+                next.set(ShellState::Title);
+            }
+            MenuAction::Begin => {
+                pending.request(draft.0);
+                next.set(ShellState::Playing);
+            }
+            MenuAction::Back => next.set(ShellState::Title),
+            MenuAction::SelectTab(tab) => {
+                panel.tab = tab;
+                cursor.0 = 0;
+            }
+            MenuAction::CycleSetting(id, delta) => id.cycle(&mut settings, delta),
+            MenuAction::RebindControl(control) => panel.rebinding = Some(control),
+            MenuAction::ResetControls => settings.controls.reset(),
+            MenuAction::CloseSettings => {
+                panel.close();
+                cursor.0 = 0;
+            }
+            // Handled above by `apply_new_map_action`, or intentionally inert.
+            MenuAction::CycleMapOption(..) | MenuAction::RerollSeed | MenuAction::Inert => {}
+        }
+    }
+}
+
+/// Install the world the player just configured.
+///
+/// Replaces the map and terrain, resets the treasury to the chosen bracket, and
+/// clears the sim state the shell can reach so anchors re-seed onto the new
+/// terrain. Presentation sprites are despawned here; respawning terrain is the
+/// app's hook (see the module docs).
+#[allow(clippy::too_many_arguments)]
+fn apply_pending_world(
+    mut commands: Commands,
+    mut pending: ResMut<PendingWorld>,
+    track_sprites: Query<Entity, With<TrackSprite>>,
+    peeps: Query<Entity, With<Peep>>,
+    mut cameras: Query<&mut Transform, With<MapCamera>>,
+) {
+    if !pending.requested {
+        return;
+    }
+    pending.requested = false;
+    pending.rebuilding = true;
+    let options = pending.options;
+    let map = options.generate();
+
+    // Station, industry, train, building and peep sprites all reconcile against
+    // their registries every frame, so clearing the registries below is enough to
+    // clear them. Track sprites are the exception — they are driven by
+    // `TrackEdit` messages and have no reconcile pass — so they go by hand.
+    // Peep *entities* are sim state, not presentation, and go with them.
+    for entity in track_sprites.iter().chain(peeps.iter()) {
+        commands.entity(entity).despawn();
+    }
+
+    commands.insert_resource(map_options::track_terrain_from(&map));
+    commands.insert_resource(Money::new(options.cash.cents()));
+    commands.insert_resource(CommandBuffer::default());
+    commands.insert_resource(CommandHistory::default());
+    commands.insert_resource(EventDirector::default());
+    commands.insert_resource(TrackNetwork::default());
+    commands.insert_resource(StationRegistry::default());
+    commands.insert_resource(IndustryRegistry::default());
+    commands.insert_resource(StationService::default());
+    commands.insert_resource(TrainYard::default());
+    commands.insert_resource(TileOccupancy::default());
+    commands.insert_resource(JobBoard::default());
+    commands.insert_resource(MoneyLedger::default());
+    commands.insert_resource(AlertBoard::default());
+    commands.insert_resource(DemandSpawner::default());
+    commands.insert_resource(LineRegistry::default());
+    commands.insert_resource(TownDensity::default());
+    commands.insert_resource(WorldAnchorsSeeded(false));
+    commands.insert_resource(Selection::default());
+
+    if let Ok(mut transform) = cameras.single_mut() {
+        title::centre_camera_on_map(&map, &mut transform);
+    }
+    // Inserted last, and deliberately: `map::terrain` watches `MapGrid` for a
+    // change and re-composites (or regrows) its chunk grid off the back of it,
+    // so swapping the resource *is* the terrain rebuild.
+    commands.insert_resource(map);
+}
+
+/// The rebuild flag lives for exactly one frame: every `OnEnter` hook, and every
+/// `Update` system that watched for it, has run by `Last`.
+fn finish_world_rebuild(mut pending: ResMut<PendingWorld>) {
+    if pending.rebuilding {
+        pending.rebuilding = false;
+    }
+}
+
+/// Hide the in-game HUD while the shell owns the screen.
+///
+/// Root UI nodes that are not shell-owned are the game's chrome — status strip,
+/// toolbar, Town Talk, ledger, alerts, inspector. Hiding by [`Visibility`] rather
+/// than `Node.display` deliberately leaves each panel's own show / hide logic
+/// untouched, so nothing has to be restored when play resumes.
+fn hide_game_hud(
+    state: Res<State<ShellState>>,
+    mut roots: Query<&mut Visibility, (With<Node>, Without<ChildOf>, Without<ShellUi>)>,
+) {
+    // Paused still shows the HUD: the player should see what they were doing.
+    let visible = matches!(state.get(), ShellState::Playing | ShellState::Paused);
+    let wanted = if visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut visibility in &mut roots {
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
+    }
+}
+
+/// Drop keyboard / wheel input before gameplay systems see it.
+///
+/// Runs last in the shell's `PreUpdate` chain, so shell navigation has already
+/// read what it needs. A key held across the transition back into play needs one
+/// re-press, which is the correct behaviour anyway — nobody expects to still be
+/// panning after closing a menu.
+fn suppress_world_input(
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    mut scroll: ResMut<AccumulatedMouseScroll>,
+) {
+    keys.reset_all();
+    mouse.reset_all();
+    *scroll = AccumulatedMouseScroll::default();
+}
+
+/// Autosave on the configured interval (design §6). Never blocks play — the
+/// request is serviced by the background writer in `rail_sim::save`.
+fn tick_autosave(
+    time: Res<Time>,
+    settings: Res<Settings>,
+    mut timer: ResMut<AutosaveTimer>,
+    mut request: ResMut<ShellSaveRequest>,
+) {
+    if timer.tick(time.delta_secs(), settings.gameplay.autosave_minutes) {
+        // `Auto(0)` names the rotation, not slot zero: the save layer picks the
+        // next slot in the ring itself.
+        save::request_save(&mut request, Some(rail_sim::save::SaveSlot::Auto(0)));
+    }
+}
+
+/// A finished load leaves the world holding new data and stale art, so it asks
+/// for the same presentation rebuild a new map does.
+fn mark_rebuild_after_load(
+    mut request: ResMut<ShellSaveRequest>,
+    mut pending: ResMut<PendingWorld>,
+) {
+    if request.loaded {
+        request.loaded = false;
+        pending.rebuilding = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::asset::AssetPlugin;
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input::{ButtonState, InputPlugin};
+    use bevy::state::app::StatesPlugin;
+
+    /// Headless app with just enough of Bevy for the shell to run for real.
+    ///
+    /// The point is to exercise schedule construction, run conditions and
+    /// resource availability — the failures that only appear at runtime.
+    fn test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            InputPlugin,
+            AssetPlugin::default(),
+        ))
+        .init_asset::<Image>()
+        .init_resource::<UiScale>()
+        // Normally `SimPlugin`'s; the shell only needs somewhere to post intent.
+        .init_resource::<CommandBuffer>()
+        .add_plugins(ShellPlugin {
+            boot_seed: BootSeed::Fixed(42),
+            suppress_world_input: true,
+        })
+        // Override whatever `ShellPlugin::build` read off this machine, so the
+        // tests never depend on (or write to) a real player profile.
+        .insert_resource(Settings::default());
+        app
+    }
+
+    fn state_of(app: &App) -> ShellState {
+        *app.world().resource::<State<ShellState>>().get()
+    }
+
+    fn go_to(app: &mut App, state: ShellState) {
+        app.world_mut()
+            .resource_mut::<NextState<ShellState>>()
+            .set(state);
+        app.update();
+    }
+
+    /// Tap a key: press and release in one frame, as real hardware would over
+    /// two. Without the release the key stays down and the *next* press never
+    /// registers as `just_pressed`.
+    fn press(app: &mut App, key: KeyCode) {
+        for state in [ButtonState::Pressed, ButtonState::Released] {
+            app.world_mut().write_message(KeyboardInput {
+                key_code: key,
+                logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+                state,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+        }
+        app.update();
+    }
+
+    fn count<F: bevy::ecs::query::QueryFilter>(app: &mut App) -> usize {
+        let mut query = app.world_mut().query_filtered::<Entity, F>();
+        query.iter(app.world()).count()
+    }
+
+    #[test]
+    fn the_plugin_boots_into_a_title_screen_over_a_generated_world() {
+        let mut app = test_app();
+        app.update();
+
+        assert_eq!(state_of(&app), ShellState::Title);
+        assert_eq!(
+            app.world().resource::<rail_map::MapGrid>().seed,
+            42,
+            "the shell installs its own world before anything draws it"
+        );
+        assert_eq!(
+            count::<With<ShellUi>>(&mut app),
+            1,
+            "one shell screen is up"
+        );
+    }
+
+    #[test]
+    fn escape_opens_the_pause_menu_and_escape_again_resumes() {
+        let mut app = test_app();
+        app.update();
+        go_to(&mut app, ShellState::Playing);
+        assert_eq!(state_of(&app), ShellState::Playing);
+        assert_eq!(
+            count::<With<ShellUi>>(&mut app),
+            0,
+            "no chrome while playing"
+        );
+
+        press(&mut app, KeyCode::Escape);
+        assert_eq!(state_of(&app), ShellState::Paused);
+        assert_eq!(count::<With<ShellUi>>(&mut app), 1);
+
+        press(&mut app, KeyCode::Escape);
+        assert_eq!(state_of(&app), ShellState::Playing);
+    }
+
+    #[test]
+    fn pausing_stops_the_sim_and_resuming_starts_it_again() {
+        let mut app = test_app();
+        app.update();
+        go_to(&mut app, ShellState::Playing);
+        go_to(&mut app, ShellState::Paused);
+        let paused = app
+            .world()
+            .resource::<CommandBuffer>()
+            .pending()
+            .iter()
+            .any(|c| matches!(c.kind, rail_sim::CommandKind::Pause(p) if p.paused));
+        assert!(paused, "entering the pause menu asks the sim to pause");
+    }
+
+    #[test]
+    fn the_new_map_screen_builds_a_preview_and_begin_installs_the_world() {
+        let mut app = test_app();
+        app.update();
+        go_to(&mut app, ShellState::NewMap);
+        app.update();
+
+        assert_eq!(count::<With<new_map::NewMapRoot>>(&mut app), 1);
+        let preview = app.world().resource::<PreviewImage>().0.clone();
+        assert!(
+            app.world()
+                .resource::<Assets<Image>>()
+                .get(&preview)
+                .is_some(),
+            "the preview texture exists"
+        );
+
+        // Choose a different seed, then Begin.
+        app.world_mut().resource_mut::<DraftMapOptions>().0.seed = 777;
+        app.world_mut()
+            .write_message(MenuActivated(MenuAction::Begin));
+        // A state change requested during `Update` lands on the next frame's
+        // transition, so the world is installed one update later.
+        app.update();
+        app.update();
+
+        assert_eq!(state_of(&app), ShellState::Playing);
+        assert_eq!(
+            app.world().resource::<rail_map::MapGrid>().seed,
+            777,
+            "Begin installs the configured world"
+        );
+        assert!(
+            !app.world().resource::<PendingWorld>().is_rebuilding(),
+            "the rebuild flag lasts exactly one frame"
+        );
+    }
+
+    #[test]
+    fn menu_keys_never_reach_the_game() {
+        let mut app = test_app();
+        app.update();
+        // `B` is the track tool in play. On the title screen it must be gone by
+        // the time gameplay systems run.
+        press(&mut app, KeyCode::KeyB);
+        let keys = app.world().resource::<ButtonInput<KeyCode>>();
+        assert!(
+            !keys.pressed(KeyCode::KeyB) && !keys.just_pressed(KeyCode::KeyB),
+            "world input is suppressed while the shell owns the screen"
+        );
+    }
+
+    #[test]
+    fn quitting_to_the_title_brings_the_title_screen_back() {
+        let mut app = test_app();
+        app.update();
+        go_to(&mut app, ShellState::Playing);
+        app.world_mut()
+            .write_message(MenuActivated(MenuAction::QuitToTitle));
+        app.update();
+        app.update();
+        assert_eq!(state_of(&app), ShellState::Title);
+        assert_eq!(count::<With<ShellUi>>(&mut app), 1);
+    }
+
+    #[test]
+    fn settings_opens_over_the_title_and_returns_to_it() {
+        let mut app = test_app();
+        app.update();
+        app.world_mut()
+            .write_message(MenuActivated(MenuAction::OpenSettings));
+        app.update();
+
+        let panel = app.world().resource::<SettingsPanel>().clone();
+        assert!(panel.open);
+        assert_eq!(panel.return_to, Some(ShellState::Title));
+
+        press(&mut app, KeyCode::Escape);
+        assert!(!app.world().resource::<SettingsPanel>().open);
+        assert_eq!(
+            state_of(&app),
+            ShellState::Title,
+            "closing settings must not also unwind the screen behind it"
+        );
+    }
+
+    #[test]
+    fn only_playing_is_not_a_menu() {
+        assert!(ShellState::Title.is_menu());
+        assert!(ShellState::NewMap.is_menu());
+        assert!(ShellState::Paused.is_menu());
+        assert!(!ShellState::Playing.is_menu());
+    }
+
+    #[test]
+    fn the_shell_boots_into_the_title() {
+        assert_eq!(ShellState::default(), ShellState::Title);
+    }
+
+    #[test]
+    fn a_fixed_boot_seed_reproduces_the_same_world() {
+        let a = MapOptions {
+            seed: 84_213,
+            ..MapOptions::default()
+        };
+        assert_eq!(a.generate().seed, a.effective_seed());
+        assert_eq!(
+            a.effective_seed(),
+            84_213,
+            "stock options pass the seed through"
+        );
+    }
+
+    #[test]
+    fn suppression_is_on_by_default_so_the_plugin_is_safe_alone() {
+        let plugin = ShellPlugin::default();
+        assert!(plugin.suppress_world_input);
+        assert_eq!(plugin.boot_seed, BootSeed::Rolled);
+    }
+}

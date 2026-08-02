@@ -14,7 +14,7 @@ use feedback::{setup_build_feedback, sync_flash_sprites, update_build_feedback_u
 use ghost::sync_track_ghosts;
 use sync::sync_track_terrain_from_map;
 use tools::track_tool_input;
-use visuals::apply_track_sprites;
+use visuals::{apply_track_sprites, polish_railheads};
 
 use crate::inspect::SelectionInputSet;
 
@@ -35,6 +35,7 @@ impl Plugin for TrackPlugin {
                     update_build_feedback_ui.after(track_tool_input),
                     sync_flash_sprites.after(update_build_feedback_ui),
                     apply_track_sprites,
+                    polish_railheads.after(apply_track_sprites),
                 ),
             );
     }

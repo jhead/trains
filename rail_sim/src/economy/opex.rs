@@ -3,6 +3,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::money::Money;
+use crate::stations::{station_maintenance_total, StationRegistry};
 use crate::track::{piece_maintenance_cents, TrackNetwork};
 use crate::trains::{Train, TrainLocation, TrainProfile};
 
@@ -56,9 +57,11 @@ pub fn apply_track_maintenance(
     mut money: ResMut<Money>,
     mut ledger: ResMut<MoneyLedger>,
     network: Res<TrackNetwork>,
+    stations: Res<StationRegistry>,
     mut trains: Query<&mut TrainLocation>,
 ) {
-    let total = track_maintenance_total(&network);
+    // A station is a kind of track, so its upkeep shares the same bucket.
+    let total = track_maintenance_total(&network) + station_maintenance_total(&stations);
     if total <= 0 {
         return;
     }

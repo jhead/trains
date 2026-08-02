@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 
 use crate::ids::TileCoord;
-use crate::stations::{StationRegistry, StationService};
+use crate::stations::{catchment_influence, StationRegistry, StationService};
 
 /// Chebyshev radius (tiles) of the growth ring around each station.
 pub const GROWTH_RADIUS: i32 = 5;
@@ -65,15 +65,10 @@ pub fn density_target_at(
 ) -> f32 {
     let mut best = 0.0_f32;
     for station in stations.iter() {
-        let dx = (station.tile.x - tile.x).abs();
-        let dy = (station.tile.y - tile.y).abs();
-        let dist = dx.max(dy);
-        if dist > GROWTH_RADIUS {
-            continue;
-        }
-        let score = service.score(station.id).score as f32 / 100.0;
-        let falloff = 1.0 - (dist as f32) / ((GROWTH_RADIUS + 1) as f32);
-        let influence = (score * falloff).clamp(0.0, MAX_DENSITY);
+        // Catchment comes from the station's tier, so an Interchange reaches
+        // further than a Halt.
+        let influence =
+            catchment_influence(station, service.score(station.id).score, tile).min(MAX_DENSITY);
         if influence > best {
             best = influence;
         }
@@ -95,8 +90,9 @@ pub fn advance_town_growth(
     // cells that fall out of good service without iterating the whole map.
     let mut tiles: Vec<TileCoord> = Vec::new();
     for station in stations.iter() {
-        for dy in -GROWTH_RADIUS..=GROWTH_RADIUS {
-            for dx in -GROWTH_RADIUS..=GROWTH_RADIUS {
+        let radius = station.tier.catchment();
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
                 tiles.push(TileCoord {
                     x: station.tile.x + dx,
                     y: station.tile.y + dy,

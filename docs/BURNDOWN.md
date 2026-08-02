@@ -50,3 +50,13 @@ Tracks work against [`docs/design/11-roadmap.md`](design/11-roadmap.md). Update 
 | --- | --- |
 | Title, new map, pause, settings, save/load | pending |
 | First-run teaching | pending |
+
+## MP — Neighbour maps
+
+Design: [`docs/design/12-multiplayer.md`](design/12-multiplayer.md). Phasing is defined there; MP-1 requires no networking.
+
+| Item | Status |
+| --- | --- |
+| MP-1 — portals as construction, border yard, transit, manifests, echo neighbours | pending |
+| MP-2 — friend codes, blob exchange, cache + reconciliation | pending |
+| MP-3 — community pool, relationship maturity | pending |

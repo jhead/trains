@@ -4,11 +4,13 @@
 //! clock / track / town / peeps), HUD, input bridge for pause / speed, and
 //! track build tools. Domain systems join `FixedUpdate` via [`rail_sim::SimSet`].
 
+mod atmosphere;
 mod inspect;
 mod lines;
 mod map;
 mod overlays;
 mod palette;
+mod shell;
 mod sim_bridge;
 mod stations;
 mod town;
@@ -16,6 +18,7 @@ mod track;
 mod trains;
 mod ui;
 
+use atmosphere::AtmospherePlugin;
 use bevy::prelude::*;
 use inspect::InspectPlugin;
 use lines::LinesPlugin;
@@ -24,6 +27,7 @@ use overlays::OverlaysPlugin;
 use palette::BG0;
 use rail_net::NeighborService;
 use rail_sim::SimPlugin;
+use shell::ShellPlugin;
 use sim_bridge::SimBridgePlugin;
 use stations::StationsPlugin;
 use town::TownPresentationPlugin;
@@ -33,14 +37,24 @@ use ui::UiPlugin;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Rail Town".into(),
-                resolution: (1280, 720).into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Rail Town".into(),
+                        resolution: (1280, 720).into(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                // Pixel contract: nearest sampling is the default for every
+                // texture, so a new atlas can't silently sample linearly.
+                .set(ImagePlugin::default_nearest()),
+        )
+        // Title / New Map / Pause / Settings. Needs `StatesPlugin`, so it must
+        // follow `DefaultPlugins`. `SavePlugin` is already registered inside
+        // `SimPlugin` — don't add it a second time here.
+        .add_plugins(ShellPlugin::default())
         .add_plugins(SimPlugin)
         .add_plugins(SimBridgePlugin)
         // Seeded terrain + pan/zoom camera (default seed 42, 64×64).
@@ -50,6 +64,8 @@ fn main() {
         .add_plugins(TrainsPlugin)
         .add_plugins(LinesPlugin)
         .add_plugins(TownPresentationPlugin)
+        // Time-of-day tint, lit windows, and world-anchored ambient motion.
+        .add_plugins(AtmospherePlugin)
         .add_plugins(InspectPlugin)
         .add_plugins(OverlaysPlugin)
         .add_plugins(UiPlugin)

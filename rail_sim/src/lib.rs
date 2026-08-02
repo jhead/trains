@@ -18,6 +18,7 @@ pub mod ids;
 pub mod lines;
 pub mod money;
 pub mod peeps;
+pub mod save;
 pub mod stations;
 pub mod town;
 pub mod track;
@@ -37,9 +38,10 @@ pub use demand::{
     DEMAND_MAX_NEW_PER_SESSION, DEMAND_MIN_ANCHOR_SPACING, DEMAND_SERVICE_INFLUENCE_MAX,
 };
 pub use economy::{
-    apply_track_maintenance, apply_train_opex, assign_jobs, refresh_alerts, resolve_deliveries,
-    spawn_demand_jobs, tick_money_ledger, track_maintenance_total, Alert, AlertBoard, AlertFocus,
-    AlertKind, AlertKey, JobBoard, JobKind, MoneyCategory, MoneyLedger, ALERT_CASH_LOW_MINUTES,
+    apply_track_maintenance, apply_train_opex, assign_jobs, drain_peep_demand, refresh_alerts,
+    resolve_deliveries, spawn_demand_jobs, sync_peep_platform_pressure, tick_money_ledger,
+    track_maintenance_total, Alert, AlertBoard, AlertFocus, AlertKind, AlertKey, Job, JobBoard,
+    JobKind, MoneyCategory, MoneyLedger, ALERT_CASH_LOW_MINUTES,
     ALERT_SERVICE_LOW_SCORE, ALERT_WAITING_OVERWHELMED, GOODS_DELIVERY_CENTS, LEDGER_HISTORY_LEN,
     LEDGER_SAMPLE_SIM_SECS, PASSENGER_FARE_CENTS, TRAIN_OPEX_CENTS,
 };
@@ -51,13 +53,28 @@ pub use lines::{
 };
 pub use money::{InsufficientFunds, Money, STARTING_CASH_CENTS};
 pub use peeps::{
-    ComplaintEntry, ComplaintFeed, Mood, Peep, PeepId, PeepsPlugin, TalkKind, TownTalkEntry,
-    TownTalkFeed, WaitingAtStation, COMPLAINT_DEDUPE_TICKS, COMPLAINT_WAIT_SECS, MAX_COMPLAINTS,
-    MAX_TOWN_TALK, PEEPS_PER_STATION, SIM_SECONDS_PER_TICK,
+    advance_abstract_flow, advance_journeys, advance_peep_waits, begin_flow_window, day_index,
+    district_capacity, gave_up_minutes, minute_of_day, mood_from_experience, peeps_move_away,
+    rebalance_peep_detail, spawn_peep_households, BodyType, ComplaintEntry, ComplaintFeed,
+    DistrictFlow, DistrictFlowState, Facing, Household, HouseholdId, HouseholdRegistry, Journey,
+    JourneyLeg, JourneyMemory, JourneyOutcome, JourneyRecord, JourneyStage, Mood, Peep, PeepBudget,
+    PeepDetail, PeepFocus, PeepId, PeepPosition, PeepRole, PeepsPlugin, Routine, TalkKind,
+    TownTalkEntry, TownTalkFeed, WaitingAtStation, BAD_JOURNEYS_TO_LEAVE, COMPLAINT_DEDUPE_TICKS,
+    COMPLAINT_WAIT_SECS, DAY_MINUTES, GAVE_UP_WAIT_FLAG, MAX_COMPLAINTS, MAX_DETAILED_PEEPS,
+    MAX_TOWN_TALK, MEMORY_DEPTH, PEEPS_PER_STATION, SIM_SECONDS_PER_TICK, TICKS_PER_DAY,
+};
+pub use save::{
+    autosave, delete_slot, list_slots, load_from_slot, queue_autosave, queue_save, save_to_slot,
+    save_to_slot_async, SaveError, SaveJobs, SaveMeta, SavePlugin, SaveResult, SaveSlot, SlotInfo,
+    WorldSnapshot, AUTOSAVE_SLOTS, SCHEMA_VERSION,
 };
 pub use stations::{
-    seed_stations_and_industries, GoodKind, Industry, IndustryId, IndustryRegistry, Station,
-    StationRegistry, StationService, StationServiceScore,
+    apply_station_commands, catchment_influence, push_station_command,
+    seed_stations_and_industries, station_maintenance_total, DemolishStation, GoodKind, Industry,
+    IndustryId, IndustryRegistry, PlaceStation, Station, StationCommand, StationEdit,
+    StationPlacementError, StationRegistry, StationService, StationServiceScore, StationTier,
+    StationTierSpec, UpgradeStation, HALT_COST_CENTS, INTERCHANGE_COST_CENTS, MIN_STATION_SPACING,
+    STATION_COST_CENTS, TERMINUS_COST_CENTS,
 };
 pub use town::{TownDensity, TownPlugin, GROWTH_RADIUS, MAX_DENSITY};
 pub use track::{
@@ -68,7 +85,8 @@ pub use track::{
     TRACK_COST_CENTS, TRACK_MAINT_CENTS,
 };
 pub use trains::{
-    advance_trains, apply_train_commands, blocker_for, buy_cost, find_path, find_path_for_kind,
+    advance_trains, apply_train_commands, blocked_chain_head, blocker_for, buy_cost, find_path,
+    find_path_avoiding, find_path_for_kind,
     ticks_for_piece, track_for_station, TileOccupancy, Train, TrainCargo, TrainEdit, TrainLocation,
     TrainOnLine, TrainProfile, TrainYard, TRANSIT_COST_CENTS, TRANSIT_PROFILE, TRANSPORT_COST_CENTS,
     TRANSPORT_PROFILE,
@@ -119,6 +137,7 @@ impl Plugin for SimPlugin {
             .add_message::<PendingWorldCommand>()
             .add_message::<TrackEdit>()
             .add_message::<TrainEdit>()
+            .add_message::<StationEdit>()
             .configure_sets(
                 FixedUpdate,
                 (SimSet::ApplyCommands, SimSet::Advance).chain(),
@@ -127,6 +146,12 @@ impl Plugin for SimPlugin {
                 FixedUpdate,
                 (
                     apply_commands,
+                    // Must precede the track handler: it owns `CommandHistory::finish_replay`,
+                    // so a station inverse replayed after it reads as a fresh player action
+                    // and wipes the redo stack.
+                    apply_station_commands
+                        .after(apply_commands)
+                        .before(apply_track_commands),
                     apply_track_commands.after(apply_commands),
                     apply_train_commands.after(apply_commands),
                     apply_line_commands.after(apply_commands),
@@ -137,7 +162,14 @@ impl Plugin for SimPlugin {
                 FixedUpdate,
                 (
                     spawn_new_demand,
-                    spawn_demand_jobs.after(spawn_new_demand),
+                    // Peep routines decide when people travel; these two carry
+                    // that into the railway — platform pressure into the score,
+                    // departures onto the job board. Both must precede
+                    // `spawn_demand_jobs`, which charges the tick's crowding
+                    // penalty from the blended queue.
+                    sync_peep_platform_pressure.after(spawn_new_demand),
+                    drain_peep_demand.after(sync_peep_platform_pressure),
+                    spawn_demand_jobs.after(drain_peep_demand),
                     assign_jobs.after(spawn_demand_jobs),
                     advance_trains.after(assign_jobs),
                     resolve_deliveries.after(advance_trains),
@@ -151,7 +183,7 @@ impl Plugin for SimPlugin {
                     .run_if(sim_is_running),
             )
             .add_systems(Update, seed_world_anchors_once)
-            .add_plugins((TownPlugin, PeepsPlugin));
+            .add_plugins((TownPlugin, PeepsPlugin, save::SavePlugin));
     }
 }
 

@@ -1,15 +1,30 @@
-//! Placeholder sprites for seeded stations and industries.
+//! Placeholder sprites for stations and industries.
 //!
 //! Newly revealed demand (open opportunities) uses a brighter amber tint so
-//! unserved anchors read as the next thing to reach.
+//! unserved anchors read as the next thing to reach. Player-built platforms
+//! read their **tier** off the registry: a halt is a chip on the line, an
+//! interchange is a block you cannot miss.
 
 use bevy::prelude::*;
 use rail_map::{tile_to_world, TILE_SIZE};
+use rail_sim::stations::StationTier;
 use rail_sim::{DemandSpawner, IndustryId, IndustryRegistry, StationId, StationRegistry};
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct StationSprite {
     pub id: StationId,
+}
+
+/// Sprite footprint for a tier, as a fraction of the tile.
+///
+/// Scales with platform count so the four grades are told apart at a glance.
+pub fn tier_sprite_scale(tier: StationTier) -> f32 {
+    match tier {
+        StationTier::Halt => 0.4,
+        StationTier::Station => 0.55,
+        StationTier::Terminus => 0.65,
+        StationTier::Interchange => 0.75,
+    }
 }
 
 #[derive(Component, Debug, Clone, Copy)]
@@ -46,17 +61,27 @@ pub fn sync_station_industry_sprites(
     }
     for station in stations.iter() {
         let is_new = demand.is_open_station(station.id);
+        // Unserved anchors keep their own read; built platforms scale by tier.
+        let color = if is_new {
+            Color::srgb(0.95, 0.72, 0.2)
+        } else {
+            Color::srgb(0.85, 0.25, 0.22)
+        };
+        let scale = if is_new {
+            0.65
+        } else {
+            tier_sprite_scale(station.tier)
+        };
+        let size = Vec2::splat(TILE_SIZE * scale);
+
         if let Some((entity, _, was_new)) = station_sprites
             .iter()
             .find(|(_, id, _)| *id == station.id)
         {
-            // Tint / marker can change when opportunity connects.
+            // Tint / footprint can change when demand connects or the stop is upgraded.
             if let Ok(mut sprite) = sprites.get_mut(*entity) {
-                sprite.color = if is_new {
-                    Color::srgb(0.95, 0.72, 0.2)
-                } else {
-                    Color::srgb(0.85, 0.25, 0.22)
-                };
+                sprite.color = color;
+                sprite.custom_size = Some(size);
             }
             if is_new && !was_new {
                 commands.entity(*entity).insert(NewDemandMarker);
@@ -66,16 +91,6 @@ pub fn sync_station_industry_sprites(
             continue;
         }
         let (wx, wy) = tile_to_world(station.tile);
-        let color = if is_new {
-            Color::srgb(0.95, 0.72, 0.2)
-        } else {
-            Color::srgb(0.85, 0.25, 0.22)
-        };
-        let size = if is_new {
-            Vec2::new(TILE_SIZE * 0.65, TILE_SIZE * 0.65)
-        } else {
-            Vec2::new(TILE_SIZE * 0.55, TILE_SIZE * 0.55)
-        };
         let mut e = commands.spawn((
             Sprite::from_color(color, size),
             Transform::from_xyz(wx, wy, 2.0),

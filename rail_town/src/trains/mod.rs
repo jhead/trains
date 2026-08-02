@@ -6,7 +6,7 @@ mod visuals;
 use bevy::prelude::*;
 
 use tools::train_tool_input;
-use visuals::sync_train_sprites;
+use visuals::{sync_train_smoke, sync_train_sprites, sync_train_stop_indicators};
 
 use crate::inspect::SelectionInputSet;
 
@@ -23,6 +23,8 @@ impl Plugin for TrainsPlugin {
                 (
                     train_tool_input.after(SelectionInputSet),
                     sync_train_sprites,
+                    sync_train_stop_indicators.after(sync_train_sprites),
+                    sync_train_smoke.after(sync_train_sprites),
                 ),
             );
     }

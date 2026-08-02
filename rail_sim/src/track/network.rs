@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::Resource;
+use serde::{Deserialize, Serialize};
 
 use crate::ids::{TileCoord, TrackId};
 
@@ -16,7 +17,7 @@ use super::piece::{curve_from_link_dirs, TrackPiece};
 /// - [`TrackNetwork::neighbor_ids`] — 8-dir graph edges via [`TrackPiece::links`]
 /// - [`TrackNetwork::iter`] — scan the whole graph
 /// - Read [`TrackPiece::max_grade`] / [`TrackPiece::curve`] for speed modifiers
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, PartialEq, Resource, Serialize, Deserialize)]
 pub struct TrackNetwork {
     pieces: HashMap<TrackId, TrackPiece>,
     /// `(x, y, layer)` → id

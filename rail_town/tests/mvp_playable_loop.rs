@@ -397,16 +397,6 @@ fn mvp_playable_loop_delivers_and_complains() {
         moved,
         "transit should leave its spawn tile along the built network"
     );
-    if deliveries_after <= deliveries_before {
-        let mut q = app.world_mut().query::<(&Train, &TrainLocation, &rail_sim::TrainCargo)>();
-        for (t, loc, cargo) in q.iter(app.world()) {
-            eprintln!("train {:?} parked={} dwell={} path_i={}/{} dest={:?} cargo={:?} track={:?}",
-                t.id, loc.parked, loc.dwell_remaining, loc.path_index, loc.path.len(), loc.destination(), cargo, loc.track);
-        }
-        eprintln!("jobs={}", app.world().resource::<JobBoard>().jobs.len());
-        eprintln!("money={}", app.world().resource::<Money>().cents());
-        eprintln!("deliveries {} -> {}", deliveries_before, deliveries_after);
-    }
     assert!(
         deliveries_after > deliveries_before,
         "expected at least one passenger delivery via StationService"

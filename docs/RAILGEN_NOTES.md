@@ -1,7 +1,7 @@
 # Notes from `railgen` research
 
-Source: local experiment gallery at `~/dev/railgen` (“Permanent Way”).  
-Surveyed by agent; **inspiration only** — that tree has **no LICENSE**. Do not copy JS/HTML/assets; reimplement ideas if we use them.
+Source: local experiment gallery at `~/dev/railgen` (“Permanent Way”), authored for this project.  
+**OK to read and port into Rail Town** (JS → Rust). Prefer idiomatic Bevy/Rust rewrites over pasting canvas harness code. Gallery HTML/UI stays out of the game binary.
 
 ## What it is
 
@@ -19,8 +19,8 @@ Feasibility demos for **procedural pixel-art railroad track** (angle budgets, sp
 
 ## Later / skip
 
-- **Later:** Catmull-Rom + arc-length sprite stamping; junction frog math + long timbers; SDF + rational-normal banding (WGSL); offline slope QA (`seqDepth`).
-- **Skip:** Runtime supersample→downsample→palette as the main look; copying the gallery palette/UI; depending on railgen as a crate.
+- **Later:** Port `demos/spritebank.js` / `junction.js` math into Rust when track art graduates past tiles; SDF banding as WGSL experiment; offline `seqDepth` QA.
+- **Skip:** Runtime supersample→downsample→palette as the main look; shipping the gallery shell as game UI; depending on railgen JS at runtime.
 
 ## MVP track art path
 

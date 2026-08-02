@@ -5,8 +5,8 @@ use bevy_ecs::prelude::*;
 use crate::ids::{StationId, TileCoord};
 use crate::stations::{StationRegistry, StationService};
 
-use super::complaints::{ComplaintEntry, ComplaintFeed, COMPLAINT_WAIT_SECS};
-use super::PeepSpawnState;
+use super::complaints::{ComplaintEntry, ComplaintFeed, TalkKind, COMPLAINT_WAIT_SECS};
+use super::{PeepId, PeepSpawnState};
 
 /// Sim-seconds advanced per FixedUpdate tick while a peep is waiting.
 pub const SIM_SECONDS_PER_TICK: u32 = 10;
@@ -17,13 +17,19 @@ pub const PEEPS_PER_STATION: usize = 2;
 /// Cooldown (ticks) after a complaint before the same peep can complain again.
 const COMPLAINT_COOLDOWN_TICKS: u32 = 90;
 
+/// Cooldown (ticks) after praise before the same peep can praise again.
+const PRAISE_COOLDOWN_TICKS: u32 = 180;
+
+/// Service score at or above which good-service praise may fire.
+const PRAISE_SCORE_MIN: u8 = 80;
+
+/// Wait must stay under this many sim-seconds for praise.
+const PRAISE_WAIT_MAX_SECS: u32 = 4 * 60;
+
 const NAMES: &[&str] = &[
     "Mara", "Jon", "Elise", "Theo", "Nia", "Owen", "Priya", "Sam", "Vera", "Cole", "Asha",
     "Reed",
 ];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PeepId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mood {
@@ -54,6 +60,7 @@ pub struct WaitingAtStation {
     /// Accumulated wait in sim-seconds.
     pub wait_secs: u32,
     pub ticks_since_complaint: u32,
+    pub ticks_since_praise: u32,
 }
 
 /// Spawn peeps for any station that does not yet have residents.
@@ -81,13 +88,14 @@ pub fn spawn_peeps_for_stations(
                     station: station.id,
                     wait_secs: 0,
                     ticks_since_complaint: COMPLAINT_COOLDOWN_TICKS, // allow first complaint
+                    ticks_since_praise: PRAISE_COOLDOWN_TICKS,
                 },
             ));
         }
     }
 }
 
-/// Accumulate wait time from service quality; emit complaints when overdue.
+/// Accumulate wait time from service quality; emit complaints / praise into Town Talk.
 pub fn advance_peep_waits(
     mut peeps: Query<(&mut Peep, &mut WaitingAtStation)>,
     stations: Res<StationRegistry>,
@@ -97,6 +105,7 @@ pub fn advance_peep_waits(
     let tick = service.tick;
     for (mut peep, mut waiting) in peeps.iter_mut() {
         waiting.ticks_since_complaint = waiting.ticks_since_complaint.saturating_add(1);
+        waiting.ticks_since_praise = waiting.ticks_since_praise.saturating_add(1);
 
         let score = service.score(waiting.station).score;
         // Poor service → wait accumulates faster (up to 2×); good service slows it.
@@ -111,21 +120,47 @@ pub fn advance_peep_waits(
 
         peep.mood = mood_from_wait(waiting.wait_secs, score);
 
+        let Some(station) = stations.get(waiting.station) else {
+            continue;
+        };
+
+        // Praise: good service and a short wait — keeps the feed lively, not only nagging.
+        if score >= PRAISE_SCORE_MIN
+            && waiting.wait_secs < PRAISE_WAIT_MAX_SECS
+            && waiting.ticks_since_praise >= PRAISE_COOLDOWN_TICKS
+            && peep.mood == Mood::Content
+        {
+            feed.push(ComplaintEntry {
+                kind: TalkKind::Praise,
+                peep_name: peep.name.clone(),
+                station_name: station.name.clone(),
+                wait_minutes: 0,
+                sim_tick: tick,
+                peep_id: Some(peep.id),
+                station_id: Some(station.id),
+                tile: Some(station.tile),
+                count: 1,
+            });
+            waiting.ticks_since_praise = 0;
+        }
+
         if waiting.wait_secs < COMPLAINT_WAIT_SECS {
             continue;
         }
         if waiting.ticks_since_complaint < COMPLAINT_COOLDOWN_TICKS {
             continue;
         }
-        let Some(station) = stations.get(waiting.station) else {
-            continue;
-        };
         let mins = (waiting.wait_secs / 60).max(1);
         feed.push(ComplaintEntry {
+            kind: TalkKind::Complaint,
             peep_name: peep.name.clone(),
             station_name: station.name.clone(),
             wait_minutes: mins,
             sim_tick: tick,
+            peep_id: Some(peep.id),
+            station_id: Some(station.id),
+            tile: Some(station.tile),
+            count: 1,
         });
         waiting.wait_secs = 0;
         waiting.ticks_since_complaint = 0;
@@ -184,6 +219,7 @@ mod tests {
                 station: station_id,
                 wait_secs: COMPLAINT_WAIT_SECS - 5,
                 ticks_since_complaint: COMPLAINT_COOLDOWN_TICKS,
+                ticks_since_praise: 0,
             },
         ));
 

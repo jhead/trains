@@ -35,20 +35,9 @@ pub fn apply_commands(
             CommandKind::SetSpeed(speed) => {
                 clock.apply_set_speed(*speed);
             }
-            CommandKind::PlaceTrack(_) => {
-                log_stub_once("PlaceTrack");
-                pending.write(PendingWorldCommand {
-                    command: command.clone(),
-                });
-            }
-            CommandKind::Demolish(_) => {
-                log_stub_once("Demolish");
-                pending.write(PendingWorldCommand {
-                    command: command.clone(),
-                });
-            }
-            CommandKind::AutoFillTrack(_) => {
-                log_stub_once("AutoFillTrack");
+            CommandKind::PlaceTrack(_)
+            | CommandKind::Demolish(_)
+            | CommandKind::AutoFillTrack(_) => {
                 pending.write(PendingWorldCommand {
                     command: command.clone(),
                 });
@@ -71,30 +60,6 @@ pub fn apply_commands(
 
 fn log_stub_once(name: &'static str) {
     match name {
-        "PlaceTrack" => {
-            static ONCE: Once = Once::new();
-            ONCE.call_once(|| {
-                eprintln!(
-                    "rail_sim: PlaceTrack apply stub — track agent should handle PendingWorldCommand"
-                );
-            });
-        }
-        "Demolish" => {
-            static ONCE: Once = Once::new();
-            ONCE.call_once(|| {
-                eprintln!(
-                    "rail_sim: Demolish apply stub — track agent should handle PendingWorldCommand"
-                );
-            });
-        }
-        "AutoFillTrack" => {
-            static ONCE: Once = Once::new();
-            ONCE.call_once(|| {
-                eprintln!(
-                    "rail_sim: AutoFillTrack apply stub — track agent should handle PendingWorldCommand"
-                );
-            });
-        }
         "BuyTrain" => {
             static ONCE: Once = Once::new();
             ONCE.call_once(|| {

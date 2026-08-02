@@ -3,6 +3,7 @@
 //! ECS-friendly sim types and systems. No rendering or windowing deps.
 //! Player intent flows through [`commands`]; [`apply::apply_commands`] drains
 //! the [`command_buffer::CommandBuffer`] on the fixed tick.
+//! Track placement runs in [`SimSet::ApplyCommands`] after that drain.
 
 pub mod apply;
 pub mod clock;
@@ -11,6 +12,7 @@ pub mod commands;
 pub mod event_director;
 pub mod ids;
 pub mod money;
+pub mod track;
 
 pub use apply::{apply_commands, PendingWorldCommand};
 pub use clock::{sim_is_running, SimClock, SimSpeed};
@@ -22,6 +24,10 @@ pub use commands::{
 pub use event_director::EventDirector;
 pub use ids::{EntityId, StationId, TileCoord, TrackId, TrainId};
 pub use money::{InsufficientFunds, Money, STARTING_CASH_CENTS};
+pub use track::{
+    apply_track_commands, TrackEdit, TrackNetwork, TrackPiece, TrackTerrain, BRIDGE_COST_CENTS,
+    GROUND_LAYER, MAX_BRIDGE_SPAN, TRACK_COST_CENTS,
+};
 
 use bevy_app::{App, FixedUpdate, Plugin};
 use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
@@ -39,7 +45,7 @@ pub enum SimSet {
     Advance,
 }
 
-/// Registers sim resources and FixedUpdate command drain.
+/// Registers sim resources and FixedUpdate command drain + track apply.
 pub struct SimPlugin;
 
 impl Plugin for SimPlugin {
@@ -47,12 +53,21 @@ impl Plugin for SimPlugin {
         app.init_resource::<CommandBuffer>()
             .init_resource::<SimClock>()
             .init_resource::<EventDirector>()
+            .init_resource::<TrackNetwork>()
             .insert_resource(Money::sandbox_starting())
             .add_message::<PendingWorldCommand>()
+            .add_message::<TrackEdit>()
             .configure_sets(
                 FixedUpdate,
                 (SimSet::ApplyCommands, SimSet::Advance).chain(),
             )
-            .add_systems(FixedUpdate, apply_commands.in_set(SimSet::ApplyCommands));
+            .add_systems(
+                FixedUpdate,
+                (
+                    apply_commands,
+                    apply_track_commands.after(apply_commands),
+                )
+                    .in_set(SimSet::ApplyCommands),
+            );
     }
 }

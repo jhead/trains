@@ -48,8 +48,8 @@ pub use track::{
     GROUND_LAYER, MAX_BRIDGE_SPAN, TRACK_COST_CENTS,
 };
 pub use trains::{
-    advance_trains, apply_train_commands, buy_cost, find_path, track_for_station, TileOccupancy,
-    Train, TrainCargo, TrainEdit, TrainLocation, TrainYard, TRANSPORT_COST_CENTS,
+    advance_trains, apply_train_commands, buy_cost, find_path, ticks_for_piece, track_for_station,
+    TileOccupancy, Train, TrainCargo, TrainEdit, TrainLocation, TrainYard, TRANSPORT_COST_CENTS,
     TRANSIT_COST_CENTS,
 };
 

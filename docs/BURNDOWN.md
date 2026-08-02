@@ -6,8 +6,8 @@ Tracks work against [`docs/design/11-roadmap.md`](design/11-roadmap.md). Update 
 
 | Item | Owner | Status |
 | --- | --- | --- |
-| Contiguous terrain + palette + integer zoom 1/2/3 | art | pending |
-| Interpolated trains (read `progress`, facing) | trains-feel | pending |
+| Contiguous terrain + palette + integer zoom 1/2/3 | art | done |
+| Interpolated trains (read `progress`, facing) | trains-feel | done |
 | Drag-build ghost, cost HUD, loud failures, right-drag demolish | build | pending |
 | Undo / redo via command history | undo | pending |
 | Pixel UI kit + toolbar + status strip | ui | pending |

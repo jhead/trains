@@ -26,6 +26,8 @@ pub struct TrackToolState {
     pub tool: BuildTool,
     /// First anchor for two-click autofill (Build mode).
     pub autofill_from: Option<rail_sim::TileCoord>,
+    /// When true (train place mode), ignore left-click build/demolish.
+    pub suppress_build_click: bool,
 }
 
 pub fn track_tool_input(
@@ -41,10 +43,12 @@ pub fn track_tool_input(
     if keys.just_pressed(KeyCode::KeyB) {
         state.tool = BuildTool::Build;
         state.autofill_from = None;
+        state.suppress_build_click = false;
     }
     if keys.just_pressed(KeyCode::KeyX) {
         state.tool = BuildTool::Demolish;
         state.autofill_from = None;
+        state.suppress_build_click = false;
     }
     if keys.just_pressed(KeyCode::Escape) {
         state.autofill_from = None;
@@ -52,6 +56,10 @@ pub fn track_tool_input(
 
     if mouse.just_pressed(MouseButton::Right) {
         state.autofill_from = None;
+        return;
+    }
+
+    if state.suppress_build_click {
         return;
     }
 

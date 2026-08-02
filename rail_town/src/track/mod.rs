@@ -7,8 +7,10 @@ mod visuals;
 use bevy::prelude::*;
 
 use sync::sync_track_terrain_from_map;
-use tools::{track_tool_input, TrackToolState};
+use tools::track_tool_input;
 use visuals::apply_track_sprites;
+
+pub use tools::{BuildTool, TrackToolState};
 
 pub struct TrackPlugin;
 

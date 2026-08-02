@@ -1,7 +1,8 @@
 # Implementation Plan — *Rail Town* MVP
 
 Source of truth for fantasy: [`DESIGN.md`](../DESIGN.md).  
-Stack: [`TECH_STACK.md`](./TECH_STACK.md).
+Stack: [`TECH_STACK.md`](./TECH_STACK.md).  
+Pixel-track art policies (from `railgen` research): [`RAILGEN_NOTES.md`](./RAILGEN_NOTES.md).
 
 ## MVP scope
 

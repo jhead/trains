@@ -16,6 +16,7 @@ use rail_sim::{
 
 use crate::map::MapCamera;
 use crate::track::{BuildTool, TrackToolState};
+use crate::ui::UiBlocksWorld;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrainPlaceKind {
@@ -52,6 +53,7 @@ pub fn train_tool_input(
     mut buffer: ResMut<CommandBuffer>,
     mut train_state: ResMut<TrainToolState>,
     mut track_state: ResMut<TrackToolState>,
+    ui_blocks: Res<UiBlocksWorld>,
 ) {
     if keys.just_pressed(KeyCode::KeyT) {
         buffer.push(CommandKind::BuyTrain(BuyTrain {
@@ -59,7 +61,7 @@ pub fn train_tool_input(
         }));
         train_state.place_mode = true;
         train_state.kind = TrainPlaceKind::Transit;
-        track_state.autofill_from = None;
+        track_state.anchor = None;
         track_state.suppress_build_click = true;
     }
     if keys.just_pressed(KeyCode::KeyG) {
@@ -68,7 +70,7 @@ pub fn train_tool_input(
         }));
         train_state.place_mode = true;
         train_state.kind = TrainPlaceKind::Transport;
-        track_state.autofill_from = None;
+        track_state.anchor = None;
         track_state.suppress_build_click = true;
     }
     // B / X reclaim track tools.
@@ -82,6 +84,10 @@ pub fn train_tool_input(
     }
     // Don't fight demolish clicks.
     if track_state.tool == BuildTool::Demolish {
+        return;
+    }
+
+    if ui_blocks.0 {
         return;
     }
 

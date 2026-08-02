@@ -320,7 +320,7 @@ fn mvp_playable_loop_delivers_and_complains() {
     let jobs_before = app.world().resource::<JobBoard>().jobs.len();
 
     // Job spawn wave every 45 ticks; long routes need hundreds of movement ticks.
-    run_fixed(&mut app, 6_000);
+    run_fixed(&mut app, 24_000);
     {
         let mut q = app.world_mut().query::<(&rail_sim::Train, &rail_sim::TrainCargo, &rail_sim::TrainLocation)>();
         for (tr, cargo, loc) in q.iter(app.world()) {

@@ -6,7 +6,10 @@ license.workspace = true
 description = "Rail Town Bevy application (input, rendering, UI)"
 
 [features]
-default = []
+default = ["sfx"]
+# Procedural pitch SFX via bevy_audio. Disable for wasm if audio deps misbehave:
+#   cargo check -p rail_town --target wasm32-unknown-unknown --no-default-features
+sfx = ["bevy/audio"]
 # Future: enable Steamworks on native desktop builds only.
 # Never enable for wasm32 — keep Steam out of default features.
 steam = []

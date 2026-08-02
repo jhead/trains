@@ -8,10 +8,10 @@ Tracks work against [`docs/design/11-roadmap.md`](design/11-roadmap.md). Update 
 | --- | --- | --- |
 | Contiguous terrain + palette + integer zoom 1/2/3 | art | done |
 | Interpolated trains (read `progress`, facing) | trains-feel | done |
-| Drag-build ghost, cost HUD, loud failures, right-drag demolish | build | pending |
-| Undo / redo via command history | undo | pending |
-| Pixel UI kit + toolbar + status strip | ui | pending |
-| Track lay / fail sounds | audio | pending |
+| Drag-build ghost, cost HUD, loud failures, right-drag demolish | build | done |
+| Undo / redo via command history | undo | done |
+| Pixel UI kit + toolbar + status strip | ui | done |
+| Track lay / fail sounds | audio | done |
 
 **Done when:** stranger lays track and smiles — no teleport, no silent reject, no spreadsheet look.
 

@@ -3,60 +3,74 @@
 use bevy::prelude::*;
 use rail_sim::ComplaintFeed;
 
+use crate::palette::{BG1, OUTLINE};
+use crate::ui::kit::{body_font, text_primary, text_warn, SPACE_2, SPACE_3};
+
 #[derive(Component)]
 pub struct ComplaintFeedRoot;
 
 #[derive(Component)]
 pub struct ComplaintFeedText;
 
+/// Last body string painted — skip rewrite when unchanged.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct ComplaintFeedCache {
+    body: String,
+}
+
 pub fn setup_complaint_feed_ui(mut commands: Commands) {
+    commands.insert_resource(ComplaintFeedCache {
+        body: "Town is quiet…".into(),
+    });
     commands
         .spawn((
             ComplaintFeedRoot,
             Node {
                 position_type: PositionType::Absolute,
-                bottom: Val::Px(12.0),
-                left: Val::Px(12.0),
-                width: Val::Px(360.0),
+                bottom: Val::Px(SPACE_3 + 52.0),
+                left: Val::Px(SPACE_3),
+                width: Val::Px(320.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(4.0),
-                padding: UiRect::all(Val::Px(8.0)),
-                border_radius: BorderRadius::all(Val::Px(4.0)),
+                padding: UiRect::all(Val::Px(SPACE_2)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.08, 0.05, 0.05, 0.75)),
+            BackgroundColor(BG1),
+            BorderColor::all(OUTLINE),
+            ZIndex(5),
         ))
         .with_children(|parent| {
-            parent.spawn((
-                Text::new("Complaints"),
-                TextFont::from_font_size(14.0),
-                TextColor(Color::srgb(0.95, 0.75, 0.7)),
-            ));
+            parent.spawn((Text::new("Complaints"), body_font(), text_warn()));
             parent.spawn((
                 ComplaintFeedText,
                 Text::new("Town is quiet…"),
-                TextFont::from_font_size(13.0),
-                TextColor(Color::srgb(0.88, 0.82, 0.8)),
+                body_font(),
+                text_primary(),
             ));
         });
 }
 
 pub fn update_complaint_feed_ui(
     feed: Res<ComplaintFeed>,
+    mut cache: ResMut<ComplaintFeedCache>,
     mut text_q: Query<&mut Text, With<ComplaintFeedText>>,
 ) {
-    let Ok(mut text) = text_q.single_mut() else {
-        return;
+    let body = if feed.is_empty() {
+        "Town is quiet…".to_string()
+    } else {
+        feed.iter()
+            .take(5)
+            .map(|e| e.display_line())
+            .collect::<Vec<_>>()
+            .join("\n")
     };
-    if feed.is_empty() {
-        *text = Text::new("Town is quiet…");
+    if body == cache.body {
         return;
     }
-    let body: String = feed
-        .iter()
-        .take(5)
-        .map(|e| e.display_line())
-        .collect::<Vec<_>>()
-        .join("\n");
-    *text = Text::new(body);
+    cache.body = body.clone();
+    if let Ok(mut text) = text_q.single_mut() {
+        *text = Text::new(body);
+    }
 }

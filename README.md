@@ -39,14 +39,18 @@ Default map: **64×64**, seed **42** (`rail_map::DEFAULT_MAP_*` / `MapPlugin::de
 | --- | --- |
 | `B` | Build tool |
 | `X` | Demolish tool |
-| Left click (Build) | Places the first anchor tile; second click auto-fills a **straight** run (orthogonal or 45° diagonal) to that tile |
-| Shift + left click (Build) | Place a single tile (ignores autofill anchor) |
-| Esc / right click | Clear pending autofill anchor |
-| Left click (Demolish) | Refund and remove track under the cursor |
+| Left press–drag–release (Build) | Live ghost of an ortho/45° run; release commits (`PlaceTrack` / `AutoFillTrack`). Endpoint stays as continuous-build anchor |
+| `Shift` while dragging | Exact straight only (no snap) — off-axis shows a reason chip |
+| `Ctrl` while dragging | Single tile under the cursor |
+| Right-drag (Build or Demolish) | Demolish along the path with full refund preview |
+| `Esc` | Clear continuous-build anchor |
+| Left-drag (Demolish tool) | Same demolish path as right-drag |
+
+While dragging: **cost HUD** (tile count, cost, balance-after) follows the cursor; invalid tiles tint `warn`; rejects show a plain-language **reason chip** and flash the offending tiles (never silent).
 
 **Costs:** ground track `$10` (`TRACK_COST_CENTS = 1000`); bridge over water `$50` (`BRIDGE_COST_CENTS = 5000`). Demolish refunds the full amount paid for that tile. Bridges are limited to `MAX_BRIDGE_SPAN = 3` contiguous water tiles.
 
-**Autofill:** two-click anchors (not drag). Non-straight second clicks are rejected by the sim.
+**Path proposal (Phase A):** default snaps to nearest ortho/45° ray. Smart A* contour routing is Phase C.
 
 ### Stations & industries (auto-seeded)
 
@@ -76,9 +80,13 @@ Blue rectangle = transit; amber = transport. Passenger fares (`$5`) and goods de
 | Space | Toggle pause |
 | `1` / `2` / `3` | Set sim speed (1x / 2x / 3x); unpauses |
 
-### HUD
+### HUD & toolbar
 
-Top-left: **money** (dollars from cents), pause/speed, current tool, short help. Money text flashes when the balance changes. Bottom-left: **complaint feed** (e.g. `Mara waited 11 min at Eastgate`).
+- **Status strip** (top): money (`hi`), approximate net $/min, clickable speed segments (pause / 1× / 2× / 3×), active tool.
+- **Toolbar** (bottom centre): Track (`B`), Demolish (`X`), Transit (`T`), Transport (`G`) — mouse-reachable; keyboard still works.
+- **Complaint feed** (bottom-left): e.g. `Mara waited 11 min at Eastgate`.
+- **Undo / redo:** `Ctrl/Cmd+Z` undoes the last track place / demolish / autofill run; `Ctrl/Cmd+Shift+Z` or `Ctrl/Cmd+Y` redoes. Construction only — sim time is not rewound.
+- **SFX (native, `sfx` feature):** short procedural *clack* on successful track place; soft *thud* on rejection. Disable with `--no-default-features` for wasm-safe builds.
 
 ### Town & peeps
 

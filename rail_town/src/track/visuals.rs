@@ -56,6 +56,7 @@ pub fn apply_track_sprites(
                     }
                 }
             }
+            TrackEdit::Failed { .. } => {}
         }
     }
 }

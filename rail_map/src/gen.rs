@@ -1,8 +1,8 @@
 //! Seeded procedural terrain generation.
 
+use rail_sim::ids::TileCoord;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use rail_sim::ids::TileCoord;
 
 use crate::grid::MapGrid;
 use crate::portal::Portal;
@@ -158,32 +158,18 @@ fn place_edge_portals(grid: &mut MapGrid) {
             x: x as i32,
             y: (h - 1) as i32,
         };
-        portals.push(Portal::closed(
-            PortalId(next_id),
-            EdgeFacing::North,
-            tile,
-        ));
+        portals.push(Portal::closed(PortalId(next_id), EdgeFacing::North, tile));
         next_id += 1;
     }
     // South edge (y = 0)
     for x in 0..w {
-        let tile = TileCoord {
-            x: x as i32,
-            y: 0,
-        };
-        portals.push(Portal::closed(
-            PortalId(next_id),
-            EdgeFacing::South,
-            tile,
-        ));
+        let tile = TileCoord { x: x as i32, y: 0 };
+        portals.push(Portal::closed(PortalId(next_id), EdgeFacing::South, tile));
         next_id += 1;
     }
     // West edge (x = 0), excluding corners already covered
     for y in 1..h - 1 {
-        let tile = TileCoord {
-            x: 0,
-            y: y as i32,
-        };
+        let tile = TileCoord { x: 0, y: y as i32 };
         portals.push(Portal::closed(PortalId(next_id), EdgeFacing::West, tile));
         next_id += 1;
     }
@@ -229,7 +215,10 @@ mod tests {
         let differs = (0..24i32)
             .flat_map(|y| (0..24i32).map(move |x| TileCoord { x, y }))
             .any(|c| a.tile(c).height != b.tile(c).height);
-        assert!(differs, "expected different seeds to produce different heights");
+        assert!(
+            differs,
+            "expected different seeds to produce different heights"
+        );
     }
 
     #[test]
@@ -241,9 +230,7 @@ mod tests {
 
         // Every border tile has at least one portal.
         for x in 0..map.width as i32 {
-            assert!(map
-                .portal_at(TileCoord { x, y: 0 })
-                .is_some());
+            assert!(map.portal_at(TileCoord { x, y: 0 }).is_some());
             assert!(map
                 .portal_at(TileCoord {
                     x,
@@ -252,9 +239,7 @@ mod tests {
                 .is_some());
         }
         for y in 0..map.height as i32 {
-            assert!(map
-                .portal_at(TileCoord { x: 0, y })
-                .is_some());
+            assert!(map.portal_at(TileCoord { x: 0, y }).is_some());
             assert!(map
                 .portal_at(TileCoord {
                     x: (map.width - 1) as i32,

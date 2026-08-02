@@ -37,9 +37,7 @@ mod tile;
 
 pub use coords::{map_center_world, tile_to_world, world_to_tile, TILE_SIZE};
 pub use gen::generate_map;
-pub use grid::{
-    MapGrid, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_SEED, DEFAULT_MAP_WIDTH,
-};
+pub use grid::{MapGrid, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_SEED, DEFAULT_MAP_WIDTH};
 pub use portal::Portal;
 pub use tile::{TerrainKind, Tile};
 

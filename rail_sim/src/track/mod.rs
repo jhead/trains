@@ -17,7 +17,7 @@ pub use dir::{dir_index, opposite_dir, step, TrackLinks, DIR8};
 pub use network::TrackNetwork;
 pub use piece::{curve_from_link_dirs, TrackKind, TrackPiece};
 pub use place::{straight_line, try_autofill_track, try_demolish, try_place_track, PlacedTrack};
-pub use rules::PlacementError;
+pub use rules::{path_bridge_spans_ok, validate_tile_empty, PlacementError};
 pub use terrain::TrackTerrain;
 
 #[cfg(test)]

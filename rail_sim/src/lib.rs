@@ -12,6 +12,7 @@ pub mod command_buffer;
 pub mod commands;
 pub mod economy;
 pub mod event_director;
+pub mod history;
 pub mod ids;
 pub mod money;
 pub mod peeps;
@@ -27,6 +28,7 @@ pub use commands::{
     AutoFillTrack, BuyTrain, CommandKind, Demolish, Pause, PlaceTrack, PlaceTrain, SetSpeed,
     SimCommand, TrainKind,
 };
+pub use history::{CommandHistory, HistoryEntry, HistoryMode, HISTORY_DEPTH};
 pub use economy::{
     apply_train_opex, assign_jobs, resolve_deliveries, spawn_demand_jobs, JobBoard, JobKind,
     GOODS_DELIVERY_CENTS, PASSENGER_FARE_CENTS, TRAIN_OPEX_CENTS,
@@ -44,7 +46,8 @@ pub use stations::{
 };
 pub use town::{TownDensity, TownPlugin, GROWTH_RADIUS, MAX_DENSITY};
 pub use track::{
-    apply_track_commands, TrackEdit, TrackNetwork, TrackPiece, TrackTerrain, BRIDGE_COST_CENTS,
+    apply_track_commands, path_bridge_spans_ok, straight_line, tile_cost, validate_tile_empty,
+    PlacementError, TrackEdit, TrackNetwork, TrackPiece, TrackTerrain, BRIDGE_COST_CENTS,
     GROUND_LAYER, MAX_BRIDGE_SPAN, TRACK_COST_CENTS,
 };
 pub use trains::{
@@ -79,6 +82,7 @@ pub struct SimPlugin;
 impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CommandBuffer>()
+            .init_resource::<CommandHistory>()
             .init_resource::<SimClock>()
             .init_resource::<EventDirector>()
             .init_resource::<TrackNetwork>()

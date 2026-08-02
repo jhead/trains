@@ -128,5 +128,49 @@ mod tests {
             .collect();
         assert_eq!(edits.len(), 1);
         assert!(matches!(edits[0], TrackEdit::Placed { .. }));
+
+        let history = app.world().resource::<crate::CommandHistory>();
+        assert_eq!(history.undo_len(), 1);
+    }
+
+    #[test]
+    fn undo_place_restores_empty_network_and_money() {
+        use crate::history::CommandHistory;
+        use crate::track::{TrackNetwork, TrackTerrain, TRACK_COST_CENTS};
+        use crate::money::Money;
+
+        let mut app = App::new();
+        app.add_plugins(SimPlugin);
+        app.insert_resource(TrackTerrain::new(8, 8, (0..64).map(|_| (false, 0i8))));
+
+        {
+            let mut buf = app.world_mut().resource_mut::<CommandBuffer>();
+            buf.push(CommandKind::PlaceTrack(PlaceTrack {
+                tile: TileCoord { x: 3, y: 3 },
+                layer: 0,
+            }));
+        }
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(app.world().resource::<TrackNetwork>().len(), 1);
+
+        let inverse = {
+            let mut history = app.world_mut().resource_mut::<CommandHistory>();
+            history.begin_undo().expect("one undo entry")
+        };
+        {
+            let mut buf = app.world_mut().resource_mut::<CommandBuffer>();
+            for kind in inverse {
+                buf.push(kind);
+            }
+        }
+        app.world_mut().run_schedule(FixedUpdate);
+
+        assert!(app.world().resource::<TrackNetwork>().is_empty());
+        assert_eq!(
+            app.world().resource::<Money>().cents(),
+            crate::money::STARTING_CASH_CENTS
+        );
+        assert!(app.world().resource::<CommandHistory>().can_redo());
+        let _ = TRACK_COST_CENTS;
     }
 }

@@ -15,6 +15,20 @@ pub struct SimCommand {
     pub kind: CommandKind,
 }
 
+impl CommandKind {
+    pub fn pause(paused: bool) -> Self {
+        Self::Pause(Pause { paused })
+    }
+
+    pub fn set_speed(multiplier: u8) -> Self {
+        Self::SetSpeed(SetSpeed { multiplier })
+    }
+
+    pub fn toggle_pause_from(currently_paused: bool) -> Self {
+        Self::pause(!currently_paused)
+    }
+}
+
 /// Discriminated player / system intents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandKind {

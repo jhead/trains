@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use rail_sim::commands::BuyTrain;
 use rail_sim::{CommandBuffer, CommandKind, TrainKind};
 
+use crate::lines::LineToolState;
 use crate::palette::{BALLAST_L, BALLAST_M, BG1, HI, OUTLINE, RAIL_L};
 use crate::track::{BuildTool, TrackToolState};
 use crate::trains::{TrainPlaceKind, TrainToolState};
@@ -16,6 +17,7 @@ pub struct ToolbarRoot;
 pub enum ToolbarTool {
     Build,
     Demolish,
+    Line,
     Transit,
     Transport,
 }
@@ -29,6 +31,7 @@ pub fn setup_toolbar(mut commands: Commands) {
     let slots = [
         (ToolbarTool::Build, "Track", "B"),
         (ToolbarTool::Demolish, "Demolish", "X"),
+        (ToolbarTool::Line, "Line", "L"),
         (ToolbarTool::Transit, "Transit", "T"),
         (ToolbarTool::Transport, "Transport", "G"),
     ];
@@ -88,12 +91,14 @@ pub fn setup_toolbar(mut commands: Commands) {
 pub fn update_toolbar_visuals(
     track: Res<TrackToolState>,
     train: Option<Res<TrainToolState>>,
+    line: Option<Res<LineToolState>>,
     mut q: Query<(&ToolbarButton, &Interaction, &mut BorderColor, &Children), With<Button>>,
     mut child_colors: Query<&mut TextColor>,
 ) {
     let placing = train.as_ref().is_some_and(|t| t.place_mode);
     let place_kind = train.as_ref().map(|t| t.kind);
-    let active = active_tool(track.tool, placing, place_kind);
+    let line_active = line.as_ref().is_some_and(|l| l.active);
+    let active = active_tool(track.tool, placing, place_kind, line_active);
 
     for (btn, interaction, mut border, children) in &mut q {
         let selected = btn.tool == active;
@@ -119,12 +124,13 @@ pub fn toolbar_button_clicks(
     mut buffer: ResMut<CommandBuffer>,
     mut track: ResMut<TrackToolState>,
     mut train: ResMut<TrainToolState>,
+    mut line: ResMut<LineToolState>,
 ) {
     for (interaction, btn) in &interactions {
         if *interaction != Interaction::Pressed {
             continue;
         }
-        apply_toolbar_tool(btn.tool, &mut buffer, &mut track, &mut train);
+        apply_toolbar_tool(btn.tool, &mut buffer, &mut track, &mut train, &mut line);
     }
 }
 
@@ -133,6 +139,7 @@ fn apply_toolbar_tool(
     buffer: &mut CommandBuffer,
     track: &mut TrackToolState,
     train: &mut TrainToolState,
+    line: &mut LineToolState,
 ) {
     match tool {
         ToolbarTool::Build => {
@@ -141,6 +148,8 @@ fn apply_toolbar_tool(
             track.drag = None;
             track.suppress_build_click = false;
             train.place_mode = false;
+            line.active = false;
+            line.clear_draft();
         }
         ToolbarTool::Demolish => {
             track.tool = BuildTool::Demolish;
@@ -148,6 +157,17 @@ fn apply_toolbar_tool(
             track.drag = None;
             track.suppress_build_click = false;
             train.place_mode = false;
+            line.active = false;
+            line.clear_draft();
+        }
+        ToolbarTool::Line => {
+            line.active = true;
+            line.clear_draft();
+            train.place_mode = false;
+            track.tool = BuildTool::Build;
+            track.anchor = None;
+            track.drag = None;
+            track.suppress_build_click = true;
         }
         ToolbarTool::Transit => {
             buffer.push(CommandKind::BuyTrain(BuyTrain {
@@ -158,6 +178,8 @@ fn apply_toolbar_tool(
             track.anchor = None;
             track.drag = None;
             track.suppress_build_click = true;
+            line.active = false;
+            line.clear_draft();
         }
         ToolbarTool::Transport => {
             buffer.push(CommandKind::BuyTrain(BuyTrain {
@@ -168,6 +190,8 @@ fn apply_toolbar_tool(
             track.anchor = None;
             track.drag = None;
             track.suppress_build_click = true;
+            line.active = false;
+            line.clear_draft();
         }
     }
 }
@@ -176,7 +200,11 @@ fn active_tool(
     tool: BuildTool,
     placing: bool,
     kind: Option<TrainPlaceKind>,
+    line_active: bool,
 ) -> ToolbarTool {
+    if line_active {
+        return ToolbarTool::Line;
+    }
     if placing {
         return match kind.unwrap_or_default() {
             TrainPlaceKind::Transit => ToolbarTool::Transit,
@@ -196,16 +224,20 @@ mod tests {
     #[test]
     fn active_tool_maps_modes() {
         assert_eq!(
-            active_tool(BuildTool::Build, false, None),
+            active_tool(BuildTool::Build, false, None, false),
             ToolbarTool::Build
         );
         assert_eq!(
-            active_tool(BuildTool::Demolish, false, None),
+            active_tool(BuildTool::Demolish, false, None, false),
             ToolbarTool::Demolish
         );
         assert_eq!(
-            active_tool(BuildTool::Build, true, Some(TrainPlaceKind::Transit)),
+            active_tool(BuildTool::Build, true, Some(TrainPlaceKind::Transit), false),
             ToolbarTool::Transit
+        );
+        assert_eq!(
+            active_tool(BuildTool::Build, false, None, true),
+            ToolbarTool::Line
         );
     }
 }

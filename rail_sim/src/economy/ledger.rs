@@ -27,15 +27,18 @@ pub enum MoneyCategory {
     RollingStock,
     /// Per-train operating cost.
     TrainOpex,
+    /// Per-tile track maintenance (bridges cost more).
+    TrackMaintenance,
 }
 
 impl MoneyCategory {
-    pub const ALL: [MoneyCategory; 5] = [
+    pub const ALL: [MoneyCategory; 6] = [
         Self::Fares,
         Self::Deliveries,
         Self::Construction,
         Self::RollingStock,
         Self::TrainOpex,
+        Self::TrackMaintenance,
     ];
 
     pub fn label(self) -> &'static str {
@@ -45,6 +48,7 @@ impl MoneyCategory {
             Self::Construction => "Construction",
             Self::RollingStock => "Rolling stock",
             Self::TrainOpex => "Train opex",
+            Self::TrackMaintenance => "Track maint.",
         }
     }
 
@@ -59,19 +63,22 @@ impl MoneyCategory {
             Self::Construction => 2,
             Self::RollingStock => 3,
             Self::TrainOpex => 4,
+            Self::TrackMaintenance => 5,
         }
     }
 }
+
+const LEDGER_CATS: usize = 6;
 
 /// Session + recent-window category accounting.
 #[derive(Debug, Clone, Resource)]
 pub struct MoneyLedger {
     /// Signed cents for the whole session (credits positive, debits negative).
-    totals: [i64; 5],
+    totals: [i64; LEDGER_CATS],
     /// Signed cents in the open sample window.
-    window: [i64; 5],
+    window: [i64; LEDGER_CATS],
     /// Last completed window (for “recent” panel rows).
-    last_window: [i64; 5],
+    last_window: [i64; LEDGER_CATS],
     /// Net cents per completed sample (oldest → newest).
     history: VecDeque<i64>,
     window_sim_secs: u32,
@@ -82,9 +89,9 @@ pub struct MoneyLedger {
 impl Default for MoneyLedger {
     fn default() -> Self {
         Self {
-            totals: [0; 5],
-            window: [0; 5],
-            last_window: [0; 5],
+            totals: [0; LEDGER_CATS],
+            window: [0; LEDGER_CATS],
+            last_window: [0; LEDGER_CATS],
             history: VecDeque::with_capacity(LEDGER_HISTORY_LEN),
             window_sim_secs: 0,
             net_rate_cents_per_min: 0,
@@ -186,7 +193,7 @@ impl MoneyLedger {
     fn close_window(&mut self) {
         let net: i64 = self.window.iter().sum();
         self.last_window = self.window;
-        self.window = [0; 5];
+        self.window = [0; LEDGER_CATS];
         self.history.push_back(net);
         while self.history.len() > LEDGER_HISTORY_LEN {
             self.history.pop_front();

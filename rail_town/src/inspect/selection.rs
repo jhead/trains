@@ -307,6 +307,7 @@ pub fn follow_selection(
 }
 
 /// True when a train is waiting on an occupied next tile.
+#[allow(dead_code)]
 pub fn train_is_blocked(
     loc: &TrainLocation,
     occupancy: &TileOccupancy,

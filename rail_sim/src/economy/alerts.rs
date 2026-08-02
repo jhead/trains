@@ -2,11 +2,12 @@
 
 use bevy_ecs::prelude::*;
 
+use crate::demand::{DemandOpportunityKind, DemandSpawner};
 use crate::ids::{StationId, TileCoord, TrainId};
 use crate::money::Money;
-use crate::stations::{StationRegistry, StationService};
+use crate::stations::{IndustryId, StationRegistry, StationService};
 use crate::track::TrackNetwork;
-use crate::trains::TrainLocation;
+use crate::trains::{TrainLocation, TrainProfile};
 
 use super::opex::TRAIN_OPEX_CENTS;
 
@@ -23,6 +24,8 @@ pub enum AlertKind {
     StationOverwhelmed,
     TrainsParked,
     CashLow,
+    /// New settlement / industry still outside the rail network.
+    NewDemand,
 }
 
 impl AlertKind {
@@ -32,6 +35,7 @@ impl AlertKind {
             Self::StationOverwhelmed => "Station overwhelmed",
             Self::TrainsParked => "Trains parked",
             Self::CashLow => "Cash low",
+            Self::NewDemand => "New demand",
         }
     }
 }
@@ -61,6 +65,8 @@ pub enum AlertKey {
     StationWaiting(StationId),
     TrainsParked,
     CashLow,
+    NewSettlement(StationId),
+    NewIndustry(IndustryId),
 }
 
 #[derive(Debug, Clone, Default, Resource)]
@@ -143,9 +149,35 @@ pub fn refresh_alerts(
     stations: Res<StationRegistry>,
     service: Res<StationService>,
     network: Res<TrackNetwork>,
+    demand: Res<DemandSpawner>,
     trains: Query<(&crate::trains::Train, &TrainLocation)>,
 ) {
     let mut active: Vec<AlertKey> = Vec::new();
+
+    for opp in &demand.open {
+        match opp.kind {
+            DemandOpportunityKind::Settlement(id) => {
+                let key = AlertKey::NewSettlement(id);
+                active.push(key);
+                board.upsert(
+                    key,
+                    AlertKind::NewDemand,
+                    format!("New settlement: {} — not yet served", opp.name),
+                    AlertFocus::Station(id),
+                );
+            }
+            DemandOpportunityKind::Industry(id) => {
+                let key = AlertKey::NewIndustry(id);
+                active.push(key);
+                board.upsert(
+                    key,
+                    AlertKind::NewDemand,
+                    format!("New industry: {} — not yet served", opp.name),
+                    AlertFocus::Tile(opp.tile),
+                );
+            }
+        }
+    }
 
     for station in stations.iter() {
         let score = service.score(station.id);
@@ -205,11 +237,14 @@ pub fn refresh_alerts(
         );
     }
 
-    let active_trains = trains.iter().filter(|(_, loc)| !loc.parked).count() as i64;
-    let opex_per_min = active_trains
-        .saturating_mul(TRAIN_OPEX_CENTS)
-        .saturating_mul(6); // ~6 ticks/min at 10s/tick
-    if active_trains > 0 && opex_per_min > 0 {
+    let opex_per_min: i64 = trains
+        .iter()
+        .filter(|(_, loc)| !loc.parked)
+        .map(|(train, _)| TrainProfile::for_kind(train.kind).opex_cents.saturating_mul(6))
+        .sum();
+    // Keep TRAIN_OPEX_CENTS referenced for API stability / docs.
+    let _ = TRAIN_OPEX_CENTS;
+    if opex_per_min > 0 {
         let reserve = opex_per_min.saturating_mul(ALERT_CASH_LOW_MINUTES);
         if money.cents() < reserve {
             let key = AlertKey::CashLow;

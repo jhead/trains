@@ -4,8 +4,10 @@ use bevy_ecs::prelude::{Component, Resource};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::TrainKind;
-use crate::ids::{StationId, TrackId, TrainId};
+use crate::ids::{LineId, StationId, TrackId, TrainId};
 use crate::stations::{GoodKind, IndustryId};
+
+use super::profile::TrainProfile;
 
 /// Cost to buy a transit (passenger) train: $500.
 pub const TRANSIT_COST_CENTS: i64 = 50_000;
@@ -82,6 +84,8 @@ pub struct TrainLocation {
     pub progress: u16,
     /// Soft-parked when opex can't be paid — still occupies tile, doesn't move.
     pub parked: bool,
+    /// Remaining dwell ticks at current stop (blocks new jobs / movement).
+    pub dwell_remaining: u16,
 }
 
 impl TrainLocation {
@@ -92,6 +96,7 @@ impl TrainLocation {
             path_index: 0,
             progress: 0,
             parked: false,
+            dwell_remaining: 0,
         }
     }
 
@@ -115,6 +120,20 @@ impl TrainLocation {
     pub fn at_destination(&self) -> bool {
         self.path_index + 1 >= self.path.len()
     }
+
+    pub fn begin_dwell(&mut self, kind: TrainKind) {
+        self.dwell_remaining = TrainProfile::for_kind(kind).dwell_ticks;
+    }
+}
+
+/// Train assigned to a player line — prefers line jobs / shuttle over free-roam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Component, Serialize, Deserialize)]
+pub struct TrainOnLine {
+    pub line: LineId,
+    /// Index into the line's stop list we are heading toward (or last arrived).
+    pub next_stop: usize,
+    /// Out-and-back direction.
+    pub forward: bool,
 }
 
 /// What the train is carrying (if anything).

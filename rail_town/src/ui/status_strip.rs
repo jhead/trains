@@ -6,6 +6,7 @@
 use bevy::prelude::*;
 use rail_sim::{CommandBuffer, CommandKind, Money, MoneyLedger, SimClock};
 
+use crate::lines::LineToolState;
 use crate::palette::{BALLAST_L, BG1, HI, OK, OUTLINE, WARN};
 use crate::track::{BuildTool, TrackToolState};
 use crate::trains::{TrainPlaceKind, TrainToolState};
@@ -139,6 +140,7 @@ pub fn update_status_strip(
     clock: Res<SimClock>,
     tools: Res<TrackToolState>,
     train_tools: Option<Res<TrainToolState>>,
+    line_tools: Option<Res<LineToolState>>,
     mut cache: ResMut<StatusStripCache>,
     mut money_q: Query<
         &mut Text,
@@ -197,7 +199,8 @@ pub fn update_status_strip(
 
     let placing = train_tools.as_ref().is_some_and(|t| t.place_mode);
     let place_kind = train_tools.as_ref().map(|t| t.kind);
-    let tool_str = tool_label(tools.tool, placing, place_kind).to_string();
+    let line_active = line_tools.as_ref().is_some_and(|l| l.active);
+    let tool_str = tool_label(tools.tool, placing, place_kind, line_active).to_string();
     if tool_str != cache.tool {
         cache.tool = tool_str.clone();
         if let Ok(mut text) = tool_q.single_mut() {
@@ -274,7 +277,11 @@ fn tool_label(
     tool: BuildTool,
     placing: bool,
     kind: Option<TrainPlaceKind>,
+    line_active: bool,
 ) -> &'static str {
+    if line_active {
+        return "Line";
+    }
     if placing {
         return match kind.unwrap_or_default() {
             TrainPlaceKind::Transit => "Transit",

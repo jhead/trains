@@ -30,12 +30,12 @@ Tracks work against [`docs/design/11-roadmap.md`](design/11-roadmap.md). Update 
 
 | Item | Status |
 | --- | --- |
-| Lines (player-authored) | pending |
+| Lines (player-authored) | done |
 | Buildable stations + tiers | pending |
-| Track maintenance + terrain cost + grade limits | pending |
-| Distinct transit/transport profiles | pending |
-| New demand outside network | pending |
-| Accessibility growth + congestion UX | pending |
+| Track maintenance + terrain cost + grade limits | done |
+| Distinct transit/transport profiles | done |
+| New demand outside network | done |
+| Accessibility growth + congestion UX | congestion hooks done (blocker id); passing loops deferred |
 
 ## Phase D — Life
 

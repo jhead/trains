@@ -5,7 +5,7 @@ use bevy_ecs::prelude::*;
 use crate::money::Money;
 use crate::stations::{IndustryRegistry, StationRegistry, StationService};
 use crate::track::{TrackNetwork, GROUND_LAYER};
-use crate::trains::{track_for_station, TrainCargo, TrainLocation};
+use crate::trains::{track_for_station, Train, TrainCargo, TrainLocation};
 
 use super::ledger::{MoneyCategory, MoneyLedger};
 
@@ -22,10 +22,10 @@ pub fn resolve_deliveries(
     industries: Res<IndustryRegistry>,
     network: Res<TrackNetwork>,
     mut service: ResMut<StationService>,
-    mut q: Query<(&TrainLocation, &mut TrainCargo)>,
+    mut q: Query<(&Train, &mut TrainLocation, &mut TrainCargo)>,
 ) {
-    for (loc, mut cargo) in q.iter_mut() {
-        if loc.parked || !loc.at_destination() || cargo.is_empty() {
+    for (train, mut loc, mut cargo) in q.iter_mut() {
+        if loc.parked || loc.dwell_remaining > 0 || !loc.at_destination() || cargo.is_empty() {
             continue;
         }
 
@@ -45,6 +45,7 @@ pub fn resolve_deliveries(
                 ledger.credit(&mut money, MoneyCategory::Fares, PASSENGER_FARE_CENTS);
                 service.record_arrival(to);
                 *cargo = TrainCargo::Empty;
+                loc.begin_dwell(train.kind);
             }
             TrainCargo::Goods { to, .. } => {
                 let Some(ind) = industries.get(to) else {
@@ -59,6 +60,7 @@ pub fn resolve_deliveries(
                 }
                 ledger.credit(&mut money, MoneyCategory::Deliveries, GOODS_DELIVERY_CENTS);
                 *cargo = TrainCargo::Empty;
+                loc.begin_dwell(train.kind);
             }
             TrainCargo::Empty => {}
         }
@@ -123,6 +125,7 @@ mod tests {
                 path_index: ids.len() - 1,
                 progress: 0,
                 parked: false,
+                dwell_remaining: 0,
             },
             TrainCargo::Passengers {
                 from: east,

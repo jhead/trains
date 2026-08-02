@@ -1,8 +1,11 @@
-//! Placement validation: bounds, ground layer, water / bridge span.
+//! Placement validation: bounds, ground layer, water / bridge span, grade, terrain.
 
 use crate::ids::TileCoord;
 
-use super::cost::{GROUND_LAYER, MAX_BRIDGE_SPAN};
+use super::cost::{
+    local_slope, tile_build_cost, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_GRADE, MOUNTAIN_HEIGHT_MIN,
+};
+use super::dir::{step, DIR8};
 use super::network::TrackNetwork;
 use super::terrain::TrackTerrain;
 
@@ -16,6 +19,10 @@ pub enum PlacementError {
     AlreadyOccupied,
     /// Water crossing wider than [`MAX_BRIDGE_SPAN`] on both axes / path run.
     BridgeTooLong { span: u32 },
+    /// Absolute height delta to a neighbour exceeds [`MAX_GRADE`].
+    GradeTooSteep { grade: u8 },
+    /// Cliff / mountain band — not buildable.
+    TerrainForbidden,
     InsufficientFunds,
     /// Demolish target missing.
     UnknownTrack,
@@ -61,6 +68,69 @@ pub fn path_bridge_spans_ok(terrain: &TrackTerrain, path: &[TileCoord]) -> Resul
     }
 }
 
+/// Refuse a path when any consecutive pair exceeds [`MAX_GRADE`].
+pub fn path_grades_ok(terrain: &TrackTerrain, path: &[TileCoord]) -> Result<(), PlacementError> {
+    for w in path.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        if !terrain.contains(a) || !terrain.contains(b) {
+            return Err(PlacementError::OutOfBounds);
+        }
+        // Water height is a flood tag, not a climb — skip grade on any water leg.
+        if terrain.is_water(a) || terrain.is_water(b) {
+            continue;
+        }
+        let ha = terrain.height_at(a).unwrap_or(0);
+        let hb = terrain.height_at(b).unwrap_or(0);
+        let grade = (ha as i16 - hb as i16).unsigned_abs() as u8;
+        if grade > MAX_GRADE {
+            return Err(PlacementError::GradeTooSteep { grade });
+        }
+    }
+    Ok(())
+}
+
+/// Grade from `tile` to any existing adjacent track on the same layer.
+pub fn grade_to_neighbors_ok(
+    network: &TrackNetwork,
+    terrain: &TrackTerrain,
+    tile: TileCoord,
+    layer: u8,
+) -> Result<(), PlacementError> {
+    if terrain.is_water(tile) {
+        return Ok(());
+    }
+    let our_h = terrain.height_at(tile).unwrap_or(0);
+    for (i, _) in DIR8.iter().enumerate() {
+        let n = step(tile, i);
+        if network.id_at(n, layer).is_none() {
+            continue;
+        }
+        if terrain.is_water(n) {
+            continue;
+        }
+        let nh = terrain.height_at(n).unwrap_or(0);
+        let grade = (our_h as i16 - nh as i16).unsigned_abs() as u8;
+        if grade > MAX_GRADE {
+            return Err(PlacementError::GradeTooSteep { grade });
+        }
+    }
+    Ok(())
+}
+
+fn land_buildable(terrain: &TrackTerrain, tile: TileCoord) -> Result<(), PlacementError> {
+    let height = terrain.height_at(tile).unwrap_or(0);
+    if height >= MOUNTAIN_HEIGHT_MIN {
+        return Err(PlacementError::TerrainForbidden);
+    }
+    // Extremely steep local relief (cliff face) even below mountain band.
+    let slope = local_slope(terrain, tile);
+    if slope > MAX_GRADE + 1 {
+        return Err(PlacementError::GradeTooSteep { grade: slope });
+    }
+    Ok(())
+}
+
 pub fn validate_tile_empty(
     network: &TrackNetwork,
     terrain: &TrackTerrain,
@@ -79,6 +149,11 @@ pub fn validate_tile_empty(
     let is_bridge = terrain.is_water(tile);
     if is_bridge {
         water_bridge_allowed(terrain, tile)?;
+    } else {
+        land_buildable(terrain, tile)?;
     }
+    grade_to_neighbors_ok(network, terrain, tile, layer)?;
+    // Ensure cost table accepts the tile (mountain / etc.).
+    let _ = tile_build_cost(terrain, tile)?;
     Ok(is_bridge)
 }

@@ -50,7 +50,7 @@ pub fn sync_train_sprites(
         let Some(piece) = network.piece(loc.track) else {
             continue;
         };
-        let pose = present_train(piece, loc, &network, overstep);
+        let pose = present_train(train.kind, piece, loc, &network, overstep);
         let color = match train.kind {
             TrainKind::Transit => Color::srgb(0.2, 0.55, 0.9),
             TrainKind::Transport => Color::srgb(0.9, 0.65, 0.15),
@@ -92,6 +92,7 @@ struct TrainPose {
 }
 
 fn present_train(
+    kind: TrainKind,
     piece: &TrackPiece,
     loc: &TrainLocation,
     network: &TrackNetwork,
@@ -112,8 +113,12 @@ fn present_train(
         return idle;
     };
 
-    let needed = ticks_for_piece(piece.max_grade, piece.curve);
-    let step = if loc.parked { 0.0 } else { overstep };
+    let needed = ticks_for_piece(kind, piece.max_grade, piece.curve);
+    let step = if loc.parked || loc.dwell_remaining > 0 {
+        0.0
+    } else {
+        overstep
+    };
     let t = lerp_fraction(loc.progress, needed, step);
     let (nx, ny) = tile_to_world(next.tile);
     let (size, flip_x) = facing_sprite(piece.tile, next.tile);

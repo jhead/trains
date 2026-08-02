@@ -37,7 +37,10 @@ pub fn apply_commands(
             | CommandKind::Demolish(_)
             | CommandKind::AutoFillTrack(_)
             | CommandKind::BuyTrain(_)
-            | CommandKind::PlaceTrain(_) => {
+            | CommandKind::PlaceTrain(_)
+            | CommandKind::CreateLine(_)
+            | CommandKind::AssignTrainToLine(_)
+            | CommandKind::UnassignTrain(_) => {
                 pending.write(PendingWorldCommand {
                     command: command.clone(),
                 });
@@ -99,11 +102,16 @@ mod tests {
     fn track_apply_places_when_terrain_present() {
         use crate::track::{TrackEdit, TrackNetwork, TrackTerrain, TRACK_COST_CENTS};
         use bevy_ecs::message::Messages;
+        use crate::commands::Pause;
         use crate::money::Money;
 
         let mut app = App::new();
         app.add_plugins(SimPlugin);
         app.insert_resource(TrackTerrain::new(8, 8, (0..64).map(|_| (false, 0i8))));
+        // Pause so Advance (opex / maintenance) does not run during place.
+        app.world_mut()
+            .resource_mut::<crate::SimClock>()
+            .apply_pause(Pause { paused: true });
 
         {
             let mut buf = app.world_mut().resource_mut::<CommandBuffer>();
@@ -137,11 +145,15 @@ mod tests {
     fn undo_place_restores_empty_network_and_money() {
         use crate::history::CommandHistory;
         use crate::track::{TrackNetwork, TrackTerrain, TRACK_COST_CENTS};
+        use crate::commands::Pause;
         use crate::money::Money;
 
         let mut app = App::new();
         app.add_plugins(SimPlugin);
         app.insert_resource(TrackTerrain::new(8, 8, (0..64).map(|_| (false, 0i8))));
+        app.world_mut()
+            .resource_mut::<crate::SimClock>()
+            .apply_pause(Pause { paused: true });
 
         {
             let mut buf = app.world_mut().resource_mut::<CommandBuffer>();

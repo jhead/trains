@@ -20,4 +20,7 @@ pub struct StationId(pub u64);
 pub struct TrainId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LineId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntityId(pub u64);

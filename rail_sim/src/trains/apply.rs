@@ -6,11 +6,12 @@ use crate::apply::PendingWorldCommand;
 use crate::commands::{CommandKind, TrainKind};
 use crate::economy::{MoneyCategory, MoneyLedger};
 use crate::ids::{StationId, TileCoord, TrainId};
+use crate::lines::LineRegistry;
 use crate::money::Money;
 use crate::stations::StationRegistry;
 use crate::track::{step, TrackNetwork, DIR8, GROUND_LAYER};
 
-use super::train::{buy_cost, Train, TrainCargo, TrainLocation, TrainYard};
+use super::train::{buy_cost, Train, TrainCargo, TrainLocation, TrainOnLine, TrainYard};
 
 /// Presentation hook when a train is bought or enters the map.
 #[derive(Message, Debug, Clone, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub fn apply_train_commands(
     mut yard: ResMut<TrainYard>,
     stations: Res<StationRegistry>,
     network: Res<TrackNetwork>,
+    lines: Res<LineRegistry>,
     mut commands: Commands,
     mut edits: MessageWriter<TrainEdit>,
 ) {
@@ -64,7 +66,7 @@ pub fn apply_train_commands(
                     yard.return_train(p.train, kind);
                     continue;
                 };
-                commands.spawn((
+                let mut entity = commands.spawn((
                     Train {
                         id: p.train,
                         kind,
@@ -72,6 +74,13 @@ pub fn apply_train_commands(
                     TrainLocation::at_track(track),
                     TrainCargo::Empty,
                 ));
+                if let Some(line) = lines.line_for_train(p.train) {
+                    entity.insert(TrainOnLine {
+                        line: line.id,
+                        next_stop: 0,
+                        forward: true,
+                    });
+                }
                 edits.write(TrainEdit::Placed {
                     id: p.train,
                     kind,

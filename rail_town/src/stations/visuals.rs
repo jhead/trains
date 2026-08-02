@@ -1,8 +1,11 @@
 //! Placeholder sprites for seeded stations and industries.
+//!
+//! Newly revealed demand (open opportunities) uses a brighter amber tint so
+//! unserved anchors read as the next thing to reach.
 
 use bevy::prelude::*;
 use rail_map::{tile_to_world, TILE_SIZE};
-use rail_sim::{IndustryId, IndustryRegistry, StationId, StationRegistry};
+use rail_sim::{DemandSpawner, IndustryId, IndustryRegistry, StationId, StationRegistry};
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct StationSprite {
@@ -14,63 +17,121 @@ pub struct IndustrySprite {
     pub id: IndustryId,
 }
 
+/// Marker: this sprite is a session-spawned opportunity still off-network.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct NewDemandMarker;
+
 pub fn sync_station_industry_sprites(
     mut commands: Commands,
     stations: Res<StationRegistry>,
     industries: Res<IndustryRegistry>,
-    existing_stations: Query<(Entity, &StationSprite)>,
-    existing_industries: Query<(Entity, &IndustrySprite)>,
+    demand: Res<DemandSpawner>,
+    existing_stations: Query<(Entity, &StationSprite, Option<&NewDemandMarker>)>,
+    existing_industries: Query<(Entity, &IndustrySprite, Option<&NewDemandMarker>)>,
+    mut sprites: Query<&mut Sprite>,
 ) {
-    let station_sprites: Vec<(Entity, StationId)> = existing_stations
+    let station_sprites: Vec<(Entity, StationId, bool)> = existing_stations
         .iter()
-        .map(|(e, s)| (e, s.id))
+        .map(|(e, s, m)| (e, s.id, m.is_some()))
         .collect();
-    let industry_sprites: Vec<(Entity, IndustryId)> = existing_industries
+    let industry_sprites: Vec<(Entity, IndustryId, bool)> = existing_industries
         .iter()
-        .map(|(e, s)| (e, s.id))
+        .map(|(e, s, m)| (e, s.id, m.is_some()))
         .collect();
 
-    for (entity, id) in &station_sprites {
+    for (entity, id, _) in &station_sprites {
         if stations.get(*id).is_none() {
             commands.entity(*entity).despawn();
         }
     }
     for station in stations.iter() {
-        if station_sprites.iter().any(|(_, id)| *id == station.id) {
+        let is_new = demand.is_open_station(station.id);
+        if let Some((entity, _, was_new)) = station_sprites
+            .iter()
+            .find(|(_, id, _)| *id == station.id)
+        {
+            // Tint / marker can change when opportunity connects.
+            if let Ok(mut sprite) = sprites.get_mut(*entity) {
+                sprite.color = if is_new {
+                    Color::srgb(0.95, 0.72, 0.2)
+                } else {
+                    Color::srgb(0.85, 0.25, 0.22)
+                };
+            }
+            if is_new && !was_new {
+                commands.entity(*entity).insert(NewDemandMarker);
+            } else if !is_new && *was_new {
+                commands.entity(*entity).remove::<NewDemandMarker>();
+            }
             continue;
         }
         let (wx, wy) = tile_to_world(station.tile);
-        commands.spawn((
-            Sprite::from_color(
-                Color::srgb(0.85, 0.25, 0.22),
-                Vec2::new(TILE_SIZE * 0.55, TILE_SIZE * 0.55),
-            ),
+        let color = if is_new {
+            Color::srgb(0.95, 0.72, 0.2)
+        } else {
+            Color::srgb(0.85, 0.25, 0.22)
+        };
+        let size = if is_new {
+            Vec2::new(TILE_SIZE * 0.65, TILE_SIZE * 0.65)
+        } else {
+            Vec2::new(TILE_SIZE * 0.55, TILE_SIZE * 0.55)
+        };
+        let mut e = commands.spawn((
+            Sprite::from_color(color, size),
             Transform::from_xyz(wx, wy, 2.0),
             StationSprite { id: station.id },
             Name::new(station.name.clone()),
         ));
+        if is_new {
+            e.insert(NewDemandMarker);
+        }
     }
 
-    for (entity, id) in &industry_sprites {
+    for (entity, id, _) in &industry_sprites {
         if industries.get(*id).is_none() {
             commands.entity(*entity).despawn();
         }
     }
     for ind in industries.iter() {
-        if industry_sprites.iter().any(|(_, id)| *id == ind.id) {
-            continue;
-        }
-        let (wx, wy) = tile_to_world(ind.tile);
-        let color = if ind.produces.is_some() {
+        let is_new = demand.is_open_industry(ind.id);
+        let base = if ind.produces.is_some() {
             Color::srgb(0.75, 0.55, 0.2)
         } else {
             Color::srgb(0.45, 0.4, 0.7)
         };
-        commands.spawn((
-            Sprite::from_color(color, Vec2::new(TILE_SIZE * 0.5, TILE_SIZE * 0.5)),
+        let color = if is_new {
+            Color::srgb(0.95, 0.78, 0.35)
+        } else {
+            base
+        };
+        if let Some((entity, _, was_new)) = industry_sprites
+            .iter()
+            .find(|(_, id, _)| *id == ind.id)
+        {
+            if let Ok(mut sprite) = sprites.get_mut(*entity) {
+                sprite.color = color;
+            }
+            if is_new && !was_new {
+                commands.entity(*entity).insert(NewDemandMarker);
+            } else if !is_new && *was_new {
+                commands.entity(*entity).remove::<NewDemandMarker>();
+            }
+            continue;
+        }
+        let (wx, wy) = tile_to_world(ind.tile);
+        let size = if is_new {
+            Vec2::new(TILE_SIZE * 0.6, TILE_SIZE * 0.6)
+        } else {
+            Vec2::new(TILE_SIZE * 0.5, TILE_SIZE * 0.5)
+        };
+        let mut e = commands.spawn((
+            Sprite::from_color(color, size),
             Transform::from_xyz(wx, wy, 2.0),
             IndustrySprite { id: ind.id },
             Name::new(ind.name.clone()),
         ));
+        if is_new {
+            e.insert(NewDemandMarker);
+        }
     }
 }

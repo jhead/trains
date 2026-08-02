@@ -11,13 +11,17 @@ mod terrain;
 
 pub use apply::{apply_track_commands, TrackEdit};
 pub use cost::{
-    tile_cost, BRIDGE_COST_CENTS, GROUND_LAYER, MAX_BRIDGE_SPAN, TRACK_COST_CENTS,
+    bridge_cost_for_span, local_slope, piece_maintenance_cents, tile_build_cost, tile_cost,
+    BRIDGE_COST_CENTS, BRIDGE_MAINT_CENTS, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_CURVE, MAX_GRADE,
+    MOUNTAIN_HEIGHT_MIN, TRACK_COST_CENTS, TRACK_MAINT_CENTS,
 };
 pub use dir::{dir_index, opposite_dir, step, TrackLinks, DIR8};
 pub use network::TrackNetwork;
 pub use piece::{curve_from_link_dirs, TrackKind, TrackPiece};
 pub use place::{straight_line, try_autofill_track, try_demolish, try_place_track, PlacedTrack};
-pub use rules::{path_bridge_spans_ok, validate_tile_empty, PlacementError};
+pub use rules::{
+    grade_to_neighbors_ok, path_bridge_spans_ok, path_grades_ok, validate_tile_empty, PlacementError,
+};
 pub use terrain::TrackTerrain;
 
 #[cfg(test)]
@@ -118,7 +122,10 @@ mod tests {
         )
         .unwrap();
         assert!(placed.piece.is_bridge());
-        assert_eq!(money.cents(), 500_000 - BRIDGE_COST_CENTS);
+        let span = terrain
+            .water_span_horizontal(TileCoord { x: 4, y: 2 })
+            .max(terrain.water_span_vertical(TileCoord { x: 4, y: 2 }));
+        assert_eq!(money.cents(), 500_000 - bridge_cost_for_span(span));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use rail_sim::{
-    commands::TrainKind, IndustryRegistry, Mood, Peep, StationRegistry, StationService,
+    commands::TrainKind, IndustryRegistry, LineRegistry, Mood, Peep, StationRegistry, StationService,
     TileOccupancy, TrackNetwork, Train, TrainCargo, TrainLocation, WaitingAtStation,
 };
 
@@ -15,9 +15,7 @@ use crate::ui::kit::{
 
 use super::cause::{peep_mood_line, station_cause_line, StationCauseInput};
 use super::pick::Selectable;
-use super::selection::{
-    train_is_blocked, Selection, ServiceScoreHistory, LONG_WAIT_MINUTES,
-};
+use super::selection::{Selection, ServiceScoreHistory, LONG_WAIT_MINUTES};
 
 pub const INSPECTOR_W: f32 = 280.0;
 
@@ -235,6 +233,7 @@ pub fn update_inspector_panel(
     history: Res<ServiceScoreHistory>,
     network: Res<TrackNetwork>,
     occupancy: Res<TileOccupancy>,
+    lines: Res<LineRegistry>,
     peeps: Query<(&Peep, &WaitingAtStation)>,
     trains: Query<(&Train, &TrainLocation, &TrainCargo)>,
     mut cache: ResMut<InspectorCache>,
@@ -260,6 +259,7 @@ pub fn update_inspector_panel(
         &history,
         &network,
         &occupancy,
+        &lines,
         &peeps,
         &trains,
     );
@@ -324,6 +324,7 @@ fn build_view(
     history: &ServiceScoreHistory,
     network: &TrackNetwork,
     occupancy: &TileOccupancy,
+    lines: &LineRegistry,
     peeps: &Query<(&Peep, &WaitingAtStation)>,
     trains: &Query<(&Train, &TrainLocation, &TrainCargo)>,
 ) -> InspectorView {
@@ -389,8 +390,11 @@ fn build_view(
             };
             let status = if loc.parked {
                 "Parked"
-            } else if train_is_blocked(loc, occupancy, train.id) {
+            } else if let Some(blocker) = occupancy.blocked_by.get(&train.id) {
+                let _ = blocker;
                 "Blocked"
+            } else if loc.dwell_remaining > 0 {
+                "Dwelling"
             } else if loc.at_destination() {
                 "Idle"
             } else {
@@ -409,20 +413,45 @@ fn build_view(
                     format!("{} {a} → {b}", kind.label())
                 }
             };
+            let blocker_line = occupancy
+                .blocked_by
+                .get(&train.id)
+                .map(|b| format!("Blocked by Train {}", b.0))
+                .unwrap_or_else(|| job.clone());
             let tone = match status {
                 "Blocked" | "Parked" => CauseTone::Warn,
                 "Running" => CauseTone::Ok,
                 _ => CauseTone::Neutral,
             };
+            let line_note = lines
+                .line_for_train(id)
+                .map(|l| format!("Line: {}", l.name))
+                .unwrap_or_else(|| "Line: (free-roam)".into());
             InspectorView {
-                fingerprint: format!("tr:{}:{}:{}:{}", id.0, status, job, loc.path_index),
+                fingerprint: format!(
+                    "tr:{}:{}:{}:{}:{:?}",
+                    id.0,
+                    status,
+                    job,
+                    loc.path_index,
+                    occupancy.blocked_by.get(&train.id)
+                ),
                 name: format!("Train {}", id.0),
                 type_line: format!("Train · {kind}"),
                 headline: format!("Status      {status}"),
                 trend: String::new(),
-                cause: job.clone(),
+                cause: blocker_line.clone(),
                 cause_tone: tone,
-                body: format!("Cargo / job\n{job}\n\nPath step {}/{}", loc.path_index + 1, loc.path.len().max(1)),
+                body: format!(
+                    "{line_note}\nCargo / job\n{job}\n\nPath step {}/{}\n{}",
+                    loc.path_index + 1,
+                    loc.path.len().max(1),
+                    if status == "Blocked" {
+                        blocker_line
+                    } else {
+                        String::new()
+                    }
+                ),
             }
         }
         Selectable::Peep(id) => {

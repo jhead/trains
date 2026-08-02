@@ -4,10 +4,12 @@ use crate::economy::{MoneyCategory, MoneyLedger};
 use crate::ids::{TileCoord, TrackId};
 use crate::money::Money;
 
-use super::cost::tile_cost;
+use super::cost::tile_build_cost;
 use super::network::TrackNetwork;
 use super::piece::{TrackKind, TrackPiece};
-use super::rules::{path_bridge_spans_ok, validate_tile_empty, PlacementError};
+use super::rules::{
+    path_bridge_spans_ok, path_grades_ok, validate_tile_empty, PlacementError,
+};
 use super::terrain::TrackTerrain;
 
 /// Straight line between anchors for autofill (orthogonal or 45° diagonal).
@@ -54,7 +56,7 @@ pub fn try_place_track(
     layer: u8,
 ) -> Result<PlacedTrack, PlacementError> {
     let is_bridge = validate_tile_empty(network, terrain, tile, layer)?;
-    let cost = tile_cost(is_bridge);
+    let cost = tile_build_cost(terrain, tile)?;
     ledger
         .try_debit(money, MoneyCategory::Construction, cost)
         .map_err(|_| PlacementError::InsufficientFunds)?;
@@ -109,28 +111,35 @@ pub fn try_autofill_track(
 ) -> Result<Vec<PlacedTrack>, PlacementError> {
     let path = straight_line(from, to).ok_or(PlacementError::NotStraight)?;
 
-    // Validate path bridge runs as a whole (consecutive water on the line).
+    // Validate path bridge runs and grades as a whole.
     path_bridge_spans_ok(terrain, &path)?;
+    path_grades_ok(terrain, &path)?;
 
-    let mut to_place: Vec<(TileCoord, bool)> = Vec::new();
+    let mut to_place: Vec<TileCoord> = Vec::new();
     for tile in &path {
         if network.id_at(*tile, layer).is_some() {
             continue;
         }
-        // Per-tile checks (bounds / layer / local water width).
-        let is_bridge = validate_tile_empty(network, terrain, *tile, layer)?;
-        to_place.push((*tile, is_bridge));
+        // Per-tile checks (bounds / layer / water / grade to existing / terrain).
+        let _is_bridge = validate_tile_empty(network, terrain, *tile, layer)?;
+        to_place.push(*tile);
     }
 
-    let total: i64 = to_place.iter().map(|(_, b)| tile_cost(*b)).sum();
+    let mut costs = Vec::with_capacity(to_place.len());
+    let mut total = 0i64;
+    for &tile in &to_place {
+        let cost = tile_build_cost(terrain, tile)?;
+        total = total.saturating_add(cost);
+        costs.push(cost);
+    }
     ledger
         .try_debit(money, MoneyCategory::Construction, total)
         .map_err(|_| PlacementError::InsufficientFunds)?;
 
     let mut placed = Vec::with_capacity(to_place.len());
-    for (tile, is_bridge) in to_place {
+    for (tile, cost) in to_place.into_iter().zip(costs) {
+        let is_bridge = terrain.is_water(tile);
         let height = terrain.height_at(tile).unwrap_or(0);
-        let cost = tile_cost(is_bridge);
         let id = network.alloc_id();
         let piece = TrackPiece {
             id,

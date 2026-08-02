@@ -2,8 +2,8 @@
 
 use rail_sim::ids::TileCoord;
 use rail_sim::{
-    path_bridge_spans_ok, tile_cost, validate_tile_empty, Money, PlacementError, TrackNetwork,
-    TrackTerrain, GROUND_LAYER, MAX_BRIDGE_SPAN,
+    path_bridge_spans_ok, path_grades_ok, tile_build_cost, validate_tile_empty, Money,
+    PlacementError, TrackNetwork, TrackTerrain, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_GRADE,
 };
 
 use super::propose::{propose_path, PathMode, ProposedPath};
@@ -105,6 +105,14 @@ fn preview_build_proposed(
             tiles: water_run_tiles(terrain, &proposed.tiles),
         });
     }
+    if reject.is_none() {
+        if let Err(err) = path_grades_ok(terrain, &proposed.tiles) {
+            reject = Some(RejectInfo {
+                message: placement_reason(err, 0, balance),
+                tiles: grade_fault_tiles(terrain, &proposed.tiles),
+            });
+        }
+    }
 
     let mut ghosts = Vec::with_capacity(proposed.tiles.len());
     let mut new_tile_count = 0u32;
@@ -138,7 +146,23 @@ fn preview_build_proposed(
 
         match validate_tile_empty(network, terrain, tile, GROUND_LAYER) {
             Ok(is_bridge) => {
-                let cost = tile_cost(is_bridge);
+                let cost = match tile_build_cost(terrain, tile) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        ghosts.push(GhostTile {
+                            tile,
+                            kind: TileGhostKind::Invalid,
+                            valid: false,
+                        });
+                        if reject.is_none() {
+                            reject = Some(RejectInfo {
+                                message: placement_reason(err, 0, balance),
+                                tiles: vec![tile],
+                            });
+                        }
+                        continue;
+                    }
+                };
                 total_cost += cost;
                 new_tile_count += 1;
                 if is_bridge {
@@ -272,6 +296,10 @@ pub fn placement_reason(err: PlacementError, total_cost: i64, balance: i64) -> S
         PlacementError::BridgeTooLong { span } => {
             format!("Span too wide — {span} tiles, max {MAX_BRIDGE_SPAN}")
         }
+        PlacementError::GradeTooSteep { grade } => {
+            format!("Too steep — grade {grade}, max {MAX_GRADE}")
+        }
+        PlacementError::TerrainForbidden => "Can't build on that terrain".into(),
         PlacementError::InsufficientFunds => {
             let short = (total_cost - balance).max(0);
             format!("Short by {}", format_dollars(short))
@@ -302,6 +330,20 @@ fn water_run_tiles(terrain: &TrackTerrain, path: &[TileCoord]) -> Vec<TileCoord>
         }
     }
     best
+}
+
+fn grade_fault_tiles(terrain: &TrackTerrain, path: &[TileCoord]) -> Vec<TileCoord> {
+    for w in path.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        let ha = terrain.height_at(a).unwrap_or(0);
+        let hb = terrain.height_at(b).unwrap_or(0);
+        let grade = (ha as i16 - hb as i16).unsigned_abs() as u8;
+        if grade > MAX_GRADE {
+            return vec![a, b];
+        }
+    }
+    path.last().copied().into_iter().collect()
 }
 
 #[cfg(test)]

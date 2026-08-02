@@ -2,16 +2,44 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use crate::commands::TrainKind;
 use crate::ids::TrackId;
 use crate::track::TrackNetwork;
+use super::profile::TrainProfile;
 
 /// BFS shortest path over [`TrackNetwork::neighbor_ids`].
 ///
 /// Returns a path including both `from` and `to`. Empty / single-node when
 /// `from == to`. `None` when disconnected or either id is missing.
 pub fn find_path(network: &TrackNetwork, from: TrackId, to: TrackId) -> Option<Vec<TrackId>> {
+    find_path_for(network, from, to, None)
+}
+
+/// Pathfinding that refuses tiles steeper than the train's grade tolerance.
+pub fn find_path_for_kind(
+    network: &TrackNetwork,
+    from: TrackId,
+    to: TrackId,
+    kind: TrainKind,
+) -> Option<Vec<TrackId>> {
+    find_path_for(network, from, to, Some(TrainProfile::for_kind(kind)))
+}
+
+fn find_path_for(
+    network: &TrackNetwork,
+    from: TrackId,
+    to: TrackId,
+    profile: Option<TrainProfile>,
+) -> Option<Vec<TrackId>> {
     if network.piece(from).is_none() || network.piece(to).is_none() {
         return None;
+    }
+    if let Some(p) = profile {
+        let from_g = network.piece(from).map(|x| x.max_grade).unwrap_or(0);
+        let to_g = network.piece(to).map(|x| x.max_grade).unwrap_or(0);
+        if !p.tolerates_grade(from_g) || !p.tolerates_grade(to_g) {
+            return None;
+        }
     }
     if from == to {
         return Some(vec![from]);
@@ -26,6 +54,12 @@ pub fn find_path(network: &TrackNetwork, from: TrackId, to: TrackId) -> Option<V
         for next in network.neighbor_ids(cur) {
             if prev.contains_key(&next) {
                 continue;
+            }
+            if let Some(p) = profile {
+                let g = network.piece(next).map(|x| x.max_grade).unwrap_or(0);
+                if !p.tolerates_grade(g) {
+                    continue;
+                }
             }
             prev.insert(next, cur);
             if next == to {
@@ -74,7 +108,7 @@ mod tests {
             let p = try_place_track(
                 &mut network,
                 &mut money,
-            &mut ledger,
+                &mut ledger,
                 &terrain,
                 TileCoord { x, y: 2 },
                 GROUND_LAYER,
@@ -124,5 +158,32 @@ mod tests {
         )
         .unwrap();
         assert!(find_path(&network, a.id, b.id).is_none());
+    }
+
+    #[test]
+    fn freight_path_refuses_steep_tiles() {
+        let terrain = land(8, 8);
+        let mut network = TrackNetwork::new();
+        let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
+        let mut ids = Vec::new();
+        for x in 1..=4 {
+            let p = try_place_track(
+                &mut network,
+                &mut money,
+                &mut ledger,
+                &terrain,
+                TileCoord { x, y: 2 },
+                GROUND_LAYER,
+            )
+            .unwrap();
+            ids.push(p.id);
+        }
+        // Force a mid tile to grade 3 (above transport max_grade 1).
+        if let Some(piece) = network.piece_mut(ids[1]) {
+            piece.max_grade = 3;
+        }
+        assert!(find_path_for_kind(&network, ids[0], ids[3], TrainKind::Transit).is_some());
+        assert!(find_path_for_kind(&network, ids[0], ids[3], TrainKind::Transport).is_none());
     }
 }

@@ -5,6 +5,7 @@
 //! track build tools. Domain systems join `FixedUpdate` via [`rail_sim::SimSet`].
 
 mod inspect;
+mod lines;
 mod map;
 mod overlays;
 mod palette;
@@ -17,6 +18,7 @@ mod ui;
 
 use bevy::prelude::*;
 use inspect::InspectPlugin;
+use lines::LinesPlugin;
 use map::MapPlugin;
 use overlays::OverlaysPlugin;
 use palette::BG0;
@@ -46,6 +48,7 @@ fn main() {
         .add_plugins(TrackPlugin)
         .add_plugins(StationsPlugin)
         .add_plugins(TrainsPlugin)
+        .add_plugins(LinesPlugin)
         .add_plugins(TownPresentationPlugin)
         .add_plugins(InspectPlugin)
         .add_plugins(OverlaysPlugin)

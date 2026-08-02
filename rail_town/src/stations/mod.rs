@@ -9,7 +9,8 @@ use bevy::prelude::*;
 
 use visuals::sync_station_industry_sprites;
 
-pub use visuals::{IndustrySprite, StationSprite};
+#[allow(unused_imports)] // available to inspect / overlays
+pub use visuals::{IndustrySprite, NewDemandMarker, StationSprite};
 
 pub struct StationsPlugin;
 

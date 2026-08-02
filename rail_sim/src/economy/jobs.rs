@@ -4,10 +4,11 @@ use bevy_ecs::prelude::*;
 
 use crate::commands::TrainKind;
 use crate::ids::{StationId, TrackId};
+use crate::lines::LineRegistry;
 use crate::stations::{GoodKind, IndustryId, IndustryRegistry, StationRegistry, StationService};
 use crate::track::{TrackNetwork, GROUND_LAYER};
-use crate::trains::find_path;
-use crate::trains::{track_for_station, Train, TrainCargo, TrainLocation};
+use crate::trains::find_path_for_kind;
+use crate::trains::{track_for_station, Train, TrainCargo, TrainLocation, TrainOnLine};
 
 use super::payout::{GOODS_DELIVERY_CENTS, PASSENGER_FARE_CENTS};
 
@@ -135,28 +136,73 @@ fn refresh_waiting(board: &JobBoard, stations: &StationRegistry, service: &mut S
 }
 
 /// Assign open jobs to idle empty trains at destination (ready for a new run).
+///
+/// Trains on a line prefer jobs whose endpoints lie on that line; otherwise they
+/// shuttle to the next stop. Free-roam trains take any compatible job.
 pub fn assign_jobs(
     mut board: ResMut<JobBoard>,
     stations: Res<StationRegistry>,
     industries: Res<IndustryRegistry>,
     network: Res<TrackNetwork>,
-    mut q: Query<(&Train, &mut TrainLocation, &mut TrainCargo)>,
+    lines: Res<LineRegistry>,
+    mut q: Query<(
+        &Train,
+        &mut TrainLocation,
+        &mut TrainCargo,
+        Option<&mut TrainOnLine>,
+    )>,
 ) {
-    for (train, mut loc, mut cargo) in q.iter_mut() {
-        if loc.parked || !cargo.is_empty() || !loc.at_destination() {
+    for (train, mut loc, mut cargo, on_line) in q.iter_mut() {
+        if loc.parked || loc.dwell_remaining > 0 || !cargo.is_empty() || !loc.at_destination() {
+            continue;
+        }
+
+        // Line-assigned: prefer on-line jobs, else shuttle.
+        if let Some(mut on) = on_line {
+            let Some(line) = lines.get(on.line) else {
+                continue;
+            };
+            if try_assign_line_job(
+                &mut board,
+                &stations,
+                &industries,
+                &network,
+                train,
+                &mut loc,
+                &mut cargo,
+                line,
+            ) {
+                // Advance next_stop toward the job destination if passenger.
+                if let TrainCargo::Passengers { to, .. } = *cargo {
+                    if let Some(idx) = line.stop_index(to) {
+                        on.next_stop = idx;
+                    }
+                }
+                continue;
+            }
+            // Shuttle empty along the line.
+            if let Some(next_idx) = line.next_stop_index(on.next_stop, &mut on.forward) {
+                let dest_station = line.stops[next_idx];
+                if let Some(path) =
+                    path_to_station(&network, &stations, train.kind, loc.track, dest_station)
+                {
+                    loc.set_path(path);
+                    on.next_stop = next_idx;
+                }
+            }
             continue;
         }
 
         let job_index = match train.kind {
             TrainKind::Transit => board.jobs.iter().position(|j| match j.kind {
                 JobKind::Passenger { from, to } => {
-                    path_stations(&network, &stations, from, to).is_some()
+                    path_stations(&network, &stations, train.kind, from, to).is_some()
                 }
                 _ => false,
             }),
             TrainKind::Transport => board.jobs.iter().position(|j| match j.kind {
                 JobKind::Goods { from, to, .. } => {
-                    path_industries(&network, &industries, from, to).is_some()
+                    path_industries(&network, &industries, train.kind, from, to).is_some()
                 }
                 _ => false,
             }),
@@ -169,64 +215,195 @@ pub fn assign_jobs(
 
         match job.kind {
             JobKind::Passenger { from, to } => {
-                let Some(leg) = path_stations(&network, &stations, from, to) else {
-                    board.jobs.push(Job {
-                        kind: JobKind::Passenger { from, to },
-                        reward_cents: job.reward_cents,
-                    });
+                if !take_passenger_job(
+                    &mut board,
+                    &stations,
+                    &network,
+                    train,
+                    &mut loc,
+                    &mut cargo,
+                    from,
+                    to,
+                    job.reward_cents,
+                ) {
                     continue;
-                };
-                let Some(from_track) = station_track(&network, &stations, from) else {
-                    board.jobs.push(Job {
-                        kind: JobKind::Passenger { from, to },
-                        reward_cents: job.reward_cents,
-                    });
-                    continue;
-                };
-                let full = if loc.track == from_track {
-                    leg
-                } else {
-                    let Some(to_from) = find_path(&network, loc.track, from_track) else {
-                        board.jobs.push(Job {
-                            kind: JobKind::Passenger { from, to },
-                            reward_cents: job.reward_cents,
-                        });
-                        continue;
-                    };
-                    join_paths(to_from, leg)
-                };
-                loc.set_path(full);
-                *cargo = TrainCargo::Passengers { from, to };
+                }
             }
             JobKind::Goods { kind, from, to } => {
-                let Some(leg) = path_industries(&network, &industries, from, to) else {
-                    board.jobs.push(job);
+                if !take_goods_job(
+                    &mut board,
+                    &industries,
+                    &network,
+                    train,
+                    &mut loc,
+                    &mut cargo,
+                    kind,
+                    from,
+                    to,
+                    job.reward_cents,
+                ) {
                     continue;
-                };
-                let Some(from_track) = industry_track(&network, &industries, from) else {
-                    board.jobs.push(Job {
-                        kind: JobKind::Goods { kind, from, to },
-                        reward_cents: job.reward_cents,
-                    });
-                    continue;
-                };
-                let full = if loc.track == from_track {
-                    leg
-                } else {
-                    let Some(to_from) = find_path(&network, loc.track, from_track) else {
-                        board.jobs.push(Job {
-                            kind: JobKind::Goods { kind, from, to },
-                            reward_cents: job.reward_cents,
-                        });
-                        continue;
-                    };
-                    join_paths(to_from, leg)
-                };
-                loc.set_path(full);
-                *cargo = TrainCargo::Goods { kind, from, to };
+                }
             }
         }
     }
+}
+
+fn try_assign_line_job(
+    board: &mut JobBoard,
+    stations: &StationRegistry,
+    industries: &IndustryRegistry,
+    network: &TrackNetwork,
+    train: &Train,
+    loc: &mut TrainLocation,
+    cargo: &mut TrainCargo,
+    line: &crate::lines::Line,
+) -> bool {
+    match train.kind {
+        TrainKind::Transit => {
+            let idx = board.jobs.iter().position(|j| match j.kind {
+                JobKind::Passenger { from, to } => {
+                    line.contains_station(from)
+                        && line.contains_station(to)
+                        && path_stations(network, stations, train.kind, from, to).is_some()
+                }
+                _ => false,
+            });
+            let Some(idx) = idx else {
+                return false;
+            };
+            let job = board.jobs.remove(idx);
+            match job.kind {
+                JobKind::Passenger { from, to } => take_passenger_job(
+                    board,
+                    stations,
+                    network,
+                    train,
+                    loc,
+                    cargo,
+                    from,
+                    to,
+                    job.reward_cents,
+                ),
+                _ => false,
+            }
+        }
+        TrainKind::Transport => {
+            // Goods: prefer jobs whose from/to industries sit near line stations.
+            // Pragmatic: any goods job that pathfinds; still "on line" when the
+            // train is assigned (line preference over free-roam is the shuttle).
+            let idx = board.jobs.iter().position(|j| match j.kind {
+                JobKind::Goods { from, to, .. } => {
+                    path_industries(network, industries, train.kind, from, to).is_some()
+                }
+                _ => false,
+            });
+            let Some(idx) = idx else {
+                return false;
+            };
+            let job = board.jobs.remove(idx);
+            match job.kind {
+                JobKind::Goods { kind, from, to } => take_goods_job(
+                    board,
+                    industries,
+                    network,
+                    train,
+                    loc,
+                    cargo,
+                    kind,
+                    from,
+                    to,
+                    job.reward_cents,
+                ),
+                _ => false,
+            }
+        }
+    }
+}
+
+fn take_passenger_job(
+    board: &mut JobBoard,
+    stations: &StationRegistry,
+    network: &TrackNetwork,
+    train: &Train,
+    loc: &mut TrainLocation,
+    cargo: &mut TrainCargo,
+    from: StationId,
+    to: StationId,
+    reward_cents: i64,
+) -> bool {
+    let Some(leg) = path_stations(network, stations, train.kind, from, to) else {
+        board.jobs.push(Job {
+            kind: JobKind::Passenger { from, to },
+            reward_cents,
+        });
+        return false;
+    };
+    let Some(from_track) = station_track(network, stations, from) else {
+        board.jobs.push(Job {
+            kind: JobKind::Passenger { from, to },
+            reward_cents,
+        });
+        return false;
+    };
+    let full = if loc.track == from_track {
+        leg
+    } else {
+        let Some(to_from) = find_path_for_kind(network, loc.track, from_track, train.kind) else {
+            board.jobs.push(Job {
+                kind: JobKind::Passenger { from, to },
+                reward_cents,
+            });
+            return false;
+        };
+        join_paths(to_from, leg)
+    };
+    loc.set_path(full);
+    *cargo = TrainCargo::Passengers { from, to };
+    true
+}
+
+fn take_goods_job(
+    board: &mut JobBoard,
+    industries: &IndustryRegistry,
+    network: &TrackNetwork,
+    train: &Train,
+    loc: &mut TrainLocation,
+    cargo: &mut TrainCargo,
+    kind: GoodKind,
+    from: IndustryId,
+    to: IndustryId,
+    reward_cents: i64,
+) -> bool {
+    let Some(leg) = path_industries(network, industries, train.kind, from, to) else {
+        board.jobs.push(Job {
+            kind: JobKind::Goods { kind, from, to },
+            reward_cents,
+        });
+        return false;
+    };
+    let Some(from_track) = industry_track(network, industries, from) else {
+        board.jobs.push(Job {
+            kind: JobKind::Goods { kind, from, to },
+            reward_cents,
+        });
+        return false;
+    };
+    let full = if loc.track == from_track {
+        leg
+    } else {
+        let Some(to_from) = find_path_for_kind(network, loc.track, from_track, train.kind) else {
+            board.jobs.push(Job {
+                kind: JobKind::Goods { kind, from, to },
+                reward_cents,
+            });
+            return false;
+        };
+        join_paths(to_from, leg)
+    };
+    loc.set_path(full);
+    *cargo = TrainCargo::Goods { kind, from, to };
+    true
 }
 
 fn join_paths(mut a: Vec<TrackId>, b: Vec<TrackId>) -> Vec<TrackId> {
@@ -247,15 +424,27 @@ fn station_track(
     track_for_station(network, s.tile, s.layer)
 }
 
+fn path_to_station(
+    network: &TrackNetwork,
+    stations: &StationRegistry,
+    kind: TrainKind,
+    from_track: TrackId,
+    to: StationId,
+) -> Option<Vec<TrackId>> {
+    let b = station_track(network, stations, to)?;
+    find_path_for_kind(network, from_track, b, kind)
+}
+
 fn path_stations(
     network: &TrackNetwork,
     stations: &StationRegistry,
+    kind: TrainKind,
     from: StationId,
     to: StationId,
 ) -> Option<Vec<TrackId>> {
     let a = station_track(network, stations, from)?;
     let b = station_track(network, stations, to)?;
-    find_path(network, a, b)
+    find_path_for_kind(network, a, b, kind)
 }
 
 fn industry_track(
@@ -270,10 +459,11 @@ fn industry_track(
 fn path_industries(
     network: &TrackNetwork,
     industries: &IndustryRegistry,
+    kind: TrainKind,
     from: IndustryId,
     to: IndustryId,
 ) -> Option<Vec<TrackId>> {
     let a = industry_track(network, industries, from)?;
     let b = industry_track(network, industries, to)?;
-    find_path(network, a, b)
+    find_path_for_kind(network, a, b, kind)
 }

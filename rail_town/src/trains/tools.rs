@@ -15,6 +15,7 @@ use rail_sim::{
 };
 
 use crate::inspect::WorldClickConsumed;
+use crate::lines::LineToolState;
 use crate::map::MapCamera;
 use crate::track::{BuildTool, TrackToolState};
 use crate::ui::UiBlocksWorld;
@@ -54,6 +55,7 @@ pub fn train_tool_input(
     mut buffer: ResMut<CommandBuffer>,
     mut train_state: ResMut<TrainToolState>,
     mut track_state: ResMut<TrackToolState>,
+    mut line_state: ResMut<LineToolState>,
     ui_blocks: Res<UiBlocksWorld>,
     click_consumed: Res<WorldClickConsumed>,
 ) {
@@ -65,6 +67,8 @@ pub fn train_tool_input(
         train_state.kind = TrainPlaceKind::Transit;
         track_state.anchor = None;
         track_state.suppress_build_click = true;
+        line_state.active = false;
+        line_state.clear_draft();
     }
     if keys.just_pressed(KeyCode::KeyG) {
         buffer.push(CommandKind::BuyTrain(BuyTrain {
@@ -74,11 +78,15 @@ pub fn train_tool_input(
         train_state.kind = TrainPlaceKind::Transport;
         track_state.anchor = None;
         track_state.suppress_build_click = true;
+        line_state.active = false;
+        line_state.clear_draft();
     }
     // B / X reclaim track tools.
     if keys.just_pressed(KeyCode::KeyB) || keys.just_pressed(KeyCode::KeyX) {
         train_state.place_mode = false;
         track_state.suppress_build_click = false;
+        line_state.active = false;
+        line_state.clear_draft();
     }
 
     if !train_state.place_mode {

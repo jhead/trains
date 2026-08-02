@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{StationId, TileCoord, TrackId, TrainId};
+use crate::ids::{LineId, StationId, TileCoord, TrackId, TrainId};
 
 /// Stable command envelope for buffering / replay / future networking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +37,9 @@ pub enum CommandKind {
     AutoFillTrack(AutoFillTrack),
     BuyTrain(BuyTrain),
     PlaceTrain(PlaceTrain),
+    CreateLine(CreateLine),
+    AssignTrainToLine(AssignTrainToLine),
+    UnassignTrain(UnassignTrain),
     SetSpeed(SetSpeed),
     Pause(Pause),
 }
@@ -76,6 +79,27 @@ pub struct PlaceTrain {
 pub enum TrainKind {
     Transit,
     Transport,
+}
+
+/// Confirm a player-drawn line (ordered station stops).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateLine {
+    /// Optional override; empty / missing → endpoint suggestion.
+    pub name: Option<String>,
+    pub stops: Vec<StationId>,
+}
+
+/// Assign a placed train to a line (prefers line work over free-roam).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssignTrainToLine {
+    pub train: TrainId,
+    pub line: LineId,
+}
+
+/// Clear a train's line assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnassignTrain {
+    pub train: TrainId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -13,6 +13,15 @@ use super::service::StationService;
 
 const STATION_NAMES: &[&str] = &["Eastgate", "Westbrook", "Millhaven", "Ridgeline"];
 
+/// Sites the map generator suggests for anchors, best first.
+///
+/// `rail_sim` cannot see `rail_map`, so the app inserts this alongside its
+/// [`TrackTerrain`](crate::track::TrackTerrain). Design 02 §4.1: the opening
+/// beat is level design, and only the generator knows where it put the
+/// question it wants the player to answer first.
+#[derive(Debug, Clone, Default, bevy_ecs::prelude::Resource)]
+pub struct AnchorSites(pub Vec<TileCoord>);
+
 /// Seed 3 stations and 2 industries onto walkable land tiles.
 ///
 /// Industries: Pine Sawmill (produces lumber) and Harbor Mill (consumes lumber).
@@ -23,6 +32,23 @@ pub fn seed_stations_and_industries(
     width: u32,
     height: u32,
     is_land: impl Fn(TileCoord) -> bool,
+) {
+    seed_stations_and_industries_at(stations, industries, service, width, height, is_land, &[])
+}
+
+/// Seed anchors, preferring sites the generator picked.
+///
+/// `preferred` leads the sampler; anything left is filled by the existing
+/// farthest-point pass, so a map with no hints behaves exactly as before.
+#[allow(clippy::too_many_arguments)]
+pub fn seed_stations_and_industries_at(
+    stations: &mut StationRegistry,
+    industries: &mut IndustryRegistry,
+    service: &mut StationService,
+    width: u32,
+    height: u32,
+    is_land: impl Fn(TileCoord) -> bool,
+    preferred: &[TileCoord],
 ) {
     if !stations.is_empty() || !industries.is_empty() {
         return;
@@ -47,7 +73,7 @@ pub fn seed_stations_and_industries(
         return;
     }
 
-    let targets = pick_spaced(&land, 5);
+    let targets = pick_spaced(&land, 5, preferred);
     let mut ti = 0usize;
 
     for (i, name) in STATION_NAMES.iter().take(3).enumerate() {
@@ -127,28 +153,47 @@ fn largest_landmass(land: &[TileCoord]) -> Vec<TileCoord> {
 }
 
 /// Greedy farthest-point sampling for roughly even coverage.
-fn pick_spaced(land: &[TileCoord], count: usize) -> Vec<TileCoord> {
+fn pick_spaced(land: &[TileCoord], count: usize, preferred: &[TileCoord]) -> Vec<TileCoord> {
     if land.is_empty() || count == 0 {
         return Vec::new();
     }
     let mut chosen = Vec::with_capacity(count);
-    // Start near map "interest": prefer a tile around the centroid of land.
-    let (sx, sy) = land.iter().fold((0i64, 0i64), |a, c| {
-        (a.0 + c.x as i64, a.1 + c.y as i64)
-    });
-    let n = land.len() as i64;
-    let cx = (sx / n) as i32;
-    let cy = (sy / n) as i32;
-    let mut best = land[0];
-    let mut best_d = i32::MAX;
-    for &c in land {
-        let d = (c.x - cx).abs() + (c.y - cy).abs();
-        if d < best_d {
-            best_d = d;
-            best = c;
+
+    // Generator-suggested sites first. The first two are the opening beat
+    // (design 02 §4.1) - a home town near the centre and a destination eight to
+    // twelve tiles away. Farthest-point sampling alone drives every anchor to a
+    // map corner, which makes the player's first act a haul between opposite
+    // edges before anything has paid out.
+    let on_land: std::collections::HashSet<(i32, i32)> =
+        land.iter().map(|c| (c.x, c.y)).collect();
+    for &site in preferred {
+        if chosen.len() >= count {
+            break;
+        }
+        if on_land.contains(&(site.x, site.y)) && !chosen.contains(&site) {
+            chosen.push(site);
         }
     }
-    chosen.push(best);
+
+    if chosen.is_empty() {
+        // Start near map "interest": prefer a tile around the centroid of land.
+        let (sx, sy) = land.iter().fold((0i64, 0i64), |a, c| {
+            (a.0 + c.x as i64, a.1 + c.y as i64)
+        });
+        let n = land.len() as i64;
+        let cx = (sx / n) as i32;
+        let cy = (sy / n) as i32;
+        let mut best = land[0];
+        let mut best_d = i32::MAX;
+        for &c in land {
+            let d = (c.x - cx).abs() + (c.y - cy).abs();
+            if d < best_d {
+                best_d = d;
+                best = c;
+            }
+        }
+        chosen.push(best);
+    }
 
     while chosen.len() < count {
         let mut far = land[0];

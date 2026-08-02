@@ -415,7 +415,7 @@ impl MapGenOptions {
         }
         // SplitMix64 finaliser, salted so the roll is independent of every other
         // decision the same seed drives.
-        let mut z = seed ^ 0x_c0a5_7a1_u64;
+        let mut z = seed ^ 0x0c0a_57a1_u64;
         z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);

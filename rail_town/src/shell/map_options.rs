@@ -12,7 +12,7 @@
 //! the rest of the screen is unchanged.
 
 use bevy::prelude::Color;
-use rail_map::{generate_map, MapGrid, TerrainKind};
+use rail_map::{MapGrid, TerrainKind};
 use rail_sim::ids::TileCoord;
 use rail_sim::{
     local_slope, seed_stations_and_industries, GoalMode, IndustryRegistry, StationRegistry,
@@ -287,10 +287,24 @@ impl MapOptions {
         splitmix64(self.seed ^ splitmix64(flavour.wrapping_add(0x9e37_79b9)))
     }
 
+    /// The generator knobs these options describe.
+    fn gen_options(&self) -> rail_map::MapGenOptions {
+        rail_map::MapGenOptions {
+            size: rail_map::MapSize::from_index(self.size.index()).unwrap_or_default(),
+            terrain: rail_map::TerrainStyle::from_index(self.terrain.index()).unwrap_or_default(),
+            water: rail_map::WaterStyle::from_index(self.water.index()).unwrap_or_default(),
+            resources: rail_map::ResourceSpread::from_index(self.resources.index())
+                .unwrap_or_default(),
+        }
+    }
+
     /// Generate the map these options describe.
+    ///
+    /// Uses the raw seed, not [`Self::effective_seed`]: the options now *steer*
+    /// the generator, and folding them into the seed as well would make them do
+    /// the job twice. `effective_seed` stays for the share code.
     pub fn generate(&self) -> MapGrid {
-        let n = self.size.tiles();
-        generate_map(n, n, self.effective_seed())
+        rail_map::generate(self.seed, self.gen_options())
     }
 
     /// Short shareable code encoding seed **and** settings (design 02 §5).
@@ -395,7 +409,6 @@ impl OptionField {
         match self {
             // The generator has no shape parameters yet — the choice re-rolls the
             // world through the seed instead of steering it. See the module docs.
-            Self::Terrain | Self::Water | Self::Resources => Some("re-rolls, not steers"),
             _ => None,
         }
     }
@@ -500,8 +513,10 @@ impl MapReadouts {
             land_pct: percent(land, total),
             mainland_pct: percent(largest_landmass(map), land.max(1)),
             towns: count_seeded_towns(map),
-            rivers: count_inland_water_bodies(map),
-            passes: count_passes(map),
+            // Places to cross, not water bodies: a river that reaches the map
+            // border is one component touching the frame and would count zero.
+            rivers: map.features().crossings.len(),
+            passes: rail_map::measure::ridge_passes(map).len(),
         }
     }
 }

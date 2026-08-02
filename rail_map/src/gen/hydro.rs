@@ -102,15 +102,15 @@ fn flow_to_sea(canvas: &Canvas, seed: u64) -> Flow {
     let mut downhill = vec![NO_STEP; canvas.len()];
     let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
 
-    let has_sea = canvas.surface.iter().any(|s| *s == Surface::Sea);
-    for i in 0..canvas.len() {
+    let has_sea = canvas.surface.contains(&Surface::Sea);
+    for (i, cell) in canvas.surface.iter().enumerate() {
         let x = (i % w) as i32;
         let y = (i / w) as i32;
         let border = x == 0 || y == 0 || x == w as i32 - 1 || y == h as i32 - 1;
         let outlet = if has_sea {
-            canvas.surface[i] == Surface::Sea
+            *cell == Surface::Sea
         } else {
-            border && canvas.surface[i] == Surface::Land
+            border && *cell == Surface::Land
         };
         if outlet {
             cost[i] = 0;
@@ -633,16 +633,13 @@ pub(crate) fn place_lakes(canvas: &mut Canvas, seed: u64, quota: usize) {
         }
         // A basin floor: low, and a long way from anything already wet.
         let mut best: Option<(i64, usize)> = None;
-        for i in 0..canvas.len() {
-            if canvas.surface[i] != Surface::Land {
+        for (i, &distance) in from_water.iter().enumerate() {
+            if canvas.surface[i] != Surface::Land || distance < 5 {
                 continue;
             }
             let x = (i % canvas.w) as i32;
             let y = (i / canvas.w) as i32;
             if x < 4 || y < 4 || x >= canvas.w as i32 - 4 || y >= canvas.h as i32 - 4 {
-                continue;
-            }
-            if from_water[i] < 5 {
                 continue;
             }
             let score = from_water[i] as i64 * 2 - canvas.band[i] as i64 * 6

@@ -34,7 +34,7 @@ pub use place::{
     PlacedStation, PlatformRun, RetieredStation, StationPlacementError, UpgradeStation,
 };
 pub use registry::{Station, StationRegistry};
-pub use seed::seed_stations_and_industries;
+pub use seed::{seed_stations_and_industries, seed_stations_and_industries_at, AnchorSites};
 pub use service::{StationService, StationServiceScore};
 pub use tier::{
     catchment_influence, max_catchment, station_maintenance_total, StationTier, StationTierSpec,

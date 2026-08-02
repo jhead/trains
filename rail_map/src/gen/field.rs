@@ -51,6 +51,17 @@ pub(crate) const ROCK_BAND: i8 = TOP_BAND;
 /// would make the corridor the *expensive* line instead of the obvious one.
 pub(crate) const SHORE_BAND: i8 = 0;
 
+/// How far from water the low ground reaches. See [`Canvas::clamp_shores`].
+pub(crate) const SHORE_APRON: u16 = 2;
+
+/// Highest raw band that gets the full apron.
+///
+/// A river through open country spreads a floodplain either side of it; a river
+/// cutting through high ground keeps its banks and reads as a gorge. Without this
+/// the wider apron would plane the ridges down wherever a watercourse crossed
+/// them, and the map would run short of the rock that makes a wall.
+pub(crate) const APRON_LOWLAND_MAX: i8 = 2;
+
 /// Depth of the deepest open sea, and of the middle of a wide river.
 pub(crate) const SEA_DEPTH_MAX: i32 = 6;
 pub(crate) const INLAND_DEPTH_MAX: i32 = 3;
@@ -333,7 +344,7 @@ impl Canvas {
                 // draws as a wall nobody put there.
                 let seated = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().all(|(dx, dy)| {
                     self.idx(x + dx, y + dy)
-                        .map_or(true, |k| self.band[k] >= ROCK_BAND - 1)
+                        .is_none_or(|k| self.band[k] >= ROCK_BAND - 1)
                 });
                 if self.band[i] == ROCK_BAND - 1 && n >= 5 && seated {
                     changes.push((i, ROCK_BAND));
@@ -347,26 +358,35 @@ impl Canvas {
         }
     }
 
-    /// Pin every tile touching water to at most [`SHORE_BAND`]. Run before
-    /// [`Self::relax_bands`], which then spreads the constraint inland.
+    /// Pin the ground either side of every watercourse to [`SHORE_BAND`], out to
+    /// [`SHORE_APRON`] tiles. Run before [`Self::relax_bands`], which then steps
+    /// the land back up one band per tile and turns the apron into a valley.
+    ///
+    /// Two tiles, not one, and that width is the point. A single pinned tile is
+    /// still a boundary tile — it has band-1 ground on its landward side, so
+    /// `local_slope` is 4 and track along the bank pays the 6× cut-and-fill rate.
+    /// At two tiles the inner one sees only water and its own band, costs 1×, and
+    /// the river finally reads to the cost model the way §2.2 describes it: a
+    /// corridor that is cheap to build along.
     pub(crate) fn clamp_shores(&mut self) {
-        let mut clamped: Vec<usize> = Vec::new();
-        for y in 0..self.h as i32 {
-            for x in 0..self.w as i32 {
-                let i = self.at(x, y);
-                if self.surface[i].is_water() {
-                    continue;
-                }
-                let touches = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-                    .iter()
-                    .any(|(dx, dy)| self.is_water(x + dx, y + dy));
-                if touches && self.band[i] > SHORE_BAND {
-                    clamped.push(i);
-                }
+        let from_water = self.distance_to(|i| self.surface[i].is_water());
+        for ((band, surface), &distance) in self
+            .band
+            .iter_mut()
+            .zip(&self.surface)
+            .zip(from_water.iter())
+        {
+            if surface.is_water() || *band <= SHORE_BAND {
+                continue;
             }
-        }
-        for i in clamped {
-            self.band[i] = SHORE_BAND;
+            let reach = if *band <= APRON_LOWLAND_MAX {
+                SHORE_APRON
+            } else {
+                1
+            };
+            if distance <= reach {
+                *band = SHORE_BAND;
+            }
         }
     }
 }
@@ -430,8 +450,11 @@ mod tests {
         canvas.surface[shore] = Surface::Sea;
         canvas.clamp_shores();
         canvas.relax_bands();
+        // High ground keeps its bank and reads as a gorge, so only one tile of
+        // this all-mountain test map is pinned down.
         assert_eq!(canvas.band[canvas.at(0, 0)], 0);
         assert_eq!(canvas.band[canvas.at(1, 0)], SHORE_BAND);
+        assert_eq!(canvas.band[canvas.at(2, 0)], SHORE_BAND + 1);
         assert_eq!(canvas.band[canvas.at(7, 7)], TOP_BAND);
     }
 

@@ -648,66 +648,67 @@ pub(crate) fn solve_ridge_gain(canvas: &mut Canvas, elevation: &Elevation, targe
 
 /// Thicken the existing walls until the rock share reaches its target.
 ///
-/// A map whose ridges were planed down by the shoreline relaxation can run short
-/// of rock however far the gain is pushed. Growing outward from rock that is
-/// already there — never seeding new specks — keeps the shortfall from turning
-/// into confetti, and keeps the wall in the place a landform chose.
+/// A map whose ridges the valley floors planed down can run short of rock however
+/// far the ridge gain is pushed. Growing outward from rock that is already there
+/// — never seeding new specks — keeps the shortfall from turning into confetti,
+/// and keeps the wall in the place a landform chose.
+///
+/// Growth is band by band: a tile may only be raised to `b` when every orthogonal
+/// neighbour has already reached `b - 1`, so the one-band-per-tile rule that makes
+/// the whole map climbable is never broken. When the crest has no room left to
+/// spread, its apron is raised first and the crest tries again next round.
 fn grow_rock_to(canvas: &mut Canvas, target: f32) {
     let rock = super::field::ROCK_BAND;
-    let count = |canvas: &Canvas| {
-        canvas
-            .band
-            .iter()
-            .zip(&canvas.surface)
-            .filter(|(b, s)| **b >= rock && **s == Surface::Land)
-            .count()
-    };
-    let mut have = count(canvas) as f32;
-    if have >= target {
-        return;
-    }
+    let mut have = canvas
+        .band
+        .iter()
+        .zip(&canvas.surface)
+        .filter(|(b, s)| **b >= rock && **s == Surface::Land)
+        .count() as f32;
 
-    for _ in 0..6 {
-        let mut promote: Vec<usize> = Vec::new();
-        for y in 0..canvas.h as i32 {
-            for x in 0..canvas.w as i32 {
-                let i = canvas.at(x, y);
-                if canvas.surface[i] != Surface::Land || canvas.band[i] != rock - 1 {
-                    continue;
-                }
-                // Only where the step stays legal: every orthogonal neighbour is
-                // already within one band of rock.
-                if ![(1, 0), (-1, 0), (0, 1), (0, -1)].iter().all(|(dx, dy)| {
-                    canvas
-                        .idx(x + dx, y + dy)
-                        .is_none_or(|k| canvas.band[k] >= rock - 1)
-                }) {
-                    continue;
-                }
-                let touching = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-                    .iter()
-                    .filter(|(dx, dy)| {
-                        canvas
-                            .idx(x + dx, y + dy)
-                            .is_some_and(|k| canvas.band[k] >= rock)
-                    })
-                    .count();
-                if touching > 0 {
-                    promote.push(i);
-                }
-            }
-        }
-        if promote.is_empty() {
+    for _ in 0..8 {
+        if have >= target {
             return;
         }
-        for i in promote {
-            if have >= target {
-                return;
-            }
-            canvas.band[i] = rock;
-            have += 1.0;
+        let room = (target - have).ceil() as usize;
+        let grown = lift_to(canvas, rock, room);
+        have += grown as f32;
+        if grown == 0 && lift_to(canvas, rock - 1, usize::MAX) == 0 {
+            return;
         }
     }
+}
+
+/// Raise land one band below `to` that already touches `to`, up to `budget`
+/// tiles, keeping every step at one band.
+fn lift_to(canvas: &mut Canvas, to: i8, budget: usize) -> usize {
+    if to <= 0 || budget == 0 {
+        return 0;
+    }
+    let mut raise: Vec<usize> = Vec::new();
+    for y in 0..canvas.h as i32 {
+        for x in 0..canvas.w as i32 {
+            let i = canvas.at(x, y);
+            if canvas.surface[i] != Surface::Land || canvas.band[i] != to - 1 {
+                continue;
+            }
+            let neighbours = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+            let seated = neighbours
+                .iter()
+                .all(|(dx, dy)| canvas.idx(x + dx, y + dy).is_none_or(|k| canvas.band[k] >= to - 1));
+            let touching = neighbours
+                .iter()
+                .any(|(dx, dy)| canvas.idx(x + dx, y + dy).is_some_and(|k| canvas.band[k] >= to));
+            if seated && touching {
+                raise.push(i);
+            }
+        }
+    }
+    let n = raise.len().min(budget);
+    for &i in &raise[..n] {
+        canvas.band[i] = to;
+    }
+    n
 }
 
 #[cfg(test)]

@@ -84,7 +84,8 @@ pub use save::{
 };
 pub use stations::{
     apply_station_commands, catchment_influence, push_station_command,
-    seed_stations_and_industries, station_maintenance_total, DemolishStation, GoodKind, Industry,
+    seed_stations_and_industries, seed_stations_and_industries_at, station_maintenance_total,
+    AnchorSites, DemolishStation, GoodKind, Industry,
     IndustryId, IndustryRegistry, PlaceStation, Station, StationCommand, StationEdit,
     StationPlacementError, StationRegistry, StationService, StationServiceScore, StationTier,
     StationTierSpec, UpgradeStation, HALT_COST_CENTS, INTERCHANGE_COST_CENTS, MIN_STATION_SPACING,
@@ -216,6 +217,7 @@ fn tick_station_service(mut service: ResMut<StationService>) {
 fn seed_world_anchors_once(
     mut seeded: ResMut<WorldAnchorsSeeded>,
     terrain: Option<Res<TrackTerrain>>,
+    sites: Option<Res<AnchorSites>>,
     mut stations: ResMut<StationRegistry>,
     mut industries: ResMut<IndustryRegistry>,
     mut service: ResMut<StationService>,
@@ -226,7 +228,7 @@ fn seed_world_anchors_once(
     let Some(terrain) = terrain else {
         return;
     };
-    seed_stations_and_industries(
+    seed_stations_and_industries_at(
         &mut stations,
         &mut industries,
         &mut service,
@@ -238,6 +240,7 @@ fn seed_world_anchors_once(
                 && terrain.height_at(c).unwrap_or(0) < crate::track::MOUNTAIN_HEIGHT_MIN
                 && crate::track::local_slope(&terrain, c) <= crate::track::MAX_GRADE + 1
         },
+        sites.as_ref().map(|s| s.0.as_slice()).unwrap_or(&[]),
     );
     seeded.0 = true;
 }

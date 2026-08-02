@@ -1,7 +1,5 @@
 //! Drain [`CommandBuffer`] on FixedUpdate and apply / forward commands.
 
-use std::sync::Once;
-
 use bevy_ecs::prelude::*;
 
 use crate::clock::SimClock;
@@ -20,8 +18,8 @@ pub struct PendingWorldCommand {
 /// Drain the command buffer and apply core handlers.
 ///
 /// - [`CommandKind::Pause`] / [`CommandKind::SetSpeed`] update [`SimClock`] fully.
-/// - Other kinds are forwarded as [`PendingWorldCommand`] for domain systems.
-/// - Stub arms also log once so missing handlers are obvious during integration.
+/// - Other kinds are forwarded as [`PendingWorldCommand`] for domain systems
+///   (track apply + train buy/place).
 pub fn apply_commands(
     mut buffer: ResMut<CommandBuffer>,
     mut clock: ResMut<SimClock>,
@@ -37,46 +35,14 @@ pub fn apply_commands(
             }
             CommandKind::PlaceTrack(_)
             | CommandKind::Demolish(_)
-            | CommandKind::AutoFillTrack(_) => {
-                pending.write(PendingWorldCommand {
-                    command: command.clone(),
-                });
-            }
-            CommandKind::BuyTrain(_) => {
-                log_stub_once("BuyTrain");
-                pending.write(PendingWorldCommand {
-                    command: command.clone(),
-                });
-            }
-            CommandKind::PlaceTrain(_) => {
-                log_stub_once("PlaceTrain");
+            | CommandKind::AutoFillTrack(_)
+            | CommandKind::BuyTrain(_)
+            | CommandKind::PlaceTrain(_) => {
                 pending.write(PendingWorldCommand {
                     command: command.clone(),
                 });
             }
         }
-    }
-}
-
-fn log_stub_once(name: &'static str) {
-    match name {
-        "BuyTrain" => {
-            static ONCE: Once = Once::new();
-            ONCE.call_once(|| {
-                eprintln!(
-                    "rail_sim: BuyTrain apply stub — economy/train agent should handle PendingWorldCommand"
-                );
-            });
-        }
-        "PlaceTrain" => {
-            static ONCE: Once = Once::new();
-            ONCE.call_once(|| {
-                eprintln!(
-                    "rail_sim: PlaceTrain apply stub — train agent should handle PendingWorldCommand"
-                );
-            });
-        }
-        _ => {}
     }
 }
 

@@ -22,6 +22,15 @@ Calm pixel-art railway sandbox. Design brief: [`DESIGN.md`](./DESIGN.md).
 cargo run -p rail_town
 ```
 
+Default map: **64×64**, seed **42** (`rail_map::DEFAULT_MAP_*` / `MapPlugin::default()`).
+
+### Map controls
+
+| Input | Action |
+| --- | --- |
+| WASD / arrow keys | Pan camera |
+| Mouse scroll | Zoom in / out |
+
 ## Test / check
 
 ```bash
@@ -44,4 +53,5 @@ Steam integration is a **future** optional feature flag (`steam` on `rail_town`)
 
 - Player intents: `rail_sim::commands` (`PlaceTrack`, `Demolish`, …)
 - Stable IDs: `rail_sim::ids`
+- Map / terrain: `rail_map::{MapGrid, generate_map, Tile, TILE_SIZE, tile_to_world, world_to_tile, Portal}`
 - Neighbor backend: `rail_net::{NeighborBackend, NullNeighbor, NeighborService}`

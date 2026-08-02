@@ -4,6 +4,7 @@ use bevy_ecs::prelude::*;
 
 use crate::apply::PendingWorldCommand;
 use crate::commands::{CommandKind, TrainKind};
+use crate::economy::{MoneyCategory, MoneyLedger};
 use crate::ids::{StationId, TileCoord, TrainId};
 use crate::money::Money;
 use crate::stations::StationRegistry;
@@ -30,6 +31,7 @@ pub enum TrainEdit {
 pub fn apply_train_commands(
     mut pending: MessageReader<PendingWorldCommand>,
     mut money: ResMut<Money>,
+    mut ledger: ResMut<MoneyLedger>,
     mut yard: ResMut<TrainYard>,
     stations: Res<StationRegistry>,
     network: Res<TrackNetwork>,
@@ -40,7 +42,10 @@ pub fn apply_train_commands(
         match &msg.command.kind {
             CommandKind::BuyTrain(b) => {
                 let cost = buy_cost(b.kind);
-                if money.try_debit(cost).is_err() {
+                if ledger
+                    .try_debit(&mut money, MoneyCategory::RollingStock, cost)
+                    .is_err()
+                {
                     continue;
                 }
                 let id = yard.buy(b.kind);

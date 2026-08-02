@@ -24,6 +24,7 @@ pub use terrain::TrackTerrain;
 mod tests {
     use super::*;
     use crate::ids::TileCoord;
+    use crate::economy::MoneyLedger;
     use crate::money::Money;
 
     fn land_map(w: u32, h: u32) -> TrackTerrain {
@@ -47,11 +48,13 @@ mod tests {
         let terrain = land_map(8, 8);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(50_000);
+        let mut ledger = MoneyLedger::default();
         let start = money.cents();
 
         let placed = try_place_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 2, y: 3 },
             GROUND_LAYER,
@@ -60,7 +63,7 @@ mod tests {
         assert_eq!(money.cents(), start - TRACK_COST_CENTS);
         assert_eq!(network.len(), 1);
 
-        try_demolish(&mut network, &mut money, placed.id).unwrap();
+        try_demolish(&mut network, &mut money, &mut ledger, placed.id).unwrap();
         assert_eq!(money.cents(), start);
         assert!(network.is_empty());
     }
@@ -70,11 +73,13 @@ mod tests {
         let terrain = land_map(4, 4);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(50_000);
+        let mut ledger = MoneyLedger::default();
 
         assert_eq!(
             try_place_track(
                 &mut network,
                 &mut money,
+            &mut ledger,
                 &terrain,
                 TileCoord { x: 10, y: 0 },
                 GROUND_LAYER,
@@ -85,6 +90,7 @@ mod tests {
             try_place_track(
                 &mut network,
                 &mut money,
+            &mut ledger,
                 &terrain,
                 TileCoord { x: 1, y: 1 },
                 1,
@@ -100,10 +106,12 @@ mod tests {
         let terrain = map_with_water_strip(3);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
 
         let placed = try_place_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 4, y: 2 },
             GROUND_LAYER,
@@ -119,10 +127,12 @@ mod tests {
         let terrain = map_with_water_strip(5);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
 
         let err = try_place_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 5, y: 2 },
             GROUND_LAYER,
@@ -138,11 +148,13 @@ mod tests {
         let terrain = map_with_water_strip(2);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
 
         // Horizontal line across 2-wide water (land at x=2 and x=5).
         let placed = try_autofill_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 2, y: 2 },
             TileCoord { x: 5, y: 2 },
@@ -156,9 +168,11 @@ mod tests {
         let wide = map_with_water_strip(4);
         let mut network2 = TrackNetwork::new();
         let mut money2 = Money::new(500_000);
+        let mut ledger2 = MoneyLedger::default();
         let err = try_autofill_track(
             &mut network2,
             &mut money2,
+            &mut ledger2,
             &wide,
             TileCoord { x: 2, y: 1 },
             TileCoord { x: 7, y: 1 },
@@ -174,10 +188,12 @@ mod tests {
         let terrain = land_map(8, 8);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(50_000);
+        let mut ledger = MoneyLedger::default();
         assert_eq!(
             try_autofill_track(
                 &mut network,
                 &mut money,
+            &mut ledger,
                 &terrain,
                 TileCoord { x: 0, y: 0 },
                 TileCoord { x: 2, y: 1 },
@@ -192,9 +208,11 @@ mod tests {
         let terrain = land_map(8, 8);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(50_000);
+        let mut ledger = MoneyLedger::default();
         let a = try_place_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 1, y: 1 },
             GROUND_LAYER,
@@ -203,6 +221,7 @@ mod tests {
         let b = try_place_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 2, y: 1 },
             GROUND_LAYER,

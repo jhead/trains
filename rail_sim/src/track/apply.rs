@@ -4,6 +4,7 @@ use bevy_ecs::prelude::*;
 
 use crate::apply::PendingWorldCommand;
 use crate::commands::{CommandKind, Demolish, PlaceTrack};
+use crate::economy::MoneyLedger;
 use crate::history::{CommandHistory, HistoryMode};
 use crate::ids::TileCoord;
 use crate::money::Money;
@@ -43,6 +44,7 @@ pub fn apply_track_commands(
     mut pending: MessageReader<PendingWorldCommand>,
     mut network: ResMut<TrackNetwork>,
     mut money: ResMut<Money>,
+    mut ledger: ResMut<MoneyLedger>,
     mut history: ResMut<CommandHistory>,
     terrain: Option<Res<TrackTerrain>>,
     mut edits: MessageWriter<TrackEdit>,
@@ -62,7 +64,14 @@ pub fn apply_track_commands(
     for msg in pending.read() {
         match &msg.command.kind {
             CommandKind::PlaceTrack(p) => {
-                match try_place_track(&mut network, &mut money, &terrain, p.tile, p.layer) {
+                match try_place_track(
+                    &mut network,
+                    &mut money,
+                    &mut ledger,
+                    &terrain,
+                    p.tile,
+                    p.layer,
+                ) {
                     Ok(placed) => {
                         edits.write(TrackEdit::Placed {
                             id: placed.id,
@@ -87,34 +96,37 @@ pub fn apply_track_commands(
                     }
                 }
             }
-            CommandKind::Demolish(d) => match try_demolish(&mut network, &mut money, d.track) {
-                Ok(piece) => {
-                    edits.write(TrackEdit::Removed {
-                        id: piece.id,
-                        tile: piece.tile,
-                        layer: piece.layer,
-                    });
-                    let inverse = CommandKind::PlaceTrack(PlaceTrack {
-                        tile: piece.tile,
-                        layer: piece.layer,
-                    });
-                    if replaying {
-                        history.push_batch_inverse(inverse);
-                    } else {
-                        history.record_player_action(vec![inverse]);
+            CommandKind::Demolish(d) => {
+                match try_demolish(&mut network, &mut money, &mut ledger, d.track) {
+                    Ok(piece) => {
+                        edits.write(TrackEdit::Removed {
+                            id: piece.id,
+                            tile: piece.tile,
+                            layer: piece.layer,
+                        });
+                        let inverse = CommandKind::PlaceTrack(PlaceTrack {
+                            tile: piece.tile,
+                            layer: piece.layer,
+                        });
+                        if replaying {
+                            history.push_batch_inverse(inverse);
+                        } else {
+                            history.record_player_action(vec![inverse]);
+                        }
+                    }
+                    Err(error) => {
+                        edits.write(TrackEdit::Failed {
+                            error,
+                            tile: None,
+                        });
                     }
                 }
-                Err(error) => {
-                    edits.write(TrackEdit::Failed {
-                        error,
-                        tile: None,
-                    });
-                }
-            },
+            }
             CommandKind::AutoFillTrack(a) => {
                 match try_autofill_track(
                     &mut network,
                     &mut money,
+                    &mut ledger,
                     &terrain,
                     a.from,
                     a.to,

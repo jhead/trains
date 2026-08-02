@@ -55,6 +55,7 @@ fn reconstruct(prev: &HashMap<TrackId, TrackId>, from: TrackId, to: TrackId) -> 
 mod tests {
     use super::*;
     use crate::ids::TileCoord;
+    use crate::economy::MoneyLedger;
     use crate::money::Money;
     use crate::track::{try_place_track, TrackTerrain, GROUND_LAYER};
 
@@ -67,11 +68,13 @@ mod tests {
         let terrain = land(8, 8);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
         let mut ids = Vec::new();
         for x in 1..=5 {
             let p = try_place_track(
                 &mut network,
                 &mut money,
+            &mut ledger,
                 &terrain,
                 TileCoord { x, y: 2 },
                 GROUND_LAYER,
@@ -87,6 +90,7 @@ mod tests {
         let _ = try_place_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 2, y: 3 },
             GROUND_LAYER,
@@ -100,9 +104,11 @@ mod tests {
         let terrain = land(8, 8);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
         let a = try_place_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 1, y: 1 },
             GROUND_LAYER,
@@ -111,6 +117,7 @@ mod tests {
         let b = try_place_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 5, y: 5 },
             GROUND_LAYER,

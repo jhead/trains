@@ -1,5 +1,6 @@
 //! Place / demolish / autofill mutations against [`TrackNetwork`] + [`Money`].
 
+use crate::economy::{MoneyCategory, MoneyLedger};
 use crate::ids::{TileCoord, TrackId};
 use crate::money::Money;
 
@@ -47,14 +48,15 @@ pub struct PlacedTrack {
 pub fn try_place_track(
     network: &mut TrackNetwork,
     money: &mut Money,
+    ledger: &mut MoneyLedger,
     terrain: &TrackTerrain,
     tile: TileCoord,
     layer: u8,
 ) -> Result<PlacedTrack, PlacementError> {
     let is_bridge = validate_tile_empty(network, terrain, tile, layer)?;
     let cost = tile_cost(is_bridge);
-    money
-        .try_debit(cost)
+    ledger
+        .try_debit(money, MoneyCategory::Construction, cost)
         .map_err(|_| PlacementError::InsufficientFunds)?;
 
     let height = terrain.height_at(tile).unwrap_or(0);
@@ -83,12 +85,13 @@ pub fn try_place_track(
 pub fn try_demolish(
     network: &mut TrackNetwork,
     money: &mut Money,
+    ledger: &mut MoneyLedger,
     track: TrackId,
 ) -> Result<TrackPiece, PlacementError> {
     let piece = network
         .remove_piece(track)
         .ok_or(PlacementError::UnknownTrack)?;
-    money.credit(piece.paid_cents);
+    ledger.credit(money, MoneyCategory::Construction, piece.paid_cents);
     Ok(piece)
 }
 
@@ -98,6 +101,7 @@ pub fn try_demolish(
 pub fn try_autofill_track(
     network: &mut TrackNetwork,
     money: &mut Money,
+    ledger: &mut MoneyLedger,
     terrain: &TrackTerrain,
     from: TileCoord,
     to: TileCoord,
@@ -119,8 +123,8 @@ pub fn try_autofill_track(
     }
 
     let total: i64 = to_place.iter().map(|(_, b)| tile_cost(*b)).sum();
-    money
-        .try_debit(total)
+    ledger
+        .try_debit(money, MoneyCategory::Construction, total)
         .map_err(|_| PlacementError::InsufficientFunds)?;
 
     let mut placed = Vec::with_capacity(to_place.len());

@@ -4,7 +4,7 @@
 //! (avoids rebuilding unchanged HUD text every frame).
 
 use bevy::prelude::*;
-use rail_sim::{CommandBuffer, CommandKind, Money, SimClock};
+use rail_sim::{CommandBuffer, CommandKind, Money, MoneyLedger, SimClock};
 
 use crate::palette::{BALLAST_L, BG1, HI, OK, OUTLINE, WARN};
 use crate::track::{BuildTool, TrackToolState};
@@ -13,6 +13,7 @@ use crate::ui::kit::{
     body_font, display_font, text_accent, text_primary, text_secondary, FONT_BODY, SPACE_2,
     SPACE_3, STATUS_H,
 };
+use crate::ui::ledger::spawn_ledger_toggle;
 
 #[derive(Component)]
 pub struct StatusStripRoot;
@@ -37,10 +38,7 @@ pub struct StatusStripCache {
     money: String,
     rate: String,
     tool: String,
-    /// Approx net ¢/min from short-window sampling.
     rate_cents_per_min: i64,
-    sample_cents: i64,
-    sample_secs: f64,
 }
 
 pub fn setup_status_strip(mut commands: Commands, money: Res<Money>) {
@@ -50,8 +48,6 @@ pub fn setup_status_strip(mut commands: Commands, money: Res<Money>) {
         rate: "$0/min".into(),
         tool: "Build".into(),
         rate_cents_per_min: 0,
-        sample_cents: money.cents(),
-        sample_secs: 0.0,
     });
 
     commands
@@ -133,15 +129,16 @@ pub fn setup_status_strip(mut commands: Commands, money: Res<Money>) {
                 body_font(),
                 text_primary(),
             ));
+            spawn_ledger_toggle(parent);
         });
 }
 
 pub fn update_status_strip(
     money: Res<Money>,
+    ledger: Res<MoneyLedger>,
     clock: Res<SimClock>,
     tools: Res<TrackToolState>,
     train_tools: Option<Res<TrainToolState>>,
-    time: Res<Time>,
     mut cache: ResMut<StatusStripCache>,
     mut money_q: Query<
         &mut Text,
@@ -171,14 +168,7 @@ pub fn update_status_strip(
     mut speed_btns: Query<(&SpeedButton, &Interaction, &mut BorderColor, &Children), With<Button>>,
     mut child_colors: Query<&mut TextColor, Without<StatusRateText>>,
 ) {
-    // Approximate $/min from a ~5s sample window.
-    cache.sample_secs += time.delta_secs_f64();
-    if cache.sample_secs >= 5.0 {
-        let delta = money.cents() - cache.sample_cents;
-        cache.rate_cents_per_min = ((delta as f64) / cache.sample_secs * 60.0).round() as i64;
-        cache.sample_cents = money.cents();
-        cache.sample_secs = 0.0;
-    }
+    cache.rate_cents_per_min = ledger.net_rate_cents_per_min();
 
     let money_str = format_money(money.cents());
     if money_str != cache.money {

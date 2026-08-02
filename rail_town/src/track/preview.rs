@@ -392,12 +392,15 @@ mod tests {
 
     #[test]
     fn demolish_preview_sums_refunds() {
+        use rail_sim::MoneyLedger;
         let terrain = land(8, 8);
         let mut network = TrackNetwork::new();
         let mut money = Money::new(50_000);
+        let mut ledger = MoneyLedger::default();
         let a = rail_sim::track::try_place_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 2, y: 2 },
             GROUND_LAYER,
@@ -406,6 +409,7 @@ mod tests {
         let _b = rail_sim::track::try_place_track(
             &mut network,
             &mut money,
+            &mut ledger,
             &terrain,
             TileCoord { x: 3, y: 2 },
             GROUND_LAYER,

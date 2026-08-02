@@ -7,6 +7,8 @@ use crate::stations::{IndustryRegistry, StationRegistry, StationService};
 use crate::track::{TrackNetwork, GROUND_LAYER};
 use crate::trains::{track_for_station, TrainCargo, TrainLocation};
 
+use super::ledger::{MoneyCategory, MoneyLedger};
+
 /// Passenger fare on delivery: $5.00.
 pub const PASSENGER_FARE_CENTS: i64 = 500;
 /// Goods delivery payout: $20.00.
@@ -15,6 +17,7 @@ pub const GOODS_DELIVERY_CENTS: i64 = 2_000;
 /// When a train with cargo sits at its path destination, pay out and clear cargo.
 pub fn resolve_deliveries(
     mut money: ResMut<Money>,
+    mut ledger: ResMut<MoneyLedger>,
     stations: Res<StationRegistry>,
     industries: Res<IndustryRegistry>,
     network: Res<TrackNetwork>,
@@ -39,7 +42,7 @@ pub fn resolve_deliveries(
                 if loc.track != dest_track {
                     continue;
                 }
-                money.credit(PASSENGER_FARE_CENTS);
+                ledger.credit(&mut money, MoneyCategory::Fares, PASSENGER_FARE_CENTS);
                 service.record_arrival(to);
                 *cargo = TrainCargo::Empty;
             }
@@ -54,7 +57,7 @@ pub fn resolve_deliveries(
                 if loc.track != dest_track {
                     continue;
                 }
-                money.credit(GOODS_DELIVERY_CENTS);
+                ledger.credit(&mut money, MoneyCategory::Deliveries, GOODS_DELIVERY_CENTS);
                 *cargo = TrainCargo::Empty;
             }
             TrainCargo::Empty => {}
@@ -78,16 +81,19 @@ mod tests {
             .init_resource::<IndustryRegistry>()
             .init_resource::<StationService>()
             .init_resource::<TrackNetwork>()
+            .init_resource::<crate::economy::MoneyLedger>()
             .insert_resource(Money::new(0));
 
         let terrain = TrackTerrain::new(8, 8, (0..64).map(|_| (false, 0i8)));
         let mut network = TrackNetwork::new();
         let mut place_money = Money::new(500_000);
+        let mut place_ledger = crate::economy::MoneyLedger::default();
         let mut ids = Vec::new();
         for x in 1..=4 {
             let p = try_place_track(
                 &mut network,
                 &mut place_money,
+                &mut place_ledger,
                 &terrain,
                 TileCoord { x, y: 2 },
                 GROUND_LAYER,

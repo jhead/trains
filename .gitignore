@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/target/
+
+# Bevy / assets
+*.wasm
+dist/
+.trunk/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Env / secrets
+.env
+.env.*
+
+# Profiling / misc
+flamegraph.svg
+perf.data*
+*.pdb

@@ -214,12 +214,14 @@ fn spawn_shimmer(commands: &mut Commands, tile: TileCoord, height: i8) {
 
 /// One step up the water ramp from the band this tile is drawn in.
 ///
-/// Mirrors the depth bands in `map/spawn.rs` — that module owns terrain, so the
-/// bands are duplicated rather than reached into.
+/// Follows `map::terrain::material::shade_for`'s water table — inland depths
+/// 1/2/3 fill `WATER_L`/`WATER_M`/`WATER_D` and the sea floors out at
+/// `WATER_D` — so the glint is always the next step above its own fill, with
+/// `WATER_F` staying a shallows-only accent (brief 01 §3.2).
 fn shimmer_color(height: i8) -> Color {
     match height {
-        ..=-8 => WATER_M,
-        -7..=-4 => WATER_L,
+        ..=-3 => WATER_M,
+        -2 => WATER_L,
         _ => WATER_F,
     }
 }
@@ -424,9 +426,18 @@ mod tests {
 
     #[test]
     fn shimmer_steps_up_the_water_ramp() {
-        assert_eq!(shimmer_color(-10), WATER_M);
-        assert_eq!(shimmer_color(-5), WATER_L);
-        assert_eq!(shimmer_color(-1), WATER_F);
+        use crate::map::terrain_color;
+        use rail_map::TerrainKind;
+        // The glint is exactly one ramp step above the fill it sits on, at
+        // every depth the terrain table can produce.
+        for (height, glint) in [(-10, WATER_M), (-3, WATER_M), (-2, WATER_L), (-1, WATER_F)] {
+            assert_eq!(shimmer_color(height), glint);
+            assert_ne!(
+                terrain_color(TerrainKind::Water, height),
+                shimmer_color(height),
+                "a glint the colour of its own fill is invisible at {height}"
+            );
+        }
     }
 
     #[test]

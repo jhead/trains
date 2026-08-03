@@ -27,6 +27,10 @@ pub enum AlertKind {
     CashLow,
     /// New settlement / industry still outside the rail network.
     NewDemand,
+    /// A ring of trains each blocked by the next — nothing will ever move
+    /// without more railway. 07 §4.1: congestion must be visible; a silent
+    /// permanent stall is the one failure the player cannot diagnose.
+    Gridlock,
 }
 
 impl AlertKind {
@@ -37,6 +41,7 @@ impl AlertKind {
             Self::TrainsParked => "Trains parked",
             Self::CashLow => "Cash low",
             Self::NewDemand => "New demand",
+            Self::Gridlock => "Gridlock",
         }
     }
 }
@@ -68,6 +73,8 @@ pub enum AlertKey {
     CashLow,
     NewSettlement(StationId),
     NewIndustry(IndustryId),
+    /// Keyed on the smallest train id in the ring, so one ring is one alert.
+    Gridlock(crate::ids::TrainId),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Resource, Serialize, Deserialize)]
@@ -144,6 +151,7 @@ impl AlertBoard {
 }
 
 /// Rebuild active alerts from sim state (idempotent, non-modal).
+#[allow(clippy::too_many_arguments)]
 pub fn refresh_alerts(
     mut board: ResMut<AlertBoard>,
     money: Res<Money>,
@@ -151,6 +159,10 @@ pub fn refresh_alerts(
     service: Res<StationService>,
     network: Res<TrackNetwork>,
     demand: Res<DemandSpawner>,
+    // Optional so a partial world — a save-restore harness, a headless
+    // embedder — can still refresh the rest of the board.
+    occupancy: Option<Res<crate::trains::TileOccupancy>>,
+    watch: Option<ResMut<GridlockWatch>>,
     trains: Query<(&crate::trains::Train, &TrainLocation)>,
 ) {
     let mut active: Vec<AlertKey> = Vec::new();
@@ -265,13 +277,185 @@ pub fn refresh_alerts(
         }
     }
 
+    // A ring of trains each blocked by the next is the one congestion state
+    // that never resolves itself — free-roamers on plain single track have no
+    // passing loop to yield into. The reroute and yield machinery keeps
+    // trying, so a ring that *can* break does; only one that has held for
+    // [`GRIDLOCK_ALERT_TICKS`] is worth interrupting the player about.
+    if let (Some(occupancy), Some(mut watch)) = (occupancy, watch) {
+        gridlock_pass(
+            &mut board,
+            &mut active,
+            &occupancy,
+            &mut watch,
+            &network,
+            &trains,
+        );
+    }
+
     board.retain_keys(&active);
+}
+
+/// The gridlock half of [`refresh_alerts`]; see the comment at its call site.
+fn gridlock_pass(
+    board: &mut AlertBoard,
+    active: &mut Vec<AlertKey>,
+    occupancy: &crate::trains::TileOccupancy,
+    watch: &mut GridlockWatch,
+    network: &TrackNetwork,
+    trains: &Query<(&crate::trains::Train, &TrainLocation)>,
+) {
+    for canonical in gridlock_rings(occupancy) {
+        let now = occupancy.tick;
+        let seen = *watch.since.entry(canonical).or_insert(now);
+        // A new world restarts the tick count; a stale entry from the old one
+        // must not fire instantly.
+        let seen = seen.min(now);
+        watch.since.insert(canonical, seen);
+        if now.saturating_sub(seen) >= GRIDLOCK_ALERT_TICKS {
+            let key = AlertKey::Gridlock(canonical);
+            active.push(key);
+            let focus = trains
+                .iter()
+                .find(|(t, _)| t.id == canonical)
+                .and_then(|(_, loc)| network.piece(loc.track))
+                .map(|p| AlertFocus::Tile(p.tile))
+                .unwrap_or(AlertFocus::Train(canonical));
+            board.upsert(
+                key,
+                AlertKind::Gridlock,
+                "Trains gridlocked - a passing loop or double track frees them".into(),
+                focus,
+            );
+        }
+    }
+    let rings: std::collections::HashSet<TrainId> =
+        gridlock_rings(occupancy).into_iter().collect();
+    watch.since.retain(|id, _| rings.contains(id));
+}
+
+/// Ticks a blocked ring must persist before the alert fires — ten real
+/// seconds, long past any yield cooldown.
+pub const GRIDLOCK_ALERT_TICKS: u64 = 640;
+
+/// First-seen tick per blocked ring, keyed by the ring's smallest train id.
+#[derive(Debug, Default, Resource)]
+pub struct GridlockWatch {
+    since: std::collections::HashMap<TrainId, u64>,
+}
+
+/// Every ring in the blocked-by graph, as its smallest member, ascending.
+///
+/// Walks each blocked train's chain with a visited set; a walk that returns
+/// to a train already on its own path found a cycle. Sorted iteration keeps
+/// the result deterministic.
+fn gridlock_rings(occupancy: &crate::trains::TileOccupancy) -> Vec<TrainId> {
+    let mut starts: Vec<TrainId> = occupancy.blocked_by.keys().copied().collect();
+    starts.sort_unstable_by_key(|t| t.0);
+    let mut rings = Vec::new();
+    for start in starts {
+        let mut path = Vec::new();
+        let mut cur = start;
+        loop {
+            if path.contains(&cur) {
+                // Cycle found; canonicalise on its smallest member so every
+                // entry point into the same ring reports the same ring.
+                let ring_start = path.iter().position(|&t| t == cur).unwrap_or(0);
+                let canonical = path[ring_start..].iter().min_by_key(|t| t.0).copied();
+                if let Some(c) = canonical {
+                    if !rings.contains(&c) {
+                        rings.push(c);
+                    }
+                }
+                break;
+            }
+            path.push(cur);
+            match occupancy.blocked_by.get(&cur) {
+                Some(&next) => cur = next,
+                None => break,
+            }
+            if path.len() > 128 {
+                break;
+            }
+        }
+    }
+    rings
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ids::StationId;
+
+    /// The ring detector: mutual blocks are a ring, chains that end are not,
+    /// and every entry point into one ring reports the same canonical id.
+    #[test]
+    fn a_blocked_ring_is_found_once_and_a_mere_queue_is_not() {
+        let mut occupancy = crate::trains::TileOccupancy::default();
+        // Ring: 3 -> 5 -> 9 -> 3. Queue into it: 12 -> 3. Plain chain: 20 -> 21.
+        occupancy.blocked_by.insert(TrainId(3), TrainId(5));
+        occupancy.blocked_by.insert(TrainId(5), TrainId(9));
+        occupancy.blocked_by.insert(TrainId(9), TrainId(3));
+        occupancy.blocked_by.insert(TrainId(12), TrainId(3));
+        occupancy.blocked_by.insert(TrainId(20), TrainId(21));
+
+        assert_eq!(gridlock_rings(&occupancy), vec![TrainId(3)]);
+    }
+
+    /// The alert waits out the persistence window, then fires; a ring that
+    /// breaks first never interrupts anyone.
+    #[test]
+    fn a_gridlock_alert_waits_and_a_broken_ring_never_fires() {
+        use bevy_app::App;
+        use bevy_ecs::prelude::IntoScheduleConfigs;
+
+        let mut app = App::new();
+        app.init_resource::<AlertBoard>()
+            .init_resource::<GridlockWatch>()
+            .init_resource::<Money>()
+            .init_resource::<StationRegistry>()
+            .init_resource::<StationService>()
+            .init_resource::<TrackNetwork>()
+            .init_resource::<DemandSpawner>()
+            .init_resource::<crate::trains::TileOccupancy>()
+            .add_systems(bevy_app::Update, refresh_alerts.into_configs());
+
+        let ring = |occ: &mut crate::trains::TileOccupancy| {
+            occ.blocked_by.insert(TrainId(1), TrainId(2));
+            occ.blocked_by.insert(TrainId(2), TrainId(1));
+        };
+
+        ring(&mut app.world_mut().resource_mut::<crate::trains::TileOccupancy>());
+        app.update();
+        assert!(
+            app.world().resource::<AlertBoard>().is_empty(),
+            "a fresh ring must not fire instantly"
+        );
+
+        // Still ringed after the window: fire.
+        {
+            let mut occ = app
+                .world_mut()
+                .resource_mut::<crate::trains::TileOccupancy>();
+            occ.tick += GRIDLOCK_ALERT_TICKS;
+        }
+        app.update();
+        let board = app.world().resource::<AlertBoard>();
+        assert_eq!(board.len(), 1);
+        assert_eq!(board.iter().next().unwrap().kind, AlertKind::Gridlock);
+
+        // Ring breaks: the alert clears and the watch forgets.
+        app.world_mut()
+            .resource_mut::<crate::trains::TileOccupancy>()
+            .blocked_by
+            .clear();
+        app.update();
+        assert!(app.world().resource::<AlertBoard>().is_empty());
+        // A new ring must wait the full window again.
+        ring(&mut app.world_mut().resource_mut::<crate::trains::TileOccupancy>());
+        app.update();
+        assert!(app.world().resource::<AlertBoard>().is_empty());
+    }
 
     #[test]
     fn dismiss_suppresses_until_cleared() {

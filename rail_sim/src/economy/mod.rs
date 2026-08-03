@@ -8,8 +8,8 @@ pub mod opex;
 mod payout;
 
 pub use alerts::{
-    refresh_alerts, Alert, AlertBoard, AlertFocus, AlertKind, AlertKey, ALERT_CASH_LOW_MINUTES,
-    ALERT_SERVICE_LOW_SCORE, ALERT_WAITING_OVERWHELMED,
+    refresh_alerts, Alert, AlertBoard, AlertFocus, AlertKind, AlertKey, GridlockWatch,
+    ALERT_CASH_LOW_MINUTES, ALERT_SERVICE_LOW_SCORE, ALERT_WAITING_OVERWHELMED,
 };
 pub use jobs::{
     assign_jobs, drain_peep_demand, spawn_demand_jobs, sync_peep_platform_pressure, Job, JobBoard,

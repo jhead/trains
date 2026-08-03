@@ -153,6 +153,7 @@ impl Plugin for SimPlugin {
             .init_resource::<MoneyLedger>()
             .init_resource::<MaintenanceAccrual>()
             .init_resource::<AlertBoard>()
+            .init_resource::<economy::GridlockWatch>()
             .init_resource::<DemandSpawner>()
             .init_resource::<LineRegistry>()
             .init_resource::<WorldAnchorsSeeded>()

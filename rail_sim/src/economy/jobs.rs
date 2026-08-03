@@ -558,7 +558,7 @@ fn industry_track(
 }
 
 /// The goods platform serving `industry`, lowest [`StationId`] first.
-fn goods_platform_for<'a>(
+pub(crate) fn goods_platform_for<'a>(
     stations: &'a StationRegistry,
     industry: &crate::stations::Industry,
 ) -> Option<&'a crate::stations::Station> {

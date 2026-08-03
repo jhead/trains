@@ -146,7 +146,7 @@ pub fn resolve_deliveries(
                 );
                 service.record_arrival(to);
                 *cargo = TrainCargo::Empty;
-                loc.begin_dwell(train.kind);
+                loc.begin_dwell_at(train.kind, station.tier);
             }
             TrainCargo::Goods { to, from, .. } => {
                 let Some(ind) = industries.get(to) else {
@@ -169,7 +169,13 @@ pub fn resolve_deliveries(
                     goods_delivery_cents(tiles),
                 );
                 *cargo = TrainCargo::Empty;
-                loc.begin_dwell(train.kind);
+                // Loading at a proper goods platform takes its 140%; a bare
+                // railhead against the works falls back to the train's own
+                // dwell.
+                match super::jobs::goods_platform_for(&stations, ind) {
+                    Some(platform) => loc.begin_dwell_at(train.kind, platform.tier),
+                    None => loc.begin_dwell(train.kind),
+                }
             }
             TrainCargo::Empty => {}
         }
@@ -240,6 +246,91 @@ mod tests {
         assert_eq!(haul_tiles(a, b), 16);
         assert_eq!(haul_tiles(b, a), 16);
         assert_eq!(haul_tiles(a, a), 0);
+    }
+
+    /// The tier's dwell percentage reaches the train (04 §6's table): the same
+    /// transit turns around three times faster at an interchange than at a
+    /// halt. Before this, `StationTier::dwell_ticks` had no production caller
+    /// and every platform boarded at the train's own pace.
+    #[test]
+    fn the_platform_grade_sets_the_turnaround() {
+        let dwell_after_arrival_at = |tier: crate::stations::StationTier| -> u16 {
+            let mut app = App::new();
+            app.init_resource::<StationRegistry>()
+                .init_resource::<IndustryRegistry>()
+                .init_resource::<StationService>()
+                .init_resource::<TrackNetwork>()
+                .init_resource::<crate::economy::MoneyLedger>()
+                .insert_resource(Money::new(0));
+
+            let terrain = TrackTerrain::new(8, 8, (0..64).map(|_| (false, 0i8)));
+            let mut network = TrackNetwork::new();
+            let mut place_money = Money::new(500_000);
+            let mut place_ledger = crate::economy::MoneyLedger::default();
+            let mut ids = Vec::new();
+            for x in 1..=4 {
+                let p = try_place_track(
+                    &mut network,
+                    &mut place_money,
+                    &mut place_ledger,
+                    &terrain,
+                    TileCoord { x, y: 2 },
+                    GROUND_LAYER,
+                )
+                .unwrap();
+                ids.push(p.id);
+            }
+            app.insert_resource(network);
+
+            let east;
+            let west;
+            {
+                let mut stations = app.world_mut().resource_mut::<StationRegistry>();
+                east = stations.insert("East", TileCoord { x: 1, y: 2 }, GROUND_LAYER);
+                west =
+                    stations.insert_tier("West", TileCoord { x: 4, y: 2 }, GROUND_LAYER, tier, 0);
+            }
+
+            let dest = *ids.last().unwrap();
+            app.world_mut().spawn((
+                Train {
+                    id: TrainId(1),
+                    kind: TrainKind::Transit,
+                },
+                TrainLocation {
+                    track: dest,
+                    path: ids.clone(),
+                    path_index: ids.len() - 1,
+                    progress: 0,
+                    parked: false,
+                    dwell_remaining: 0,
+                },
+                TrainCargo::Passengers {
+                    from: east,
+                    to: west,
+                },
+            ));
+
+            app.add_systems(bevy_app::Update, resolve_deliveries);
+            app.world_mut().run_schedule(bevy_app::Update);
+
+            app.world_mut()
+                .query::<&TrainLocation>()
+                .iter(app.world())
+                .next()
+                .unwrap()
+                .dwell_remaining
+        };
+
+        let halt = dwell_after_arrival_at(crate::stations::StationTier::Halt);
+        let interchange = dwell_after_arrival_at(crate::stations::StationTier::Interchange);
+        assert!(
+            halt > interchange,
+            "a halt boards slower than an interchange turns around \
+             (halt {halt}, interchange {interchange})"
+        );
+        assert_eq!(halt, 3, "150% of the transit profile's 2 ticks");
+        assert_eq!(interchange, 1, "60% of 2, floored, never zero");
     }
 
     #[test]

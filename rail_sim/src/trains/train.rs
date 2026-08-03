@@ -140,6 +140,14 @@ impl TrainLocation {
     pub fn begin_dwell(&mut self, kind: TrainKind) {
         self.dwell_remaining = TrainProfile::for_kind(kind).dwell_ticks;
     }
+
+    /// Dwell scaled by the platform actually stopped at — an interchange
+    /// turns a train around at 60%, a halt boards at 150%. This is what makes
+    /// a tier a service upgrade rather than a catchment number
+    /// ([`StationTierSpec::dwell_percent`](crate::stations::StationTierSpec)).
+    pub fn begin_dwell_at(&mut self, kind: TrainKind, tier: crate::stations::StationTier) {
+        self.dwell_remaining = tier.dwell_ticks(TrainProfile::for_kind(kind).dwell_ticks);
+    }
 }
 
 /// Train assigned to a player line — prefers line jobs / shuttle over free-roam.

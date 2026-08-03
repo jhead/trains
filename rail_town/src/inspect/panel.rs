@@ -88,6 +88,24 @@ pub(crate) struct InspectorUi<'w, 's> {
     body: inspector_row!('w, 's, InspectorBodyText, InspectorNameText, InspectorTypeText,
         InspectorHeadlineText, InspectorTrendText, InspectorCauseText),
     cause_color: Query<'w, 's, &'static mut TextColor, With<InspectorCauseText>>,
+    cause_jump: Query<'w, 's, &'static mut CauseJump>,
+}
+
+/// Walk one hop up a blocked train's queue: clicking the cause row selects
+/// whatever it names (brief 07 §4.2 — "offers to select that"). Selection
+/// drives the panel, so the next click walks the next hop.
+pub(crate) fn cause_jump_clicks(
+    rows: Query<(&Interaction, &CauseJump), Changed<Interaction>>,
+    mut selection: ResMut<Selection>,
+) {
+    for (interaction, jump) in &rows {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        if let Some(target) = jump.0 {
+            selection.set(target);
+        }
+    }
 }
 
 /// The Inspector's window root.
@@ -183,6 +201,11 @@ pub fn setup_inspector_panel(mut commands: Commands) {
                 ));
                 body.spawn((
                     InspectorCauseText,
+                    // The one row that can be a verb: clicking a blocked
+                    // train's cause selects its blocker, so the chain in
+                    // brief 07 §4.2 is walked a click at a time.
+                    CauseJump(None),
+                    Interaction::default(),
                     Text::new(""),
                     body_font(),
                     text_primary(),
@@ -278,6 +301,9 @@ pub fn update_inspector_panel(
     if let Ok(mut t) = ui.cause.single_mut() {
         *t = Text::new(view.cause);
     }
+    if let Ok(mut jump) = ui.cause_jump.single_mut() {
+        jump.0 = view.cause_jump;
+    }
     if let Ok(mut t) = ui.body.single_mut() {
         *t = Text::new(view.body);
     }
@@ -307,8 +333,15 @@ struct InspectorView {
     trend: String,
     cause: String,
     cause_tone: CauseTone,
+    /// What clicking the cause row selects — the blocker behind a blocked
+    /// train, and nothing for every other view.
+    cause_jump: Option<Selectable>,
     body: String,
 }
+
+/// The cause row's click target (see [`InspectorView::cause_jump`]).
+#[derive(Component)]
+pub(crate) struct CauseJump(pub(crate) Option<Selectable>);
 
 #[allow(clippy::too_many_arguments)]
 fn build_view(
@@ -376,6 +409,7 @@ fn build_view(
                 trend: spark,
                 cause,
                 cause_tone: tone,
+                cause_jump: None,
                 body,
             }
         }
@@ -412,11 +446,18 @@ fn build_view(
                     format!("{} {a} -> {b}", kind.label())
                 }
             };
-            let blocker_line = occupancy
-                .blocked_by
-                .get(&train.id)
-                .map(|b| format!("Blocked by Train {}", b.0))
-                .unwrap_or_else(|| job.clone());
+            // Name the immediate blocker and, when the queue is more than one
+            // deep, where it leads — brief 07 §4.2 wants the chain traceable
+            // in seconds, and each click on the cause row walks one hop.
+            let blocker = occupancy.blocked_by.get(&train.id).copied();
+            let chain_head = rail_sim::blocked_chain_head(&occupancy, train.id);
+            let blocker_line = match (blocker, chain_head) {
+                (Some(b), Some(h)) if h != b => {
+                    format!("Blocked by Train {} - queue heads at Train {}", b.0, h.0)
+                }
+                (Some(b), _) => format!("Blocked by Train {} - click to select", b.0),
+                (None, _) => job.clone(),
+            };
             let tone = match status {
                 "Blocked" | "Parked" => CauseTone::Warn,
                 "Running" => CauseTone::Ok,
@@ -441,6 +482,7 @@ fn build_view(
                 trend: String::new(),
                 cause: blocker_line.clone(),
                 cause_tone: tone,
+                cause_jump: blocker.map(Selectable::Train),
                 body: format!(
                     "{line_note}\nCargo / job\n{job}\n\nPath step {}/{}\n{}",
                     loc.path_index + 1,
@@ -496,6 +538,7 @@ fn build_view(
                 trend: String::new(),
                 cause: cause.clone(),
                 cause_tone: tone,
+                cause_jump: None,
                 body: peep_body(
                     peep,
                     routine,
@@ -531,6 +574,7 @@ fn build_view(
                 trend: String::new(),
                 cause: format!("Consumes {consumes}"),
                 cause_tone: CauseTone::Neutral,
+                cause_jump: None,
                 body: format!(
                     "Produces: {produces}\nConsumes: {consumes}\nLot: {lot} by {lot} tiles\nTile: {}, {}",
                     ind.tile.x, ind.tile.y
@@ -554,6 +598,7 @@ fn build_view(
                 trend: String::new(),
                 cause: format!("Grade {} - Curve {}", piece.max_grade, piece.curve),
                 cause_tone: CauseTone::Neutral,
+                cause_jump: None,
                 body: format!(
                     "Paid: {cost}\nGrade: {}\nCurve: {}\nTile: {}, {} - layer {}",
                     piece.max_grade,
@@ -643,6 +688,7 @@ fn missing(kind: &str, name: String) -> InspectorView {
         trend: String::new(),
         cause: "No longer in the world.".into(),
         cause_tone: CauseTone::Warn,
+        cause_jump: None,
         body: String::new(),
     }
 }
@@ -664,6 +710,42 @@ mod tests {
         app.add_systems(Startup, setup_inspector_panel);
         app.update();
         app
+    }
+
+    /// Brief 07 §4.2 — the cause row is a click target: pressing it selects
+    /// whatever the view offered, and a row with nothing to offer changes
+    /// nothing.
+    #[test]
+    fn clicking_the_cause_row_selects_the_offered_blocker() {
+        let mut app = spawned();
+        app.init_resource::<Selection>();
+        app.add_systems(Update, cause_jump_clicks);
+
+        let row = app
+            .world_mut()
+            .query_filtered::<Entity, With<CauseJump>>()
+            .single(app.world())
+            .expect("the cause row exists");
+
+        // Nothing offered: a press is inert.
+        *app.world_mut().entity_mut(row).get_mut::<Interaction>().unwrap() =
+            Interaction::Pressed;
+        app.update();
+        assert_eq!(app.world().resource::<Selection>().0, None);
+
+        // A blocked train's view offers its blocker.
+        app.world_mut().entity_mut(row).get_mut::<CauseJump>().unwrap().0 =
+            Some(Selectable::Train(rail_sim::ids::TrainId(7)));
+        *app.world_mut().entity_mut(row).get_mut::<Interaction>().unwrap() =
+            Interaction::None;
+        app.update();
+        *app.world_mut().entity_mut(row).get_mut::<Interaction>().unwrap() =
+            Interaction::Pressed;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Selection>().0,
+            Some(Selectable::Train(rail_sim::ids::TrainId(7)))
+        );
     }
 
     /// The Inspector is a window like every other panel, so the manager can

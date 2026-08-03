@@ -13,7 +13,7 @@ use hover::{
     hover_pick, setup_hover, sync_hover_brackets, update_hover_tooltip, HoverProbe, Hovered,
 };
 use outline::{setup_selection_outline, sync_selection_outline};
-use panel::{setup_inspector_panel, update_inspector_panel};
+use panel::{cause_jump_clicks, setup_inspector_panel, update_inspector_panel};
 use selection::{
     follow_selection, sample_service_history, selection_click_input, ServiceScoreHistory,
 };
@@ -52,6 +52,8 @@ impl Plugin for InspectPlugin {
                     // close back into a cleared selection), so this only fills
                     // the rows in.
                     update_inspector_panel,
+                    // After the fill, so a click acts on the row it saw.
+                    cause_jump_clicks.after(update_inspector_panel),
                 ),
             )
             // Hover is the middle tier of interrogation (brief 05 §1): pick,

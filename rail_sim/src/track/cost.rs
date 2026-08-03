@@ -77,12 +77,19 @@ pub fn local_slope(terrain: &TrackTerrain, tile: TileCoord) -> u8 {
 /// | Terrain | Relative |
 /// | --- | --- |
 /// | Flat plains (h≤5, slope≤1) | 1× |
-/// | Gentle slope (h≤5, slope=2) | 1.5× |
-/// | Hills (h≤10, slope≤2) | 3× |
-/// | Steep hillside (h≤10, slope≥3) | 6× |
+/// | Gentle slope (h≤5, slope 2–3) | 1.5× |
+/// | Hills (h≤10, slope≤3) | 3× |
+/// | Steep hillside (h≤10, slope≥4) | 6× |
 /// | High mountain band (h 11..=13) | 10× |
 /// | Bridge by span | 8 / 14 / 20× |
 /// | Cliff / high peak (h≥14) | refused |
+///
+/// The slope bands are cut where the generator's elevation bands actually
+/// land. [02] §2.3 requires every height step to be a drawn edge, so
+/// `rail_map` steps its bands by 3 (a bank) or 4 (`MAX_GRADE`, a cliff face)
+/// and never by 1 or 2. A gentle band that stopped at slope 2 could therefore
+/// never fire on a generated map: Δ3 is the gentle slope, and Δ4 is the
+/// cut-and-fill.
 pub fn tile_build_cost(terrain: &TrackTerrain, tile: TileCoord) -> Result<i64, PlacementError> {
     if !terrain.contains(tile) {
         return Err(PlacementError::OutOfBounds);
@@ -102,8 +109,8 @@ pub fn tile_build_cost(terrain: &TrackTerrain, tile: TileCoord) -> Result<i64, P
     // milli-multiples of base (1000 = 1×) so 1.5× stays exact.
     let millis = match (height, slope) {
         (h, s) if h <= 5 && s <= 1 => 1_000,
-        (h, s) if h <= 5 && s <= 2 => 1_500,
-        (h, s) if h <= 10 && s <= 2 => 3_000,
+        (h, s) if h <= 5 && s <= 3 => 1_500,
+        (h, s) if h <= 10 && s <= 3 => 3_000,
         (h, _) if h <= 10 => 6_000,
         (h, _) if h < MOUNTAIN_HEIGHT_MIN => 10_000, // high mountain band
         _ => return Err(PlacementError::TerrainForbidden),
@@ -150,9 +157,9 @@ mod tests {
         let flat_c = tile_build_cost(&flat, TileCoord { x: 1, y: 1 }).unwrap();
         assert_eq!(flat_c, TRACK_COST_CENTS);
 
-        // Gentle: plains height with slope 2 to a neighbour.
-        let mut gentle_cells = vec![(false, 2i8); 9];
-        gentle_cells[1] = (false, 4); // north of centre → Δh=2
+        // Gentle: plains height stepping a drawn bank (Δ3) up to the hills band.
+        let mut gentle_cells = vec![(false, 4i8); 9];
+        gentle_cells[1] = (false, 7); // north of centre → Δh=3
         let gentle = terrain(&gentle_cells, 3, 3);
         let gentle_c = tile_build_cost(&gentle, TileCoord { x: 1, y: 1 }).unwrap();
         assert_eq!(gentle_c, TRACK_COST_CENTS * 3 / 2);
@@ -162,13 +169,31 @@ mod tests {
         let hills_c = tile_build_cost(&hills, TileCoord { x: 1, y: 1 }).unwrap();
         assert_eq!(hills_c, TRACK_COST_CENTS * 3);
 
-        // Steep hillside: hills height + slope ≥ 3.
+        // Hills crossing a bank stay at the hills rate.
+        let mut banked_cells = vec![(false, 7i8); 9];
+        banked_cells[1] = (false, 10); // Δh=3
+        let banked = terrain(&banked_cells, 3, 3);
+        let banked_c = tile_build_cost(&banked, TileCoord { x: 1, y: 1 }).unwrap();
+        assert_eq!(banked_c, TRACK_COST_CENTS * 3);
+
+        // Steep hillside: a full cliff face, Δ4 = MAX_GRADE, is the cut-and-fill.
         let mut steep_cells = vec![(false, 8i8); 9];
-        steep_cells[1] = (false, 11); // Δh=3 but neighbour is mountain height — still local slope
-        // neighbour height 11 is ok for slope measure; centre is still buildable hills.
+        steep_cells[1] = (false, 12); // Δh=4; neighbour is still below the wall
         let steep = terrain(&steep_cells, 3, 3);
         let steep_c = tile_build_cost(&steep, TileCoord { x: 1, y: 1 }).unwrap();
         assert_eq!(steep_c, TRACK_COST_CENTS * 6);
+
+        // The step up out of a shore apron is Δ4 as well, so it stays cut-and-fill.
+        let mut shore_cells = vec![(false, 0i8); 9];
+        shore_cells[1] = (false, 4); // Δh=4 from band 0 to band 1
+        let shore = terrain(&shore_cells, 3, 3);
+        let shore_c = tile_build_cost(&shore, TileCoord { x: 1, y: 1 }).unwrap();
+        assert_eq!(shore_c, TRACK_COST_CENTS * 6);
+
+        // High mountain band.
+        let alpine = terrain(&[(false, 13); 9], 3, 3);
+        let alpine_c = tile_build_cost(&alpine, TileCoord { x: 1, y: 1 }).unwrap();
+        assert_eq!(alpine_c, TRACK_COST_CENTS * 10);
 
         // Bridge: 3×3 water pocket → min axis span 3 → 20×.
         let bridge3 = TrackTerrain::new(

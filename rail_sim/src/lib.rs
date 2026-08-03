@@ -240,6 +240,9 @@ fn seed_world_anchors_once(
                 && terrain.height_at(c).unwrap_or(0) < crate::track::MOUNTAIN_HEIGHT_MIN
                 && crate::track::local_slope(&terrain, c) <= crate::track::MAX_GRADE + 1
         },
+        // Out-of-bounds reads as water, so bound it: the far bank of a river
+        // is worth seeding, the far side of the map edge is not.
+        |c| terrain.contains(c) && terrain.is_water(c),
         sites.as_ref().map(|s| s.0.as_slice()).unwrap_or(&[]),
     );
     seeded.0 = true;

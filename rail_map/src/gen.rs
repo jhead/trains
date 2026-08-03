@@ -289,7 +289,11 @@ mod tests {
     use crate::grid::{DEFAULT_MAP_HEIGHT, DEFAULT_MAP_SEED, DEFAULT_MAP_WIDTH};
     use crate::measure;
     use crate::options::{MapSize, ResourceSpread, TerrainStyle, WaterStyle};
-    use rail_sim::{MAX_BRIDGE_SPAN, MAX_GRADE, MOUNTAIN_HEIGHT_MIN};
+    use rail_sim::{
+        tile_build_cost, TrackTerrain, MAX_BRIDGE_SPAN, MAX_GRADE, MOUNTAIN_HEIGHT_MIN,
+        TRACK_COST_CENTS,
+    };
+    use std::collections::BTreeMap;
 
     /// Seeds every composition / feature claim is checked against. Six worlds,
     /// not one lucky one.
@@ -675,6 +679,48 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn every_rung_of_the_cost_ladder_occurs_on_a_generated_map() {
+        // A rung the generator never produces is a row of §3.1 that does not
+        // exist, so every one is counted on real terrain rather than trusted
+        // from the table — the 1.5× gentle slope in particular, which is only
+        // reachable because the step above the plains band is Δ3 and the cost
+        // bands are cut to match. Tunnels are not built yet, so the brief's 15×
+        // row has no rung here.
+        const LADDER: [i64; 8] = [1_000, 1_500, 3_000, 6_000, 8_000, 10_000, 14_000, 20_000];
+
+        for seed in SEEDS {
+            let map = generate_map(64, 64, seed);
+            let terrain = TrackTerrain::new(
+                map.width,
+                map.height,
+                map.tiles().iter().map(|t| (t.water, t.height)),
+            );
+            let mut counts = BTreeMap::new();
+            let mut refused = 0usize;
+            for y in 0..64i32 {
+                for x in 0..64i32 {
+                    match tile_build_cost(&terrain, TileCoord { x, y }) {
+                        // Milli-multiples of base, so 1.5× is exact.
+                        Ok(cost) => *counts
+                            .entry(cost * 1_000 / TRACK_COST_CENTS)
+                            .or_insert(0usize) += 1,
+                        Err(_) => refused += 1,
+                    }
+                }
+            }
+
+            for rung in LADDER {
+                assert!(
+                    counts.get(&rung).copied().unwrap_or(0) > 0,
+                    "seed {seed}: nothing on the map costs {}× — realised ladder {counts:?}",
+                    rung as f32 / 1_000.0
+                );
+            }
+            assert!(refused > 0, "seed {seed}: no cliff refuses track at all");
         }
     }
 

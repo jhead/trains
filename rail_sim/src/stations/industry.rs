@@ -207,16 +207,20 @@ impl IndustryRegistry {
 
     /// First industry that produces `good`, if any.
     pub fn producer_of(&self, good: GoodKind) -> Option<&Industry> {
+        // Lowest id, not `values().find()`: HashMap order varies per process,
+        // and which works gets the job is income-affecting state.
         self.industries
             .values()
-            .find(|i| i.produces == Some(good))
+            .filter(|i| i.produces == Some(good))
+            .min_by_key(|i| i.id.0)
     }
 
-    /// First industry that consumes `good`, if any.
+    /// The consumer of `good` with the lowest id, if any.
     pub fn consumer_of(&self, good: GoodKind) -> Option<&Industry> {
         self.industries
             .values()
-            .find(|i| i.consumes == Some(good))
+            .filter(|i| i.consumes == Some(good))
+            .min_by_key(|i| i.id.0)
     }
 }
 

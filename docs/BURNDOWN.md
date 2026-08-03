@@ -134,4 +134,3 @@ Things that work but are known-shallow, with the brief that wants more.
 | **Load is a button, not a screen** | `MenuAction::Load` grabs the newest slot. Named slots, thumbnails (`SaveMeta::with_thumbnail` has no caller) and a list screen are designed in 09 §6. |
 | **Ledger has no per-line breakdown** | 08 §6 wants per-line / per-station contribution and a projection; the ledger is category-level. `MoneyLedger::record` would need a line tag, available at both payout sites. |
 | **Events beyond the stub** | `EventDirector` remains empty. Festival (demand spike) and landslide (temporary closure) are the cheapest two that exercise announce / react / recover (08 §5.2). |
-| **`IndustryRegistry::producer_of`/`consumer_of` iterate a HashMap** | Same nondeterminism hazard the job spawner had; sort or index before anything income-affecting reads them. |

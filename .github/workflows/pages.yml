@@ -1,0 +1,80 @@
+name: Web build
+
+# Builds the wasm and publishes it to GitHub Pages.
+#
+# This is also the only thing that compiles for wasm32, so it is the guard
+# against web-only breakage — `std::time` panicking on wasm and a missing
+# renderer backend were both caught this way and would not fail a native build.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      - name: Install wasm-bindgen-cli
+        # Pinned to whatever `Cargo.lock` resolved, never a floating latest:
+        # the CLI and the crate generate two halves of one interface, and a
+        # mismatch fails at runtime in the browser rather than here.
+        run: |
+          set -euo pipefail
+          version="$(awk '/^name = "wasm-bindgen"$/{f=1} f && /^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.lock)"
+          echo "Cargo.lock wants wasm-bindgen $version"
+          curl -sSfL "https://github.com/rustwasm/wasm-bindgen/releases/download/${version}/wasm-bindgen-${version}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin \
+              "wasm-bindgen-${version}-x86_64-unknown-linux-musl/wasm-bindgen"
+          wasm-bindgen --version
+
+      - name: Build
+        run: cargo build --release --target wasm32-unknown-unknown -p rail_town
+
+      - name: Generate bindings
+        run: |
+          wasm-bindgen --no-typescript --target web \
+            --out-dir dist --out-name rail_town \
+            target/wasm32-unknown-unknown/release/rail_town.wasm
+
+      - name: Assemble the site
+        run: |
+          set -euo pipefail
+          cp web/index.html dist/
+          # Pages runs Jekyll otherwise, which drops files it does not like.
+          touch dist/.nojekyll
+          ls -lh dist
+          printf 'wasm: %s gzipped\n' "$(gzip -c dist/rail_town_bg.wasm | wc -c | numfmt --to=iec)"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -24,16 +24,16 @@ The failure state is a map where the straight line between two points is also th
 
 ### 2.1 Land is the subject; water is punctuation
 
-The world is a **landscape with water in it**, not an ocean with land in it. Target composition for a standard map:
+The world is a **landscape with water in it**, not an ocean with land in it. Target composition for a standard map — revised by playtest (2026-08-02), which found even the original shares read as water-hemmed; the reference is Locomotion/RCT's broad open ground:
 
 | Surface | Share | Role |
 | --- | --- | --- |
-| Buildable land | **70–78%** | where the game happens |
-| Inland water — rivers, lakes | **8–14%** | the primary crossing decision |
-| Sea | **6–12%** | edge framing, harbours, one or two bays that bite inward |
+| Buildable land | **85–92%** | where the game happens |
+| Inland water — rivers, lakes | **4–8%** | the primary crossing decision |
+| Sea | **0–4%, absent from most maps** | a coastal map's framing, when it rolls at all |
 | Impassable rock | **4–8%** | hard walls that force real detours |
 
-Open water carries no gameplay and no information. A map that is 40% flat blue has spent 40% of the player's screen on nothing. Sea belongs at the edges and in bays that intrude far enough to matter, and it earns its place by creating peninsulas — which are natural, legible route problems.
+Open water carries no gameplay and no information. A map that is 40% flat blue has spent 40% of the player's screen on nothing. Sea is **optional**: there is no edge bias pulling borders underwater, and a map is landlocked unless it rolls a coast. When it does, sea belongs at the edges and in bays that intrude far enough to matter, earning its place by creating peninsulas. On the landlocked majority, **elevation carries the routing puzzle** — ridges with passes and valley corridors matter more, not less, than in the original table.
 
 **Rivers are the best terrain feature in the game** and should be generated deliberately rather than falling out of a height threshold. A river is a continuous line the player must cross somewhere, and choosing *where* to cross is a real decision with cost, distance and future-network consequences. Every standard map gets at least one river system with two to four viable crossing points of differing width — a narrow expensive-detour crossing and a wide cheap-detour crossing is a complete design problem on its own.
 
@@ -119,7 +119,7 @@ Scattering the starting anchors to the map's extremes produces the opposite: a l
 - Anchors sit on **buildable, sensible ground** — a station on a beach or wedged against a cliff reads as a bug even when it is legal.
 - Anchors respect a **minimum distance from the map edge**, so there is always room to build around them.
 - Anchor spacing follows a **distribution**, not an extremum: a few close pairs, a few middle-distance, a few far. Uniform spacing and maximal spacing are both wrong; the interesting texture is in the mix.
-- Industries are placed **where their resource makes sense** — a sawmill in forest, a quarry against rock, a harbour on a bay. Placement that reads as logical makes the world feel authored.
+- Industries are placed **where their resource makes sense** — a sawmill in forest, a quarry against rock, a harbour on a bay when the map has a coast (most do not; see §2.1). Placement that reads as logical makes the world feel authored.
 
 ### 4.3 The map grows
 

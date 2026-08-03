@@ -95,7 +95,7 @@ pub fn seed_stations_and_industries_at(
     let targets = pick_spaced(&land, 5, preferred);
     let mut ti = 0usize;
 
-    for (i, name) in STATION_NAMES.iter().take(3).enumerate() {
+    for name in STATION_NAMES.iter().take(3) {
         if ti >= targets.len() {
             break;
         }
@@ -103,7 +103,6 @@ pub fn seed_stations_and_industries_at(
         ti += 1;
         let id = stations.insert(*name, tile, GROUND_LAYER);
         service.ensure(id);
-        let _ = i;
     }
 
     // Sawmill + mill: next two spaced tiles (or fall back to land list).

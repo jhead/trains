@@ -75,7 +75,22 @@ pub fn service_strength(
     best
 }
 
-/// Congestion 0..=1: occupied tile = 1; neighbour of occupied = 0.55.
+/// Congestion 0..=1 — **sustained use**, not a train-position light.
+///
+/// Brief 07 §4.1 asks for "track under sustained heavy use", and the previous
+/// read — 1.0 wherever a train stood this frame, 0.55 beside it — made a
+/// saturated corridor and an empty one identical between trains, with the
+/// tint chasing the trains around. The signal now:
+///
+/// - A **standing train** is 1.0. A queue is the acute symptom and it should
+///   read at full strength.
+/// - A tile **crossed recently** fades from 0.85 over the same
+///   [`memory window`](rail_sim::trains::POLISH_MEMORY_TICKS) the railhead polish
+///   uses. A busy corridor is re-crossed before it can fade, so it holds its
+///   tint; a one-off movement clears in seconds. Recency under a rolling
+///   window *is* duty cycle, which is what "sustained" means here.
+/// - Any other track keeps a **0.06 outline** so the overlay still shows the
+///   network it is scoring.
 pub fn congestion_strength(
     tile: TileCoord,
     network: &TrackNetwork,
@@ -87,28 +102,14 @@ pub fn congestion_strength(
     if occupancy.by_track.contains_key(&id) {
         return 1.0;
     }
-    let mut busy_n = 0u32;
-    for dy in -1..=1 {
-        for dx in -1..=1 {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            let n = TileCoord {
-                x: tile.x + dx,
-                y: tile.y + dy,
-            };
-            if let Some(nid) = network.id_at(n, GROUND_LAYER) {
-                if occupancy.by_track.contains_key(&nid) {
-                    busy_n += 1;
-                }
-            }
+    if let Some(since) = occupancy.ticks_since_crossed(id) {
+        let window = rail_sim::trains::POLISH_MEMORY_TICKS as f32;
+        let freshness = 1.0 - (since as f32 / window).min(1.0);
+        if freshness > 0.0 {
+            return 0.06 + 0.79 * freshness;
         }
     }
-    if busy_n > 0 {
-        0.55
-    } else {
-        0.12
-    }
+    0.06
 }
 
 pub fn density_strength(tile: TileCoord, density: &TownDensity) -> f32 {
@@ -188,6 +189,40 @@ mod tests {
             congestion_strength(TileCoord { x: 4, y: 3 }, &network, &occupancy),
             0.0
         );
+    }
+
+    /// Brief 07 §4.1: the tint reads sustained use — a corridor crossed
+    /// moments ago holds most of its strength, an old crossing has faded to
+    /// the outline, and the tile never flips to zero while it carries track.
+    #[test]
+    fn congestion_fades_with_the_crossing_memory() {
+        let terrain = TrackTerrain::new(8, 8, (0..64).map(|_| (false, 0i8)));
+        let mut network = TrackNetwork::new();
+        let mut money = Money::new(50_000);
+        let mut ledger = MoneyLedger::default();
+        let tile = TileCoord { x: 3, y: 3 };
+        let placed = try_place_track(
+            &mut network,
+            &mut money,
+            &mut ledger,
+            &terrain,
+            tile,
+            GROUND_LAYER,
+        )
+        .expect("place");
+
+        let mut occupancy = TileOccupancy::default();
+        occupancy.last_crossed.insert(placed.id, 0);
+
+        occupancy.tick = 32;
+        let fresh = congestion_strength(tile, &network, &occupancy);
+        occupancy.tick = rail_sim::trains::POLISH_MEMORY_TICKS - 1;
+        let stale = congestion_strength(tile, &network, &occupancy);
+
+        assert!(fresh > 0.7, "a fresh crossing reads hot: {fresh}");
+        assert!(stale < 0.1, "an old crossing has faded: {stale}");
+        assert!(stale >= 0.06, "track never drops below the outline: {stale}");
+        assert!(fresh > stale);
     }
 
     #[test]

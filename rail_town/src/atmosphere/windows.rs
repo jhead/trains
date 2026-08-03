@@ -25,7 +25,7 @@
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
-use super::hash::hash_unit;
+use crate::hash::hash_unit;
 use super::time_of_day::TimeOfDay;
 use crate::town::{BuildingAtlas, BuildingWindows};
 

@@ -48,6 +48,7 @@ use rail_sim::ids::TileCoord;
 use rail_sim::track::{DIR16, DIR_COUNT};
 use rail_sim::{TileOccupancy, TrackEdit, TrackId, TrackNetwork};
 
+use crate::hash::world_hash;
 use crate::palette::{
     BALLAST_D, BALLAST_L, BALLAST_M, RAIL_D, RAIL_L, RAIL_M, RAIL_S, TIE_D, TIE_L, TIE_M, WOOD_D,
     WOOD_M,
@@ -155,24 +156,6 @@ enum Pass {
 }
 
 // ── Baking ─────────────────────────────────────────────────────────────────
-
-/// World-anchored hash (brief 01 §2.4): integer coordinates only, never screen
-/// position and never time.
-///
-/// Same mix as `map::terrain::material::world_hash`; that module is private to
-/// `map`, so it cannot be shared until it is re-exported. The burn-down already
-/// tracks the dedupe.
-fn world_hash(x: i32, y: i32, salt: u32) -> u32 {
-    let mut h = (x as u32)
-        .wrapping_mul(0x9E37_79B9)
-        .wrapping_add((y as u32).wrapping_mul(0x85EB_CA6B))
-        ^ salt.wrapping_mul(0xC2B2_AE35);
-    h ^= h >> 15;
-    h = h.wrapping_mul(0x2545_F491);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0x27D4_EB2F);
-    h ^ (h >> 16)
-}
 
 const VARIANT_SALT: u32 = 0x51A4_C7D3;
 const SPECKLE_SALT: u32 = 0x2C9E_11B7;

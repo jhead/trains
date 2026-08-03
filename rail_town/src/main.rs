@@ -7,6 +7,7 @@
 mod atmosphere;
 mod audio;
 mod border;
+mod hash;
 mod inspect;
 mod lines;
 mod map;

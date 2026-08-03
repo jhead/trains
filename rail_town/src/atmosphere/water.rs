@@ -30,7 +30,7 @@ use bevy::prelude::*;
 use rail_map::{tile_to_world, MapGrid, TILE_SIZE};
 use rail_sim::TileCoord;
 
-use super::hash::{frame_at, hash_offset, hash_phase, world_hash};
+use crate::hash::{frame_at, hash_offset, hash_phase, world_hash};
 use super::{AmbientClock, COAST_FOAM_Z, WATER_DECAL_Z};
 use crate::palette::{WATER_F, WATER_L, WATER_M};
 

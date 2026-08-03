@@ -29,7 +29,6 @@
 //! calm (brief §6.3).
 
 mod bake;
-mod hash;
 mod smoke;
 mod time_of_day;
 mod water;

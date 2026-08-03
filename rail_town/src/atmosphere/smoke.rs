@@ -17,7 +17,7 @@ use rail_map::tile_to_world;
 use rail_sim::TileCoord;
 
 use super::bake::{building_extent, DensityLevels};
-use super::hash::{frame_at, hash_offset, hash_phase};
+use crate::hash::{frame_at, hash_offset, hash_phase};
 use super::{AmbientClock, CHIMNEY_SMOKE_Z};
 use crate::palette::BALLAST_L;
 

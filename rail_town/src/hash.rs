@@ -1,8 +1,9 @@
-//! World-anchored hashing for ambient decoration (brief 01 §2.4).
+//! World-anchored hashing (brief 01 §2.4) — the crate's single implementation.
 //!
-//! Every procedural choice in this module — which water tile glints, where a
-//! window sits, when a chimney puffs — hashes on **integer tile coordinates**
-//! plus a constant salt. Never on screen position, never on time.
+//! Every procedural choice in the presentation — which water tile glints,
+//! where a window sits, which flat variant a tile draws, when a chimney puffs —
+//! hashes on **integer world coordinates** plus a constant salt. Never on
+//! screen position, never on time.
 //!
 //! The `downsample` plate's finding is blunt: screen-anchored noise *boils*
 //! across the whole surface under scroll, while world-anchored noise is fixed
@@ -12,23 +13,23 @@
 //! Hashes here pick a *phase*, and phase is then advanced by a shared clock.
 //! That is what stops four hundred water tiles pulsing in unison.
 
-/// Deterministic 32-bit hash of a tile coordinate and a salt.
+/// Deterministic 32-bit hash of a world coordinate and a salt.
 ///
-/// Mixing is a pair of xorshift-multiply rounds (splitmix-style), which is
-/// enough to decorrelate neighbours — the property that matters, since the
-/// visible failure is a diagonal moiré across adjacent tiles.
+/// The y term is **added**, not xored, into the x term before the finalising
+/// rounds — adding breaks the x==y symmetry that shows up as a diagonal moiré
+/// across adjacent tiles, which is the visible failure mode this exists to
+/// avoid.
 #[inline]
 pub(crate) fn world_hash(x: i32, y: i32, salt: u32) -> u32 {
     let mut h = (x as u32)
         .wrapping_mul(0x9E37_79B9)
-        ^ (y as u32).wrapping_mul(0x85EB_CA6B)
+        .wrapping_add((y as u32).wrapping_mul(0x85EB_CA6B))
         ^ salt.wrapping_mul(0xC2B2_AE35);
     h ^= h >> 15;
     h = h.wrapping_mul(0x2545_F491);
     h ^= h >> 13;
-    h = h.wrapping_mul(0x9E37_79B1);
-    h ^= h >> 16;
-    h
+    h = h.wrapping_mul(0x27D4_EB2F);
+    h ^ (h >> 16)
 }
 
 /// [`world_hash`] mapped to `0.0..1.0`.
@@ -50,7 +51,7 @@ pub(crate) fn hash_offset(x: i32, y: i32, salt: u32, half: i32) -> i32 {
     (world_hash(x, y, salt) % span) as i32 - half
 }
 
-/// Which frame of an `frames`-long loop is showing at `secs`, given `phase`.
+/// Which frame of a `frames`-long loop is showing at `secs`, given `phase`.
 ///
 /// The phase comes from the world hash, so two tiles side by side sit at
 /// different points in the same loop and the surface never pulses as one.
@@ -80,6 +81,21 @@ mod tests {
         for y in 0..64 {
             for x in 0..64 {
                 if world_hash(x, y, 1) == world_hash(x + 1, y, 1) {
+                    matches += 1;
+                }
+            }
+        }
+        assert_eq!(matches, 0);
+    }
+
+    #[test]
+    fn diagonal_is_not_symmetric() {
+        // The adding mix exists so that reflecting across x==y changes the
+        // value; a symmetric hash draws its noise mirrored about the diagonal.
+        let mut matches = 0;
+        for y in 0..64i32 {
+            for x in 0..64i32 {
+                if x != y && world_hash(x, y, 9) == world_hash(y, x, 9) {
                     matches += 1;
                 }
             }

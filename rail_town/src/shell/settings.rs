@@ -437,6 +437,25 @@ impl SettingId {
         }
     }
 
+    /// `Some(fill)` when this row should draw the kit's meter beside its value.
+    ///
+    /// The five volume rows, and only those: a level is a *quantity*, and a
+    /// quantity the player is trying to balance against four others is far
+    /// easier to judge as a bar than as five numbers read one at a time. Every
+    /// other row on every tab is a choice from a short list, where a meter would
+    /// mean nothing.
+    pub fn meter_percent(self, settings: &Settings) -> Option<u32> {
+        let a = &settings.audio;
+        match self {
+            Self::VolumeMaster => Some(a.master),
+            Self::VolumeMusic => Some(a.music),
+            Self::VolumeAmbience => Some(a.ambience),
+            Self::VolumeEffects => Some(a.effects),
+            Self::VolumeUi => Some(a.ui),
+            _ => None,
+        }
+    }
+
     /// `Some(note)` when this row is stored but nothing consumes it yet.
     ///
     /// Delete the arm as each consumer lands — an empty match here is the goal.
@@ -809,5 +828,60 @@ mod tests {
     #[test]
     fn pause_on_alert_is_off_by_default() {
         assert!(!GameplaySettings::default().pause_on_alert);
+    }
+
+    #[test]
+    fn every_bus_has_a_slider_and_nothing_else_does() {
+        // Design 09 §5: master, music, ambience, effects and UI, each with a
+        // level the player can see rather than infer from a number.
+        let settings = Settings::default();
+        let metered: Vec<SettingId> = SettingId::ALL
+            .iter()
+            .copied()
+            .filter(|id| id.meter_percent(&settings).is_some())
+            .collect();
+        assert_eq!(
+            metered,
+            vec![
+                SettingId::VolumeMaster,
+                SettingId::VolumeMusic,
+                SettingId::VolumeAmbience,
+                SettingId::VolumeEffects,
+                SettingId::VolumeUi,
+            ]
+        );
+        for id in &metered {
+            assert_eq!(id.tab(), SettingsTab::Audio, "{id:?} is not an Audio row");
+        }
+    }
+
+    #[test]
+    fn a_slider_reads_the_value_it_is_drawn_beside() {
+        // The bar and the numeral come from one place, so they cannot disagree.
+        let mut settings = Settings::default();
+        SettingId::VolumeMusic.cycle(&mut settings, -1);
+        let percent = SettingId::VolumeMusic
+            .meter_percent(&settings)
+            .expect("music is a slider");
+        assert_eq!(settings.audio.music, percent);
+        assert_eq!(
+            SettingId::VolumeMusic.value_label(&settings),
+            format!("{percent}%")
+        );
+        assert!(percent <= 100, "a meter cannot overfill");
+    }
+
+    #[test]
+    fn no_audio_row_claims_to_be_unwired() {
+        // The honesty rule (§5 / acceptance bar 4) run the other way: every
+        // volume now reaches `audio::AudioMix`, so none of them may still carry
+        // a pending note.
+        for id in SettingId::ALL.iter().filter(|id| id.tab() == SettingsTab::Audio) {
+            assert_eq!(
+                id.pending_note(),
+                None,
+                "{id:?} still says it does nothing"
+            );
+        }
     }
 }

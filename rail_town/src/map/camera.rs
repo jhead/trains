@@ -27,6 +27,8 @@ use bevy::time::Real;
 use bevy::window::PrimaryWindow;
 use rail_map::{map_center_world, MapGrid};
 
+use crate::input::{ControlAction, KeyBindings};
+
 /// Allowed zoom multipliers (screen pixels per world texel). Nothing between or outside.
 pub const ZOOM_FACTORS: [u8; 3] = [1, 2, 3];
 /// Default zoom: 2× (brief 01 §2.1).
@@ -186,9 +188,15 @@ pub fn apply_camera_focus(
     transform.translation.y = target.y.round();
 }
 
+/// Pan on the bound keys, with the arrows as a fixed alternate.
+///
+/// The arrows are deliberately not in the input map: they are the accessible
+/// second route to the same verb (03 §10.3, and the Controls tab says so), and
+/// a player who rebinds `WASD` still expects them to work.
 pub fn camera_pan(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     mut q: Query<&mut Transform, With<MapCamera>>,
 ) {
     let Ok(mut transform) = q.single_mut() else {
@@ -196,17 +204,15 @@ pub fn camera_pan(
     };
 
     let mut dir = Vec2::ZERO;
-    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-        dir.y += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-        dir.y -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        dir.x -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        dir.x += 1.0;
+    for (action, arrow, delta) in [
+        (ControlAction::PanUp, KeyCode::ArrowUp, Vec2::Y),
+        (ControlAction::PanDown, KeyCode::ArrowDown, Vec2::NEG_Y),
+        (ControlAction::PanLeft, KeyCode::ArrowLeft, Vec2::NEG_X),
+        (ControlAction::PanRight, KeyCode::ArrowRight, Vec2::X),
+    ] {
+        if bindings.pressed(&keys, action) || keys.pressed(arrow) {
+            dir += delta;
+        }
     }
 
     if dir != Vec2::ZERO {
@@ -224,6 +230,7 @@ pub fn camera_zoom(
     time: Res<Time<Real>>,
     scroll: Res<AccumulatedMouseScroll>,
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut banked: Local<ZoomScroll>,
     mut q: Query<
@@ -254,7 +261,9 @@ pub fn camera_zoom(
         step = Some(banked.take_key_step(1));
     } else if keys.just_pressed(KeyCode::Minus) || keys.just_pressed(KeyCode::NumpadSubtract) {
         step = Some(banked.take_key_step(-1));
-    } else if keys.just_pressed(KeyCode::KeyZ) {
+    } else if bindings.just_pressed(&keys, ControlAction::ResetZoom) {
+        // Modifier-exact, so `Ctrl+Z` is undo and nothing else: reading the
+        // literal, it used to undo the last build *and* reset the zoom.
         banked.take_key_step(0);
         apply_zoom(
             &mut transform,

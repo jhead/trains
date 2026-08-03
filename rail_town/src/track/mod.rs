@@ -26,6 +26,7 @@ pub struct TrackPlugin;
 impl Plugin for TrackPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TrackToolState>()
+            .init_resource::<crate::input::KeyBindings>()
             .add_systems(Startup, (sync_track_terrain_from_map, setup_build_feedback))
             .add_systems(
                 Update,

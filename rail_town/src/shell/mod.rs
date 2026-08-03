@@ -319,8 +319,13 @@ impl Plugin for ShellPlugin {
                 suppress_world_input
                     .after(InputSystems)
                     .after(menu_keyboard_nav)
+                    .after(settings_panel::capture_rebind)
                     .after(shell_hotkeys)
-                    .run_if(shell_owns_screen),
+                    // Not `shell_owns_screen`: Settings opens *over* play, so
+                    // the state is still `Playing` while it is up. Binding a
+                    // verb to `B` used to arm the track tool on the way past,
+                    // which is a poor way to learn that rebinding now works.
+                    .run_if(shell_menu_visible),
             );
         }
     }
@@ -645,10 +650,10 @@ fn hide_game_hud(
 
 /// Drop keyboard / wheel input before gameplay systems see it.
 ///
-/// Runs last in the shell's `PreUpdate` chain, so shell navigation has already
-/// read what it needs. A key held across the transition back into play needs one
-/// re-press, which is the correct behaviour anyway — nobody expects to still be
-/// panning after closing a menu.
+/// Runs last in the shell's `PreUpdate` chain, so shell navigation — including
+/// a pending rebind — has already read what it needs. A key held across the
+/// transition back into play needs one re-press, which is the correct behaviour
+/// anyway: nobody expects to still be panning after closing a menu.
 fn suppress_world_input(
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
@@ -1092,6 +1097,38 @@ mod tests {
         assert!(
             !keys.pressed(KeyCode::KeyB) && !keys.just_pressed(KeyCode::KeyB),
             "world input is suppressed while the shell owns the screen"
+        );
+    }
+
+    #[test]
+    fn a_rebind_press_does_not_also_arm_the_tool_it_binds() {
+        // Settings opens *over* play, so the state is still `Playing` while it
+        // is up. Pressing `B` to bind a verb has to reach the capture and stop
+        // there — otherwise the player arms the track tool every time they
+        // rebind something to it, which makes rebinding feel broken precisely
+        // now that it works.
+        let mut app = test_app();
+        app.update();
+        go_to(&mut app, ShellState::Playing);
+        {
+            let mut panel = app.world_mut().resource_mut::<SettingsPanel>();
+            panel.open_from(ShellState::Playing);
+            panel.rebinding = Some(controls::ControlAction::MapView);
+        }
+        press(&mut app, KeyCode::KeyB);
+
+        assert_eq!(
+            app.world()
+                .resource::<Settings>()
+                .controls
+                .key_for(controls::ControlAction::MapView),
+            controls::Binding::key(KeyCode::KeyB),
+            "the rebind captured the key"
+        );
+        let keys = app.world().resource::<ButtonInput<KeyCode>>();
+        assert!(
+            !keys.just_pressed(KeyCode::KeyB),
+            "and nothing downstream of the panel saw the same press"
         );
     }
 

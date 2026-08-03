@@ -23,6 +23,7 @@ use crate::map::MapViewState;
 
 use super::bank::SfxBank;
 use super::mixer::{gain, play, AudioClock, AudioMix, Cue, Duck, VoiceBudget};
+use super::UiCue;
 
 /// Aggregation window for money. Long enough that a busy network chimes on a
 /// human rhythm, short enough that a payout still feels like a response.
@@ -36,26 +37,6 @@ const ALERT_COOLDOWN_SECS: f32 = 6.0;
 
 /// Minimum spacing between interface clicks.
 const CLICK_COOLDOWN_SECS: f32 = 0.05;
-
-/// Interface sounds any module may request.
-///
-/// This is the module's only inbound API. Panels, toggles and milestones are
-/// owned by the slices that draw them, so they ask rather than being watched.
-#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
-// Constructed by the slices that own panels and toggles, not by this module.
-#[allow(dead_code)]
-pub enum UiCue {
-    /// A soft low tick.
-    Click,
-    /// A brief airy sweep, up.
-    PanelOpen,
-    /// The same sweep, down.
-    PanelClose,
-    ToggleOn,
-    ToggleOff,
-    /// The one genuinely warm moment. Rare enough to stay special.
-    Milestone,
-}
 
 #[derive(Resource, Debug)]
 pub struct UiAudio {

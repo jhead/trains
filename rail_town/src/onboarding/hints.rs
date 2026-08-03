@@ -69,7 +69,9 @@ impl Hint {
             // Rails *at* two stops, not necessarily joined: the check is per
             // stop, and a hint must never claim more than it knows.
             Self::Train => "Rails at two stops. T buys a train.",
-            Self::Ledger => "Earning less than it costs. L for why.",
+            // `K`, not `L` — the Line tool owns `L` (03 §10.2), and this line
+            // pointed at the wrong key for as long as the two shared it.
+            Self::Ledger => "Earning less than it costs. K for why.",
         }
     }
 }

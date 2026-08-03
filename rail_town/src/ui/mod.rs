@@ -21,7 +21,9 @@
 //! | [`town_talk`], [`ledger`], [`alerts`] | Windows drawn here |
 //! | [`adapters`] | Windows drawn elsewhere (Goals, Neighbours, Inspector) |
 //!
-//! Sound lives in the `audio` module, not here.
+//! Sound lives in the `audio` module, not here. The one thing this module says
+//! about it is [`window::panel_cues`], which turns the open / close of any panel
+//! into a single `audio::UiCue` from the one place visibility flips.
 //!
 //! # Cost
 //!
@@ -59,8 +61,8 @@ use health::{
 use kit::pointer_blocks_world;
 use ledger::{setup_ledger_ui, update_ledger_panel};
 use menu_bar::{
-    inject_synthetic_keys, menu_row_clicks, setup_top_chrome, update_menu_row, window_hotkeys,
-    SyntheticKeys,
+    inject_synthetic_keys, menu_row_clicks, refresh_menu_key_labels, setup_top_chrome,
+    update_menu_row, window_hotkeys, SyntheticKeys,
 };
 use status_strip::{
     advance_calendar, alert_bell_clicks, speed_button_clicks, update_speed_buttons,
@@ -69,8 +71,8 @@ use status_strip::{
 use town_talk::{refresh_town_talk_rows, setup_town_talk_ui, town_talk_clicks};
 use undo::undo_redo_input;
 use window::{
-    apply_window_layout, close_top_window_on_escape, dress_new_windows, drag_windows,
-    raise_clicked_window, update_window_chrome, window_close_clicks,
+    apply_window_layout, close_top_window_on_escape, dress_new_windows, drag_windows, panel_cues,
+    raise_clicked_window, update_window_chrome, window_close_clicks, PanelCueWatch,
 };
 
 pub use window::{UiWindow, WindowEscSet, WindowId, WindowManager};
@@ -84,6 +86,7 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiBlocksWorld>()
+            .init_resource::<crate::input::KeyBindings>()
             .insert_resource(WindowManager::new())
             .init_resource::<NetworkHealth>()
             .init_resource::<GameCalendar>()
@@ -91,6 +94,10 @@ impl Plugin for UiPlugin {
             .init_resource::<SyntheticKeys>()
             .init_resource::<GoalsIntroduced>()
             .init_resource::<InspectorLink>()
+            .init_resource::<PanelCueWatch>()
+            // `panel_cues` writes one whether or not `AudioPlugin` was added.
+            // Registration is idempotent, so the audio plugin still owns it.
+            .add_message::<crate::audio::UiCue>()
             // `Esc` must reach a window before it reaches the pause menu, and a
             // synthetic key must land before anything reads `just_pressed`.
             // Both belong in `PreUpdate`, after real input has been gathered.
@@ -124,6 +131,9 @@ impl Plugin for UiPlugin {
                     introduce_goals_window,
                     apply_window_layout,
                     update_window_chrome,
+                    // Last in the chain: every flip this frame has landed, so
+                    // the sweep is one cue for what the player actually did.
+                    panel_cues,
                 )
                     .chain(),
             )
@@ -140,6 +150,7 @@ impl Plugin for UiPlugin {
                     update_menu_row,
                     menu_row_clicks,
                     window_hotkeys,
+                    refresh_menu_key_labels,
                 ),
             )
             // Network health: model on a timer, strip and window from signatures.

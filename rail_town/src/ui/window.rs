@@ -27,10 +27,18 @@
 //! when it closes a window, *consumes* the key press so nothing downstream also
 //! fires. That is how a window can never trap the player and can never
 //! accidentally pause the game on the way out.
+//!
+//! # Sound
+//!
+//! Design 10 §5 gives panel open and close a brief airy sweep. It is emitted
+//! **once, here** ([`panel_cues`]), not by each panel: this resource is the one
+//! place a panel's visibility actually flips, so a window that spawns, despawns
+//! and respawns its own body cannot chatter, and a new window costs nothing.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
+use crate::audio::UiCue;
 use crate::palette::{BALLAST_L, BG0, BG1, HI, OUTLINE};
 use crate::ui::kit::{
     control_border, cursor_to_ui, micro_font, panel_node, screen_to_ui, text_accent,
@@ -563,6 +571,91 @@ pub fn close_top_window_on_escape(
     keys.clear_just_pressed(KeyCode::Escape);
 }
 
+/// Every panel that is up, in one comparable value.
+///
+/// The Settings overlay is a shell resource rather than a [`WindowId`], and it
+/// is the only panel in the game the manager does not own — so it rides along
+/// here rather than getting a second, near-identical system elsewhere.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PanelsOpen {
+    windows: Vec<WindowId>,
+    settings: bool,
+}
+
+impl PanelsOpen {
+    fn opened_since(&self, before: &Self) -> bool {
+        (self.settings && !before.settings)
+            || self.windows.iter().any(|id| !before.windows.contains(id))
+    }
+
+    fn closed_since(&self, before: &Self) -> bool {
+        (!self.settings && before.settings)
+            || before.windows.iter().any(|id| !self.windows.contains(id))
+    }
+}
+
+/// The one cue a frame's worth of change is worth — design 10 §5's sweep.
+///
+/// **At most one, and opening wins.** Opening B while A is already up is one
+/// opening, not a close and two opens. A panel that *replaces* another closes
+/// and opens in the same frame and is still one opening, because that is what
+/// the player did. Anything else turns a click into a chord, and §1's first
+/// rule is never to startle.
+fn cue_for(before: &PanelsOpen, after: &PanelsOpen) -> Option<UiCue> {
+    if after.opened_since(before) {
+        Some(UiCue::PanelOpen)
+    } else if after.closed_since(before) {
+        Some(UiCue::PanelClose)
+    } else {
+        None
+    }
+}
+
+/// What was on screen last frame, so [`panel_cues`] can spot the change.
+#[derive(Resource, Debug, Default)]
+pub struct PanelCueWatch {
+    last: PanelsOpen,
+    /// The first frame records rather than announces: a panel that was already
+    /// up is not a panel the player just opened.
+    seeded: bool,
+}
+
+/// Every panel's open and close sweep, from the one place visibility flips.
+///
+/// This diffs state rather than listening for events, so a cue can be a frame
+/// late but can never be *missed* — including for a window opened by code that
+/// had no idea sound existed, which is exactly the failure this replaces.
+///
+/// `SettingsPanel` is optional because `ui` runs headless in tests with no
+/// shell.
+pub fn panel_cues(
+    manager: Res<WindowManager>,
+    settings: Option<Res<crate::shell::SettingsPanel>>,
+    mut watch: ResMut<PanelCueWatch>,
+    mut cues: MessageWriter<UiCue>,
+) {
+    let now = PanelsOpen {
+        windows: WindowId::ALL
+            .iter()
+            .copied()
+            .filter(|id| manager.is_open(*id))
+            .collect(),
+        settings: settings.as_deref().is_some_and(|panel| panel.open),
+    };
+    if !watch.seeded {
+        watch.last = now;
+        watch.seeded = true;
+        return;
+    }
+    if now == watch.last {
+        return;
+    }
+    if let Some(cue) = cue_for(&watch.last, &now) {
+        cues.write(cue);
+    }
+    watch.last = now;
+}
+
 /// Colours referenced by the chrome, kept live for the palette audit.
 #[allow(dead_code)]
 fn _palette_parity() -> [Color; 4] {
@@ -631,6 +724,84 @@ mod tests {
         m.toggle(WindowId::Neighbours);
         assert!(!m.is_open(WindowId::Neighbours));
         assert!(m.top().is_none());
+    }
+
+    /// The open set for a manager, as [`panel_cues`] builds it.
+    fn panels(manager: &WindowManager, settings: bool) -> PanelsOpen {
+        PanelsOpen {
+            windows: WindowId::ALL
+                .iter()
+                .copied()
+                .filter(|id| manager.is_open(*id))
+                .collect(),
+            settings,
+        }
+    }
+
+    #[test]
+    fn opening_and_closing_a_panel_each_sweep_once() {
+        let mut m = WindowManager::new();
+        let closed = panels(&m, false);
+        m.open(WindowId::Ledger);
+        let one_open = panels(&m, false);
+        assert_eq!(cue_for(&closed, &one_open), Some(UiCue::PanelOpen));
+        assert_eq!(cue_for(&one_open, &closed), Some(UiCue::PanelClose));
+        assert_eq!(cue_for(&one_open, &one_open), None, "an idle frame is silent");
+    }
+
+    #[test]
+    fn opening_a_second_panel_does_not_also_play_a_close() {
+        // The brief's rule restated: B opening over A is one sweep, not
+        // close-open-open. A chord where a click belongs is a startle.
+        let mut m = WindowManager::new();
+        m.open(WindowId::Ledger);
+        let before = panels(&m, false);
+        m.open(WindowId::TownTalk);
+        assert_eq!(cue_for(&before, &panels(&m, false)), Some(UiCue::PanelOpen));
+    }
+
+    #[test]
+    fn a_panel_replacing_another_is_one_opening() {
+        // Both flips land in the same frame; the player opened something, so
+        // that is what they hear.
+        let mut m = WindowManager::new();
+        m.open(WindowId::Ledger);
+        let before = panels(&m, false);
+        m.close(WindowId::Ledger);
+        m.open(WindowId::Alerts);
+        assert_eq!(cue_for(&before, &panels(&m, false)), Some(UiCue::PanelOpen));
+    }
+
+    #[test]
+    fn raising_a_window_is_not_an_opening() {
+        // Stacking order is not visibility. Clicking between two open windows
+        // must be silent.
+        let mut m = WindowManager::new();
+        m.open(WindowId::Ledger);
+        m.open(WindowId::TownTalk);
+        let before = panels(&m, false);
+        m.raise(WindowId::Ledger);
+        assert_eq!(cue_for(&before, &panels(&m, false)), None);
+    }
+
+    #[test]
+    fn the_settings_overlay_sweeps_like_any_other_panel() {
+        // It is the one panel the manager does not own, and it is still a panel.
+        let m = WindowManager::new();
+        let shut = panels(&m, false);
+        let up = panels(&m, true);
+        assert_eq!(cue_for(&shut, &up), Some(UiCue::PanelOpen));
+        assert_eq!(cue_for(&up, &shut), Some(UiCue::PanelClose));
+    }
+
+    #[test]
+    fn closing_the_last_of_several_still_closes() {
+        let mut m = WindowManager::new();
+        m.open(WindowId::Ledger);
+        m.open(WindowId::Goals);
+        let before = panels(&m, false);
+        m.close(WindowId::Goals);
+        assert_eq!(cue_for(&before, &panels(&m, false)), Some(UiCue::PanelClose));
     }
 
     #[test]

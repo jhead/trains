@@ -41,6 +41,7 @@ impl Plugin for MapPlugin {
     fn build(&self, app: &mut App) {
         let grid = generate_map(self.width, self.height, self.seed);
         app.insert_resource(grid)
+            .init_resource::<crate::input::KeyBindings>()
             .init_resource::<CameraFocusRequest>()
             .init_resource::<MapViewState>()
             .init_resource::<TerrainDirty>()

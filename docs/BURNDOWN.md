@@ -80,6 +80,15 @@ Design: [`docs/design/12-multiplayer.md`](design/12-multiplayer.md). MP-1 requir
 | Buildings too small, no hover | Atlas cell 16x32 -> 24x48, silhouettes redrawn to be separable at a glance. Hover highlight + tooltip added, reusing the click hit test. |
 | Peeps walk through water | A* over walkable ground, 4-neighbour so a diagonal cannot cut a river corner. Bridges are walkable; cliffs and mountains are not. |
 
+## Input, audio and panel sound (2026-08-02)
+
+| Item | What landed |
+| --- | --- |
+| Controls rebinding is consumed | `input::KeyBindings` is the live map. Every player-facing verb — tools, station place / upgrade, camera, speed, undo / redo, overlays, Map View, follow, and all six window keys — reads `bindings.just_pressed(&keys, action)` instead of a `KeyCode` literal, and `InputMapPlugin` copies `Settings::controls` in on `PreStartup` and on every change. The menu row draws its shortcuts from the same resource, so a rebind is visible where the verb is. A modifier is now part of a press as well as of a binding, which incidentally stopped `Ctrl+Z` from also resetting the zoom. |
+| The `L` conflict | Gone. The Line tool keeps `L` and the **Ledger answers to `K`** (03 §10.2, which already said so while `shell::controls` was the stale copy). The window keys are their own Controls group, and a test asserts the whole default table is conflict-free and that no window key is also a gameplay verb. |
+| Audio settings UI | The five bus rows on the Audio tab draw the kit's meter beside their numeral — the pixel-UI slider (03 §8.4), `hi` fill rather than the diagnostic ramp, since a quiet music bus is a preference and not a fault. `mixer::apply_settings` slews the buses toward the stored values every frame, so a change is audible while the panel is still open. |
+| Panel UI cues | `audio::UiCue` moved outside the `sfx` gate, and `ui::window::panel_cues` emits the open / close sweep from the one place panel visibility flips — the window manager, plus the Settings overlay, which is the only panel it does not own. At most one cue a frame, and opening wins: a panel replacing another is one opening, not a chord. |
+
 ## Carried debt
 
 Things that work but are known-shallow, with the brief that wants more.
@@ -92,10 +101,7 @@ Things that work but are known-shallow, with the brief that wants more.
 | **Seed sharing no longer reproduces a world** | Options now steer the generator for real, but `rail_sim::save::MapGenOptions` is still a bare version tag and does not record the knobs — so a save says *that* a world was generated, not *how*. Needs a `knobs: u8` field (`rail_map::MapGenOptions::pack()`) plus a `SCHEMA_VERSION` bump. |
 | **Save has three hand-written mirrors** | `ServiceScoreSnapshot`/`StationServiceScore`, `ClockSnapshot`/`SimClock`, `BudgetSnapshot`/`PeepBudget` restore with `..Default::default()`. A new field on the source type **compiles and is silently not saved**. Bump `SCHEMA_VERSION` on any blob-shape change. |
 | **Gameplay plugins aren't state-gated** | They register systems without a named `SystemSet`, so `main.rs` cannot retro-fit `run_if(in_state(Playing))`. The shell gates by pointer-blocking and input suppression instead, which works. Real gating is one `.in_set(...)` edit per plugin file. |
-| **Controls rebinding is stored, not consumed** | Gameplay systems read `KeyCode` literals. The Settings tab says so rather than implying otherwise. There is a real `L` conflict between Line tool and Ledger. |
 | **Map View downsamples world sprites** | Now that terrain is textured, nearest-sampling a 4-texel/tile view will alias. Briefs 01 §2.1 and 02 §6 want a purpose-built schematic render, not a downscaled world. |
-| **Audio has no settings UI** | `AudioMix` exposes master/music/ambience/effects/UI as public fields ready for sliders; nothing writes them yet. |
-| **Panel UI cues aren't wired** | Clips exist behind a public `audio::UiCue` message; each panel owner adds one write. Map View, buttons, alerts and money fire today. |
 | **Station demolish refuses when a line calls there** | Brief 04 §4 wants a confirm dialog naming the consequence. Needs `LineRegistry::remove_stop`. |
 | **Goods platforms against industries** | Brief 04 §6 last line. `Industry` has no tier. |
 | **Peep resources not reset on New Map** | `PeepSpawnState`, `HouseholdRegistry`, `DistrictFlow`, `PeepBudget`, `PeepFocus` aren't publicly re-exported, so the shell can't clear them. Low risk — peeps respawn per station. |

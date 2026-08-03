@@ -4,14 +4,19 @@
 //! rebindable list, grouped by context, with conflict detection and a reset", and
 //! [`03 §10.2`](../../../docs/design/03-ui-system.md) is the shortcut table.
 //!
-//! **What this is today:** the *authoritative list and data model*. Defaults are
-//! read out of the shipping code — every row below is a key some system really
-//! listens for — so the Controls tab is an accurate reference, and the conflict
-//! detector reports real conflicts rather than invented ones. Gameplay systems
-//! still read [`KeyCode`] directly, so a rebound key does not yet change what the
-//! game listens for; that arrives with the input-map slice, at which point those
-//! systems read [`ControlSettings::key_for`] instead of a literal. The tab says
-//! this plainly rather than pretending otherwise.
+//! **What this is:** the *authoritative table* — what each verb is called, which
+//! group it belongs to, what it defaults to, and how it persists. Defaults are
+//! read out of the shipping code, so the Controls tab is an accurate reference
+//! and the conflict detector reports real conflicts rather than invented ones.
+//!
+//! The *live* half is [`crate::input::KeyBindings`], which adopts this map
+//! whenever it changes; gameplay systems look actions up there instead of
+//! reading a [`KeyCode`] literal. A rebind therefore reaches the game.
+//!
+//! **`L` used to be listed twice.** The Line tool owns it (03 §10.2), so the
+//! Ledger answers to `K` — which is what the menu row and the brief's shortcut
+//! table already said, while this file was still the stale one. A test asserts
+//! the defaults are conflict-free.
 
 use bevy::prelude::*;
 
@@ -23,28 +28,39 @@ pub enum ControlGroup {
     Build,
     Time,
     View,
+    Windows,
     System,
 }
 
 impl ControlGroup {
-    pub const ALL: &'static [Self] = &[Self::Build, Self::Time, Self::View, Self::System];
+    pub const ALL: &'static [Self] = &[
+        Self::Build,
+        Self::Time,
+        Self::View,
+        Self::Windows,
+        Self::System,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Build => "Build & edit",
             Self::Time => "Time",
             Self::View => "View",
+            Self::Windows => "Windows",
             Self::System => "System",
         }
     }
 }
 
 /// One rebindable action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ControlAction {
+    LookTool,
     TrackTool,
     DemolishTool,
     LineTool,
+    PlaceStation,
+    UpgradeStation,
     BuyTransit,
     BuyTransport,
     CommitLine,
@@ -66,7 +82,12 @@ pub enum ControlAction {
     OverlayOff,
     FollowSelection,
     ResetZoom,
+    WindowNetwork,
+    WindowTownTalk,
     Ledger,
+    WindowAlerts,
+    WindowGoals,
+    WindowNeighbours,
     Unwind,
 }
 
@@ -116,9 +137,12 @@ impl Binding {
 impl ControlAction {
     /// Every action, in the order the Controls tab lists them.
     pub const ALL: &'static [Self] = &[
+        Self::LookTool,
         Self::TrackTool,
         Self::DemolishTool,
         Self::LineTool,
+        Self::PlaceStation,
+        Self::UpgradeStation,
         Self::BuyTransit,
         Self::BuyTransport,
         Self::CommitLine,
@@ -140,15 +164,23 @@ impl ControlAction {
         Self::OverlayOff,
         Self::FollowSelection,
         Self::ResetZoom,
+        Self::WindowNetwork,
+        Self::WindowTownTalk,
         Self::Ledger,
+        Self::WindowAlerts,
+        Self::WindowGoals,
+        Self::WindowNeighbours,
         Self::Unwind,
     ];
 
     pub fn group(self) -> ControlGroup {
         match self {
-            Self::TrackTool
+            Self::LookTool
+            | Self::TrackTool
             | Self::DemolishTool
             | Self::LineTool
+            | Self::PlaceStation
+            | Self::UpgradeStation
             | Self::BuyTransit
             | Self::BuyTransport
             | Self::CommitLine
@@ -167,15 +199,24 @@ impl ControlAction {
             | Self::OverlayOff
             | Self::FollowSelection
             | Self::ResetZoom => ControlGroup::View,
-            Self::Ledger | Self::Unwind => ControlGroup::System,
+            Self::WindowNetwork
+            | Self::WindowTownTalk
+            | Self::Ledger
+            | Self::WindowAlerts
+            | Self::WindowGoals
+            | Self::WindowNeighbours => ControlGroup::Windows,
+            Self::Unwind => ControlGroup::System,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::LookTool => "Look tool",
             Self::TrackTool => "Track tool",
             Self::DemolishTool => "Demolish tool",
             Self::LineTool => "Line tool",
+            Self::PlaceStation => "Station tool",
+            Self::UpgradeStation => "Upgrade station",
             Self::BuyTransit => "Buy transit train",
             Self::BuyTransport => "Buy transport train",
             Self::CommitLine => "Commit line",
@@ -197,17 +238,29 @@ impl ControlAction {
             Self::OverlayOff => "Overlay: off",
             Self::FollowSelection => "Follow selection",
             Self::ResetZoom => "Reset zoom",
+            Self::WindowNetwork => "Network",
+            Self::WindowTownTalk => "Town Talk",
             Self::Ledger => "Ledger",
+            Self::WindowAlerts => "Alerts",
+            Self::WindowGoals => "Goals",
+            Self::WindowNeighbours => "Neighbours",
             Self::Unwind => "Unwind / pause menu",
         }
     }
 
     /// The key this action really uses in the shipping build.
+    ///
+    /// The window group is 03 §10.2's second row, and it deliberately avoids
+    /// every key a gameplay verb owns — which is why the Ledger is `K` and not
+    /// `L`. A test asserts the whole table is conflict-free.
     pub fn default_binding(self) -> Binding {
         match self {
+            Self::LookTool => Binding::key(KeyCode::KeyV),
             Self::TrackTool => Binding::key(KeyCode::KeyB),
             Self::DemolishTool => Binding::key(KeyCode::KeyX),
             Self::LineTool => Binding::key(KeyCode::KeyL),
+            Self::PlaceStation => Binding::key(KeyCode::KeyP),
+            Self::UpgradeStation => Binding::key(KeyCode::KeyU),
             Self::BuyTransit => Binding::key(KeyCode::KeyT),
             Self::BuyTransport => Binding::key(KeyCode::KeyG),
             Self::CommitLine => Binding::key(KeyCode::Enter),
@@ -229,7 +282,12 @@ impl ControlAction {
             Self::OverlayOff => Binding::key(KeyCode::F4),
             Self::FollowSelection => Binding::key(KeyCode::KeyF),
             Self::ResetZoom => Binding::key(KeyCode::KeyZ),
-            Self::Ledger => Binding::key(KeyCode::KeyL),
+            Self::WindowNetwork => Binding::key(KeyCode::KeyH),
+            Self::WindowTownTalk => Binding::key(KeyCode::KeyY),
+            Self::Ledger => Binding::key(KeyCode::KeyK),
+            Self::WindowAlerts => Binding::key(KeyCode::KeyC),
+            Self::WindowGoals => Binding::key(KeyCode::KeyO),
+            Self::WindowNeighbours => Binding::key(KeyCode::KeyN),
             Self::Unwind => Binding::key(KeyCode::Escape),
         }
     }
@@ -324,12 +382,31 @@ impl ControlSettings {
             let fallback = action.default_binding().storage_name();
             let stored = doc.str(&action.storage_key(), &fallback);
             if let Some(binding) = Binding::from_storage_name(stored) {
+                if RETIRED_DEFAULTS.contains(&(*action, binding)) {
+                    continue;
+                }
                 settings.set(*action, binding);
             }
         }
         settings
     }
 }
+
+/// Bindings that used to be a default and may not come back off disk.
+///
+/// The Ledger shipped on `L`, which the Line tool also owns. Every profile
+/// written before the fix has `controls_Ledger: "KeyL"` in it, so without this
+/// the clash would simply reload — and the Controls tab would flag a conflict
+/// the player never chose. A stored value that is *exactly* the retired default
+/// is read as unset; every other stored value is the player's own and is
+/// honoured, conflict or not.
+///
+/// The cost is that a player who deliberately rebinds the Ledger back onto `L`
+/// loses that choice on the next launch. It is one binding, it is the one the
+/// brief says belongs to another verb, and the alternative is either a schema
+/// version for a flat key-value file or leaving a shipped clash in place.
+const RETIRED_DEFAULTS: &[(ControlAction, Binding)] =
+    &[(ControlAction::Ledger, Binding::key(KeyCode::KeyL))];
 
 /// Keys a player may bind to. Modifiers and mouse buttons are excluded: a
 /// modifier alone is not a shortcut, and the mouse verbs are fixed by design.
@@ -453,6 +530,8 @@ mod tests {
     fn every_action_has_a_group_a_label_and_a_default() {
         for action in ControlAction::ALL {
             assert!(!action.label().is_empty(), "{action:?} has no label");
+            // 03 §3: the shipped font has no glyphs beyond ASCII.
+            assert!(action.label().is_ascii(), "{action:?} has a tofu label");
             assert!(ControlGroup::ALL.contains(&action.group()));
             assert!(
                 is_rebindable(action.default_binding().key),
@@ -473,13 +552,66 @@ mod tests {
     }
 
     #[test]
-    fn conflict_detection_finds_the_real_l_key_clash() {
-        // Line tool and the ledger panel both listen for `L` in the shipping
-        // build. The tab exists to surface exactly this.
+    fn conflict_free_defaults() {
+        // The shipping table must not ask two verbs for the same key. `L` was
+        // listed twice — Line tool and Ledger — which is the clash the Controls
+        // tab was built to surface and which this now keeps from coming back.
         let controls = ControlSettings::default();
-        assert!(controls.has_conflict(ControlAction::LineTool));
-        assert!(controls.has_conflict(ControlAction::Ledger));
-        assert!(controls.conflicts().contains(&ControlAction::Ledger));
+        assert!(
+            controls.conflicts().is_empty(),
+            "default bindings clash: {:?}",
+            controls
+                .conflicts()
+                .iter()
+                .map(|a| (a.label(), a.default_binding().label()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_line_tool_keeps_l_and_the_ledger_moved_to_k() {
+        // 03 §10.2: `L` belongs to the Line tool, so the Ledger answers to `K`.
+        let controls = ControlSettings::default();
+        assert_eq!(
+            controls.key_for(ControlAction::LineTool),
+            Binding::key(KeyCode::KeyL)
+        );
+        assert_eq!(
+            controls.key_for(ControlAction::Ledger),
+            Binding::key(KeyCode::KeyK)
+        );
+        assert!(!controls.has_conflict(ControlAction::LineTool));
+        assert!(!controls.has_conflict(ControlAction::Ledger));
+    }
+
+    #[test]
+    fn no_window_key_is_also_a_gameplay_verb() {
+        // 03 §10.2: "Window keys avoid every key a gameplay verb already owns;
+        // a test asserts it." This is that test, now that both halves of the
+        // table live in one place.
+        let controls = ControlSettings::default();
+        let windows: Vec<ControlAction> = ControlAction::ALL
+            .iter()
+            .copied()
+            .filter(|a| a.group() == ControlGroup::Windows)
+            .collect();
+        assert_eq!(windows.len(), 6, "six windows carry a key");
+        for window in windows {
+            let binding = controls.key_for(window);
+            for other in ControlAction::ALL {
+                if *other == window || other.group() == ControlGroup::Windows {
+                    continue;
+                }
+                assert_ne!(
+                    controls.key_for(*other),
+                    binding,
+                    "{:?} steals {} from {:?}",
+                    window,
+                    binding.label(),
+                    other
+                );
+            }
+        }
     }
 
     #[test]
@@ -515,6 +647,34 @@ mod tests {
         controls.write_to(&mut doc);
         let restored = ControlSettings::read_from(&KvDoc::parse(&doc.to_ron()));
         assert_eq!(restored, controls);
+    }
+
+    #[test]
+    fn an_old_profile_does_not_reload_the_l_clash() {
+        // Every settings file written before the fix says `Ledger: KeyL`. Read
+        // back literally, the conflict returns on the next launch and the tab
+        // reports something the player never did.
+        let parsed = KvDoc::parse("(\n  controls_Ledger: \"KeyL\",\n)");
+        let restored = ControlSettings::read_from(&parsed);
+        assert_eq!(
+            restored.key_for(ControlAction::Ledger),
+            Binding::key(KeyCode::KeyK)
+        );
+        assert!(restored.conflicts().is_empty());
+    }
+
+    #[test]
+    fn a_deliberate_rebind_onto_a_retired_key_is_still_the_players() {
+        // Only the retired *default* is dropped. Someone who genuinely wants
+        // the Ledger on `M` keeps it, conflict or not — the tab flags it and
+        // the Reset button is right there.
+        let parsed = KvDoc::parse("(\n  controls_Ledger: \"KeyM\",\n)");
+        let restored = ControlSettings::read_from(&parsed);
+        assert_eq!(
+            restored.key_for(ControlAction::Ledger),
+            Binding::key(KeyCode::KeyM)
+        );
+        assert!(restored.has_conflict(ControlAction::Ledger));
     }
 
     #[test]

@@ -35,7 +35,9 @@ pub struct BorderPresentationPlugin;
 
 impl Plugin for BorderPresentationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_neighbours_panel).add_systems(
+        app.init_resource::<crate::input::KeyBindings>()
+            .add_systems(Startup, setup_neighbours_panel)
+            .add_systems(
             Update,
             (
                 seed_border_registry,

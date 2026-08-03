@@ -31,6 +31,7 @@ pub struct StationsPlugin;
 impl Plugin for StationsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StationToolState>()
+            .init_resource::<crate::input::KeyBindings>()
             .add_systems(Startup, setup_station_hud)
             .add_systems(
                 Update,

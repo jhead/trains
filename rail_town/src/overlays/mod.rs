@@ -1,6 +1,7 @@
 //! Toggleable diagnostic overlays (service, congestion, density).
 //!
 //! `Tab` cycles; direct keys: `F1` service, `F2` congestion, `F3` density, `F4` off.
+//! All five are rebindable through [`crate::input::KeyBindings`].
 //! Overlays tint with palette diagnostics (`OK` / `HI` / `WARN`) only.
 
 pub(crate) mod perf;
@@ -9,6 +10,7 @@ mod score;
 
 use bevy::prelude::*;
 
+use crate::input::{ControlAction, KeyBindings};
 use render::sync_overlay_sprites;
 
 /// Active world tint mode.
@@ -52,6 +54,7 @@ pub struct OverlaysPlugin;
 impl Plugin for OverlaysPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActiveOverlay>()
+            .init_resource::<KeyBindings>()
             // Opt-in frame-time instrumentation; a no-op without `RAIL_TOWN_PERF`.
             .add_plugins(perf::PerfPlugin)
             .add_systems(Startup, setup_overlay_legend)
@@ -104,21 +107,23 @@ fn setup_overlay_legend(mut commands: Commands) {
         });
 }
 
-fn overlay_hotkeys(keys: Res<ButtonInput<KeyCode>>, mut overlay: ResMut<ActiveOverlay>) {
-    if keys.just_pressed(KeyCode::Tab) {
+fn overlay_hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
+    mut overlay: ResMut<ActiveOverlay>,
+) {
+    if bindings.just_pressed(&keys, ControlAction::CycleOverlay) {
         overlay.0 = overlay.0.next();
     }
-    if keys.just_pressed(KeyCode::F1) {
-        overlay.0 = OverlayKind::Service;
-    }
-    if keys.just_pressed(KeyCode::F2) {
-        overlay.0 = OverlayKind::Congestion;
-    }
-    if keys.just_pressed(KeyCode::F3) {
-        overlay.0 = OverlayKind::Density;
-    }
-    if keys.just_pressed(KeyCode::F4) {
-        overlay.0 = OverlayKind::None;
+    for (action, kind) in [
+        (ControlAction::OverlayService, OverlayKind::Service),
+        (ControlAction::OverlayCongestion, OverlayKind::Congestion),
+        (ControlAction::OverlayDensity, OverlayKind::Density),
+        (ControlAction::OverlayOff, OverlayKind::None),
+    ] {
+        if bindings.just_pressed(&keys, action) {
+            overlay.0 = kind;
+        }
     }
 }
 

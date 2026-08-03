@@ -25,14 +25,24 @@
 //!
 //! # Map View
 //!
-//! Map View is owned by `map::map_view`, which listens for `M`. Rather than
-//! reach into another module's state — and desynchronise its saved camera — the
-//! button posts a synthetic key press through [`SyntheticKeys`], which is
-//! injected in `PreUpdate` and released the following frame. It is a small
-//! bridge, and it is honest: the button and the key take exactly the same path.
+//! Map View is owned by `map::map_view`, which listens for the Map View
+//! binding. Rather than reach into another module's state — and desynchronise
+//! its saved camera — the button posts a synthetic key press through
+//! [`SyntheticKeys`], which is injected in `PreUpdate` and released the
+//! following frame. It is a small bridge, and it is honest: the button and the
+//! key take exactly the same path.
+//!
+//! # Keys on the bar
+//!
+//! Every slot carries its shortcut beside its name (03 §7), and that shortcut
+//! is read out of [`KeyBindings`] rather than typed in beside the label. So a
+//! rebind is visible where the player looks for the verb, not only in Settings —
+//! and a bar that says `L` while the game listens for something else is not a
+//! state this file can reach.
 
 use bevy::prelude::*;
 
+use crate::input::{ControlAction, KeyBindings};
 use crate::lines::LineToolState;
 use crate::map::MapViewState;
 use crate::overlays::{ActiveOverlay, OverlayKind};
@@ -83,30 +93,44 @@ impl SyntheticKeys {
     }
 }
 
-/// Window buttons, in row order, with the key that also opens them.
-const WINDOW_SLOTS: &[(WindowId, &str, Option<KeyCode>)] = &[
-    (WindowId::Network, "H", Some(KeyCode::KeyH)),
-    (WindowId::TownTalk, "Y", Some(KeyCode::KeyY)),
-    (WindowId::Ledger, "K", Some(KeyCode::KeyK)),
-    (WindowId::Alerts, "C", Some(KeyCode::KeyC)),
-    (WindowId::Goals, "O", Some(KeyCode::KeyO)),
-    // `N` is owned by the Neighbours panel itself; the button mirrors it.
-    (WindowId::Neighbours, "N", None),
+/// Window buttons, in row order, with the action whose key also opens them.
+///
+/// The flag says whether [`window_hotkeys`] owns that key. Neighbours is
+/// `false`: the panel's own module listens for it, and toggling in both places
+/// would cancel itself out.
+const WINDOW_SLOTS: &[(WindowId, ControlAction, bool)] = &[
+    (WindowId::Network, ControlAction::WindowNetwork, true),
+    (WindowId::TownTalk, ControlAction::WindowTownTalk, true),
+    (WindowId::Ledger, ControlAction::Ledger, true),
+    (WindowId::Alerts, ControlAction::WindowAlerts, true),
+    (WindowId::Goals, ControlAction::WindowGoals, true),
+    (WindowId::Neighbours, ControlAction::WindowNeighbours, false),
 ];
 
-/// Build verbs, in row order, with the key that also arms them. The label comes
-/// from [`ToolbarTool::label`] so the bar and the status readout cannot drift.
-const TOOL_SLOTS: &[(ToolbarTool, &str)] = &[
-    (ToolbarTool::Select, "V"),
-    (ToolbarTool::Build, "B"),
-    (ToolbarTool::Demolish, "X"),
-    (ToolbarTool::Line, "L"),
-    (ToolbarTool::Transit, "T"),
-    (ToolbarTool::Transport, "G"),
+/// Build verbs, in row order, with the action that also arms them. The label
+/// comes from [`ToolbarTool::label`] so the bar and the status readout cannot
+/// drift, and the key comes from [`KeyBindings`] for the same reason.
+const TOOL_SLOTS: &[(ToolbarTool, ControlAction)] = &[
+    (ToolbarTool::Select, ControlAction::LookTool),
+    (ToolbarTool::Build, ControlAction::TrackTool),
+    (ToolbarTool::Demolish, ControlAction::DemolishTool),
+    (ToolbarTool::Line, ControlAction::LineTool),
+    (ToolbarTool::Transit, ControlAction::BuyTransit),
+    (ToolbarTool::Transport, ControlAction::BuyTransport),
 ];
 
-pub fn setup_top_chrome(mut commands: Commands, money: Res<rail_sim::Money>) {
+/// The shortcut text beside a slot's name. Repainted by
+/// [`refresh_menu_key_labels`] whenever the bindings change.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MenuKeyLabel(ControlAction);
+
+pub fn setup_top_chrome(
+    mut commands: Commands,
+    money: Res<rail_sim::Money>,
+    bindings: Res<KeyBindings>,
+) {
     let starting_cents = money.cents();
+    let bindings = bindings.clone();
     commands
         .spawn((
             TopChromeRoot,
@@ -130,13 +154,13 @@ pub fn setup_top_chrome(mut commands: Commands, money: Res<rail_sim::Money>) {
             ZIndex(10),
         ))
         .with_children(|chrome| {
-            spawn_menu_row(chrome);
+            spawn_menu_row(chrome, &bindings);
             spawn_status_row(chrome, starting_cents);
             spawn_health_row(chrome);
         });
 }
 
-fn spawn_menu_row(parent: &mut ChildSpawnerCommands) {
+fn spawn_menu_row(parent: &mut ChildSpawnerCommands, bindings: &KeyBindings) {
     parent
         .spawn((
             MenuRowRoot,
@@ -155,17 +179,33 @@ fn spawn_menu_row(parent: &mut ChildSpawnerCommands) {
             },
         ))
         .with_children(|row| {
-            for (tool, key) in TOOL_SLOTS {
-                spawn_menu_button(row, MenuButton::Tool(*tool), tool.label(), key);
+            for (tool, action) in TOOL_SLOTS {
+                let button = MenuButton::Tool(*tool);
+                spawn_menu_button(row, button, tool.label(), Some(*action), bindings);
             }
             spawn_divider(row);
-            for (id, key, _) in WINDOW_SLOTS {
-                spawn_menu_button(row, MenuButton::Window(*id), id.title(), key);
+            for (id, action, _) in WINDOW_SLOTS {
+                let button = MenuButton::Window(*id);
+                spawn_menu_button(row, button, id.title(), Some(*action), bindings);
             }
-            spawn_menu_button(row, MenuButton::MapView, "Map", "M");
-            spawn_menu_button(row, MenuButton::Overlay, "Overlay", "Tab");
+            spawn_menu_button(
+                row,
+                MenuButton::MapView,
+                "Map",
+                Some(ControlAction::MapView),
+                bindings,
+            );
+            spawn_menu_button(
+                row,
+                MenuButton::Overlay,
+                "Overlay",
+                Some(ControlAction::CycleOverlay),
+                bindings,
+            );
             spawn_divider(row);
-            spawn_menu_button(row, MenuButton::Settings, "Settings", "");
+            // Settings has no shortcut: it hands off to the shell, and `Esc`
+            // already owns the way out.
+            spawn_menu_button(row, MenuButton::Settings, "Settings", None, bindings);
         });
 }
 
@@ -185,7 +225,8 @@ fn spawn_menu_button(
     parent: &mut ChildSpawnerCommands,
     button: MenuButton,
     label: &str,
-    key: &str,
+    action: Option<ControlAction>,
+    bindings: &KeyBindings,
 ) {
     let (node, bg, border) = chrome_button_node(SPACE_1, 1.0);
     parent
@@ -204,10 +245,34 @@ fn spawn_menu_button(
         ))
         .with_children(|slot| {
             slot.spawn((Text::new(label.to_string()), micro_font(), text_primary()));
-            if !key.is_empty() {
-                slot.spawn((Text::new(key.to_string()), micro_font(), text_secondary()));
+            if let Some(action) = action {
+                slot.spawn((
+                    MenuKeyLabel(action),
+                    Text::new(bindings.label(action)),
+                    micro_font(),
+                    text_secondary(),
+                ));
             }
         });
+}
+
+/// Repaint the shortcut beside each slot when the player rebinds one.
+///
+/// Gated on the resource's own change detection, so a normal frame does not
+/// touch a single node.
+pub fn refresh_menu_key_labels(
+    bindings: Res<KeyBindings>,
+    mut labels: Query<(&MenuKeyLabel, &mut Text)>,
+) {
+    if !bindings.is_changed() {
+        return;
+    }
+    for (slot, mut text) in &mut labels {
+        let wanted = bindings.label(slot.0);
+        if text.0 != wanted {
+            text.0 = wanted;
+        }
+    }
 }
 
 /// Paint selection and hover on the menu row.
@@ -252,6 +317,7 @@ pub fn menu_row_clicks(
     mut manager: ResMut<WindowManager>,
     mut overlay: ResMut<ActiveOverlay>,
     mut synthetic: ResMut<SyntheticKeys>,
+    bindings: Res<KeyBindings>,
     mut settings: MessageWriter<MenuActivated>,
     mut tools: crate::ui::toolbar::ToolStates,
 ) {
@@ -262,7 +328,7 @@ pub fn menu_row_clicks(
         match button {
             MenuButton::Tool(tool) => tools.arm(*tool),
             MenuButton::Window(id) => manager.toggle(*id),
-            MenuButton::MapView => synthetic.press(KeyCode::KeyM),
+            MenuButton::MapView => synthetic.press(bindings.key(ControlAction::MapView)),
             MenuButton::Overlay => overlay.0 = overlay.0.next(),
             MenuButton::Settings => {
                 settings.write(MenuActivated(MenuAction::OpenSettings));
@@ -273,19 +339,18 @@ pub fn menu_row_clicks(
 
 /// Keyboard shortcuts for the window group.
 ///
-/// Modifier-held presses are ignored so `Ctrl+Y` stays redo and nothing here
-/// steals a chord from another owner.
-pub fn window_hotkeys(keys: Res<ButtonInput<KeyCode>>, mut manager: ResMut<WindowManager>) {
-    if keys.pressed(KeyCode::ControlLeft)
-        || keys.pressed(KeyCode::ControlRight)
-        || keys.pressed(KeyCode::SuperLeft)
-        || keys.pressed(KeyCode::SuperRight)
-    {
-        return;
-    }
-    for (id, _, key) in WINDOW_SLOTS {
-        let Some(key) = key else { continue };
-        if keys.just_pressed(*key) {
+/// [`KeyBindings::just_pressed`] requires an exact modifier match, so `Ctrl+Y`
+/// stays redo and nothing here steals a chord from another owner.
+pub fn window_hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
+    mut manager: ResMut<WindowManager>,
+) {
+    for (id, action, owns_key) in WINDOW_SLOTS {
+        if !owns_key {
+            continue;
+        }
+        if bindings.just_pressed(&keys, *action) {
             manager.toggle(*id);
         }
     }
@@ -315,6 +380,7 @@ pub fn inject_synthetic_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::Binding;
     use std::collections::HashSet;
 
     #[test]
@@ -349,30 +415,65 @@ mod tests {
 
     #[test]
     fn no_window_hotkey_collides_with_a_gameplay_verb() {
-        // B/X/L/T/G/V arm tools, WASD pans, M is Map View, N is Neighbours,
-        // F follows, Z zooms, P places a station, U upgrades one.
-        let taken = [
-            KeyCode::KeyB,
-            KeyCode::KeyX,
-            KeyCode::KeyL,
-            KeyCode::KeyT,
-            KeyCode::KeyG,
-            KeyCode::KeyV,
-            KeyCode::KeyW,
-            KeyCode::KeyA,
-            KeyCode::KeyS,
-            KeyCode::KeyD,
-            KeyCode::KeyM,
-            KeyCode::KeyN,
-            KeyCode::KeyF,
-            KeyCode::KeyZ,
-            KeyCode::KeyP,
-            KeyCode::KeyU,
-        ];
-        for (id, _, key) in WINDOW_SLOTS {
-            let Some(key) = key else { continue };
-            assert!(!taken.contains(key), "{id:?} steals {key:?}");
+        // 03 §10.2: "Window keys avoid every key a gameplay verb already owns."
+        // Both halves now come out of one table, so the check is a lookup rather
+        // than a hand-kept list that could go stale — which is exactly how the
+        // Ledger and the Line tool ended up sharing `L`.
+        let bindings = KeyBindings::default();
+        let window_actions: HashSet<ControlAction> =
+            WINDOW_SLOTS.iter().map(|(_, a, _)| *a).collect();
+        for (id, action, _) in WINDOW_SLOTS {
+            let key = bindings.binding(*action);
+            for other in ControlAction::ALL {
+                if window_actions.contains(other) {
+                    continue;
+                }
+                assert_ne!(
+                    bindings.binding(*other),
+                    key,
+                    "{id:?} steals {} from {:?}",
+                    key.label(),
+                    other
+                );
+            }
         }
+    }
+
+    #[test]
+    fn the_ledger_button_answers_to_k() {
+        // The `L` clash, at the surface the player reads it from.
+        let bindings = KeyBindings::default();
+        let (_, action, owns) = WINDOW_SLOTS
+            .iter()
+            .find(|(id, _, _)| *id == WindowId::Ledger)
+            .expect("the Ledger has a button");
+        assert_eq!(bindings.key(*action), KeyCode::KeyK);
+        assert!(owns, "the menu row owns the Ledger key");
+        assert_eq!(bindings.label(*action), "K", "and the bar draws it");
+    }
+
+    #[test]
+    fn the_bar_draws_the_key_the_game_listens_for() {
+        // Rebinding the track tool must move the label on the bar as well as
+        // the behaviour: a row reading `B` while the game answers `J` is worse
+        // than no label at all.
+        let mut bindings = KeyBindings::default();
+        assert_eq!(bindings.label(ControlAction::TrackTool), "B");
+        bindings.set(ControlAction::TrackTool, Binding::key(KeyCode::KeyJ));
+        assert_eq!(bindings.label(ControlAction::TrackTool), "J");
+    }
+
+    #[test]
+    fn only_one_owner_toggles_the_neighbours_window() {
+        // Both the menu row and `border::panel` can see the key. If both acted
+        // the window would open and close in the same frame and never appear.
+        let owned: Vec<WindowId> = WINDOW_SLOTS
+            .iter()
+            .filter(|(_, _, owns)| *owns)
+            .map(|(id, _, _)| *id)
+            .collect();
+        assert!(!owned.contains(&WindowId::Neighbours));
+        assert_eq!(owned.len(), WINDOW_SLOTS.len() - 1);
     }
 
     #[test]

@@ -1,23 +1,24 @@
 //! Construction undo / redo input (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Y).
+//!
+//! Both are rebindable — the keys above are the defaults the Controls tab
+//! lists. Shift is the one thing not in the map: `Shift+Undo` is redo by
+//! convention rather than by binding, exactly as it is everywhere else.
 
 use bevy::prelude::*;
 use rail_sim::{CommandBuffer, CommandHistory};
 
+use crate::input::{ControlAction, KeyBindings};
+
 pub fn undo_redo_input(
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     mut history: ResMut<CommandHistory>,
     mut buffer: ResMut<CommandBuffer>,
 ) {
-    let ctrl = keys.pressed(KeyCode::ControlLeft)
-        || keys.pressed(KeyCode::ControlRight)
-        || keys.pressed(KeyCode::SuperLeft)
-        || keys.pressed(KeyCode::SuperRight);
-    if !ctrl {
-        return;
-    }
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let undo_key = bindings.just_pressed(&keys, ControlAction::Undo);
 
-    if keys.just_pressed(KeyCode::KeyZ) && !shift {
+    if undo_key && !shift {
         if let Some(cmds) = history.begin_undo() {
             for kind in cmds {
                 buffer.push(kind);
@@ -26,9 +27,8 @@ pub fn undo_redo_input(
         return;
     }
 
-    // Redo: Ctrl+Shift+Z or Ctrl+Y (and Cmd equivalents via Super).
-    let redo = (keys.just_pressed(KeyCode::KeyZ) && shift) || keys.just_pressed(KeyCode::KeyY);
-    if redo {
+    // Redo: Shift held on the undo chord, or the redo binding on its own.
+    if (undo_key && shift) || bindings.just_pressed(&keys, ControlAction::Redo) {
         if let Some(cmds) = history.begin_redo() {
             for kind in cmds {
                 buffer.push(kind);

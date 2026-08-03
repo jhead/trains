@@ -11,6 +11,7 @@ use rail_sim::{
     TrainLocation, GROUND_LAYER,
 };
 
+use crate::input::{ControlAction, KeyBindings};
 use crate::map::{CameraFocusRequest, MapCamera, MapViewState};
 use crate::stations::{IndustrySprite, StationSprite};
 use crate::track::{BuildTool, TrackSprite, TrackToolState};
@@ -319,6 +320,7 @@ pub(super) fn pick_world(
 /// `F` requests a texel-snapped camera cut to the selection.
 pub fn follow_selection(
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     selection: Res<Selection>,
     stations: Res<StationRegistry>,
     industries: Res<IndustryRegistry>,
@@ -329,7 +331,7 @@ pub fn follow_selection(
     peep_sprites: Query<(&PeepSprite, &Transform)>,
     mut focus: ResMut<CameraFocusRequest>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyF) {
+    if !bindings.just_pressed(&keys, ControlAction::FollowSelection) {
         return;
     }
     let Some(sel) = selection.0 else {

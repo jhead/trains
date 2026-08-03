@@ -21,6 +21,7 @@ use rail_sim::border::{
 use rail_sim::commands::TrainKind;
 use rail_sim::{CommandBuffer, TileCoord, TrackNetwork, TrackTerrain, Train, TrainId, GROUND_LAYER};
 
+use crate::input::{ControlAction, KeyBindings};
 use crate::palette::{BALLAST_L, BG1, HI, OUTLINE, RAIL_L};
 use crate::ui::kit::{
     micro_font, panel_node, text_primary, text_secondary, WorldClickBlocker, FONT_MICRO, SPACE_1,
@@ -162,9 +163,10 @@ fn spawn_action(
 /// the topmost window and consumes the key (03 §10.1) — this must not also try.
 pub fn neighbours_panel_input(
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     mut manager: ResMut<WindowManager>,
 ) {
-    if keys.just_pressed(KeyCode::KeyN) {
+    if bindings.just_pressed(&keys, ControlAction::WindowNeighbours) {
         manager.toggle(WindowId::Neighbours);
     }
 }

@@ -18,6 +18,7 @@ pub struct TrainsPlugin;
 impl Plugin for TrainsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TrainToolState>()
+            .init_resource::<crate::input::KeyBindings>()
             .add_systems(
                 Update,
                 (

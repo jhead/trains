@@ -19,6 +19,7 @@ pub struct LinesPlugin;
 impl Plugin for LinesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LineToolState>()
+            .init_resource::<crate::input::KeyBindings>()
             .init_resource::<FocusedLine>()
             .add_systems(Startup, setup_lines_panel)
             .add_systems(

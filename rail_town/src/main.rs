@@ -8,6 +8,7 @@ mod atmosphere;
 mod audio;
 mod border;
 mod hash;
+mod input;
 mod inspect;
 mod lines;
 mod map;
@@ -26,6 +27,7 @@ use atmosphere::AtmospherePlugin;
 use audio::AudioPlugin;
 use bevy::prelude::*;
 use border::BorderPresentationPlugin;
+use input::InputMapPlugin;
 use inspect::InspectPlugin;
 use lines::LinesPlugin;
 use map::MapPlugin;
@@ -62,6 +64,9 @@ fn main() {
         // follow `DefaultPlugins`. `SavePlugin` is already registered inside
         // `SimPlugin` — don't add it a second time here.
         .add_plugins(ShellPlugin::default())
+        // The live input map. After the shell, which is where the player's own
+        // bindings are read off disk, and before anything that reads a key.
+        .add_plugins(InputMapPlugin)
         .add_plugins(SimPlugin)
         .add_plugins(SimBridgePlugin)
         // Seeded terrain + pan/zoom camera (default seed 42, 64×64).

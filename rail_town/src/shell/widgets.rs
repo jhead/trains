@@ -14,8 +14,9 @@ use bevy::prelude::*;
 
 use crate::palette::{BALLAST_D, BALLAST_M, BG0, BG1, HI, OUTLINE};
 use crate::ui::kit::{
-    body_font, display_font, micro_font, panel_node, text_accent, text_disabled, text_primary,
-    text_secondary, WorldClickBlocker, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
+    body_font, display_font, micro_font, panel_node, spawn_meter, text_accent, text_disabled,
+    text_primary, text_secondary, WorldClickBlocker, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
+    SPACE_8, SPACE_12,
 };
 
 use super::controls::ControlAction;
@@ -310,6 +311,79 @@ pub fn spawn_row_with_note(
                     },
                 ));
             }
+        });
+}
+
+/// Width of a settings slider's track. On the spacing scale (48 = `SPACE_12`),
+/// wide enough that a 10% step is a visible five texels.
+pub const SLIDER_W: f32 = SPACE_12;
+
+/// A value row that draws the design's meter beside its numeral — the pixel
+/// kit's slider (03 §8.4).
+///
+/// There is no dragging handle and there should not be: a handle is a
+/// sub-texel-precision affordance, and every value on these tabs is a rung on a
+/// short ladder. The row steps with Left / Right or a click, exactly as every
+/// other settings row does, and the meter is what makes the *level* readable at
+/// a glance rather than a number the player has to compare against the last one
+/// they saw.
+///
+/// The fill is `hi` rather than [`meter_fill`](crate::ui::kit::meter_fill)'s
+/// value-derived colour: that ramp is diagnostic — `warn` under a third — and a
+/// quiet music bus is a preference, not a fault.
+pub fn spawn_slider_row(
+    parent: &mut ChildSpawnerCommands,
+    item: MenuItem,
+    label: &str,
+    value: &str,
+    percent: u32,
+) {
+    parent
+        .spawn((
+            Button,
+            item,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(ROW_H),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(SPACE_2),
+                padding: UiRect::horizontal(Val::Px(SPACE_2)),
+                border: UiRect::left(Val::Px(SELECT_BORDER)),
+                border_radius: BorderRadius::ZERO,
+                ..default()
+            },
+            BackgroundColor(BG1),
+            BorderColor::all(Color::NONE),
+        ))
+        .with_children(|row| {
+            row.spawn((
+                MenuItemLabel,
+                Text::new(label.to_string()),
+                body_font(),
+                text_primary(),
+            ));
+            // The bar and its numeral travel together, pushed right as one.
+            row.spawn(Node {
+                margin: UiRect::left(Val::Auto),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(SPACE_2),
+                ..default()
+            })
+            .with_children(|level| {
+                spawn_meter(level, SLIDER_W, percent, HI);
+                // 03 §8.4: a meter never appears without a numeral beside it.
+                level.spawn((
+                    Text::new(value.to_string()),
+                    body_font(),
+                    text_secondary(),
+                    Node {
+                        min_width: Val::Px(SPACE_8),
+                        ..default()
+                    },
+                ));
+            });
         });
 }
 

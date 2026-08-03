@@ -11,6 +11,7 @@ use rail_sim::{
     CommandKind, CreateLine, StationId, StationRegistry, TrackNetwork, GROUND_LAYER,
 };
 
+use crate::input::{ControlAction, KeyBindings};
 use crate::inspect::WorldClickConsumed;
 use crate::map::MapCamera;
 use crate::track::{BuildTool, TrackToolState};
@@ -37,6 +38,7 @@ impl LineToolState {
 pub fn line_tool_input(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<MapCamera>>,
     map: Res<MapGrid>,
@@ -49,7 +51,7 @@ pub fn line_tool_input(
     ui_blocks: Res<UiBlocksWorld>,
     click_consumed: Res<WorldClickConsumed>,
 ) {
-    if keys.just_pressed(KeyCode::KeyL) {
+    if bindings.just_pressed(&keys, ControlAction::LineTool) {
         line_state.active = true;
         train_state.place_mode = false;
         track_state.tool = BuildTool::Build;
@@ -60,14 +62,18 @@ pub fn line_tool_input(
     }
 
     // Other tools reclaim focus.
-    if keys.just_pressed(KeyCode::KeyB)
-        || keys.just_pressed(KeyCode::KeyX)
-        || keys.just_pressed(KeyCode::KeyT)
-        || keys.just_pressed(KeyCode::KeyG)
-    {
+    let track = bindings.any_just_pressed(
+        &keys,
+        &[ControlAction::TrackTool, ControlAction::DemolishTool],
+    );
+    let train = bindings.any_just_pressed(
+        &keys,
+        &[ControlAction::BuyTransit, ControlAction::BuyTransport],
+    );
+    if track || train {
         line_state.active = false;
         line_state.clear_draft();
-        if keys.just_pressed(KeyCode::KeyB) || keys.just_pressed(KeyCode::KeyX) {
+        if track {
             track_state.suppress_build_click = false;
         }
     }
@@ -81,7 +87,7 @@ pub fn line_tool_input(
         return;
     }
 
-    if keys.just_pressed(KeyCode::Enter) {
+    if bindings.just_pressed(&keys, ControlAction::CommitLine) {
         confirm_draft(&mut line_state, &stations, &mut buffer);
         return;
     }

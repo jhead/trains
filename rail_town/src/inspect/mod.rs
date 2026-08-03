@@ -30,6 +30,7 @@ pub struct InspectPlugin;
 impl Plugin for InspectPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Selection>()
+            .init_resource::<crate::input::KeyBindings>()
             .init_resource::<WorldClickConsumed>()
             .init_resource::<ServiceScoreHistory>()
             .init_resource::<Hovered>()

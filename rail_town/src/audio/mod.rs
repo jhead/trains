@@ -51,7 +51,8 @@
 //!
 //! Add [`AudioPlugin`] after `SimPlugin`, `MapPlugin` and `AtmospherePlugin` —
 //! it reads their resources and writes only its own. With the `sfx` feature off
-//! the plugin compiles to nothing, so the call site needs no `cfg`.
+//! the plugin compiles down to registering [`UiCue`] and nothing else, so
+//! neither the call site nor any cue writer needs a `cfg`.
 
 use bevy::prelude::*;
 
@@ -84,11 +85,28 @@ mod voices;
 ///
 /// The audio module never reaches into another slice's state, so panels,
 /// toggles and milestones ask for their sound rather than being watched for it.
-/// Registered by [`AudioPlugin`]; sending one with the `sfx` feature off is a
-/// no-op because the message type is still registered.
-#[cfg(feature = "sfx")]
-#[allow(unused_imports)] // Inbound API for the panel / toggle / milestone owners.
-pub use ui_sound::UiCue;
+///
+/// **Declared outside the `sfx` gate on purpose.** A window that wants a sweep
+/// should not have to know whether the game was built with sound: the message
+/// type and its registration exist either way, and with `sfx` off writing one is
+/// simply a no-op nobody reads. The alternative is a `#[cfg]` at every call
+/// site, which is how a cue quietly stops being sent.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+// `ToggleOn` / `ToggleOff` have no owner yet — the settings rows are the
+// obvious first customer.
+#[allow(dead_code)]
+pub enum UiCue {
+    /// A soft low tick.
+    Click,
+    /// A brief airy sweep, up.
+    PanelOpen,
+    /// The same sweep, down.
+    PanelClose,
+    ToggleOn,
+    ToggleOff,
+    /// The one genuinely warm moment. Rare enough to stay special.
+    Milestone,
+}
 
 /// Ordered phases inside `Update`.
 ///
@@ -113,7 +131,7 @@ impl Plugin for AudioPlugin {
 
         app.add_audio_source::<clip::SampleClip>()
             .add_audio_source::<voice::LiveVoice>()
-            .add_message::<ui_sound::UiCue>()
+            .add_message::<UiCue>()
             // Shared with the visual ambience so both freeze together on pause.
             .init_resource::<crate::atmosphere::AmbientClock>()
             .init_resource::<crate::atmosphere::TimeOfDay>()
@@ -176,10 +194,13 @@ impl Plugin for AudioPlugin {
 }
 
 /// With `sfx` off there is no `bevy_audio` to build against, so the plugin is a
-/// no-op and the call site stays identical.
+/// no-op and the call site stays identical — except that [`UiCue`] is still
+/// registered, so every panel that asks for a sweep keeps compiling and writing.
 #[cfg(not(feature = "sfx"))]
 impl Plugin for AudioPlugin {
-    fn build(&self, _app: &mut App) {}
+    fn build(&self, app: &mut App) {
+        app.add_message::<UiCue>();
+    }
 }
 
 #[cfg(all(test, feature = "sfx"))]
@@ -425,6 +446,26 @@ mod tests {
         assert!(
             after.ambience_bus > before.ambience_bus,
             "the ambience slider did not move the mix"
+        );
+    }
+
+    #[test]
+    fn a_panel_cue_reaches_the_player() {
+        // `UiCue` is the module's only inbound API, and it lives outside the
+        // `sfx` gate so a panel can write one without knowing whether the game
+        // was built with sound. This is the other half of that: a written cue
+        // really does become a voice.
+        let mut app = test_app();
+        app.update();
+        app.update();
+        let before = playing(&mut app);
+
+        app.world_mut().write_message(UiCue::PanelOpen);
+        app.update();
+        assert_eq!(
+            playing(&mut app),
+            before + 1,
+            "the panel sweep never reached the mixer"
         );
     }
 

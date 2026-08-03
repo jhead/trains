@@ -11,15 +11,14 @@
 
 use bevy::prelude::*;
 
-use crate::palette::WARN;
-use crate::ui::kit::{micro_font, SPACE_2, SPACE_3};
+use crate::ui::kit::SPACE_2;
 
 use super::controls::{is_rebindable, Binding, ControlAction, ControlGroup};
 use super::settings::{SettingId, Settings, SettingsTab};
 use super::widgets::{
     dim_scrim, screen_root, shell_panel, spawn_button, spawn_note, spawn_panel_title,
-    spawn_row_with_note, spawn_rule, spawn_section_label, spawn_tab_strip, MenuAction, MenuCursor,
-    MenuItem, MenuList, LAYER_OVERLAY,
+    spawn_row_with_note, spawn_rule, spawn_section_label, spawn_slider_row, spawn_tab_strip,
+    MenuAction, MenuCursor, MenuItem, MenuList, LAYER_OVERLAY,
 };
 use super::ShellState;
 
@@ -149,13 +148,23 @@ fn spawn_value_rows(parent: &mut ChildSpawnerCommands, settings: &Settings, tab:
             MenuAction::CycleSetting(*id, -1),
             MenuAction::CycleSetting(*id, 1),
         );
-        spawn_row_with_note(
-            parent,
-            item,
-            id.label(),
-            &id.value_label(settings),
-            id.pending_note(),
-        );
+        // Levels get the kit's meter; everything else is a list and gets a word.
+        match id.meter_percent(settings) {
+            Some(percent) => spawn_slider_row(
+                parent,
+                item,
+                id.label(),
+                &id.value_label(settings),
+                percent,
+            ),
+            None => spawn_row_with_note(
+                parent,
+                item,
+                id.label(),
+                &id.value_label(settings),
+                id.pending_note(),
+            ),
+        }
     }
 }
 
@@ -203,18 +212,10 @@ fn spawn_controls_tab(
     }
 
     spawn_rule(parent);
-    parent.spawn((
-        Text::new(
-            "Rebinding is recorded but gameplay still reads its default key — \
-             wiring lands with the input map.",
-        ),
-        micro_font(),
-        TextColor(WARN),
-        Node {
-            max_width: Val::Px(PANEL_W - SPACE_3 * 2.0),
-            ..default()
-        },
-    ));
+    spawn_note(
+        parent,
+        "Rebinding applies at once. Esc cancels a pending rebind.",
+    );
     spawn_note(
         parent,
         "Pan also accepts the arrow keys. Middle-drag pans, wheel zooms.",

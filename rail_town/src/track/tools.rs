@@ -28,6 +28,7 @@ use rail_sim::{
     CommandBuffer, CommandKind, Money, TrackNetwork, TrackTerrain, GROUND_LAYER,
 };
 
+use crate::input::{ControlAction, KeyBindings};
 use crate::map::MapCamera;
 use crate::ui::UiBlocksWorld;
 
@@ -165,6 +166,7 @@ fn path_mode_from_keys(keys: &ButtonInput<KeyCode>) -> PathMode {
 pub fn track_tool_input(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<MapCamera>>,
     map: Res<MapGrid>,
@@ -176,18 +178,18 @@ pub fn track_tool_input(
     mut feedback: ResMut<BuildFeedback>,
     ui_blocks: Res<UiBlocksWorld>,
 ) {
-    if keys.just_pressed(KeyCode::KeyB) {
+    if bindings.just_pressed(&keys, ControlAction::TrackTool) {
         state.tool = BuildTool::Build;
         state.suppress_build_click = false;
     }
-    if keys.just_pressed(KeyCode::KeyX) {
+    if bindings.just_pressed(&keys, ControlAction::DemolishTool) {
         state.tool = BuildTool::Demolish;
         state.suppress_build_click = false;
         state.clear_drag();
     }
     let had_pending =
         state.anchor.is_some() || state.drag.is_some() || state.drag_origin.is_some();
-    if keys.just_pressed(KeyCode::KeyV) {
+    if bindings.just_pressed(&keys, ControlAction::LookTool) {
         state.tool = BuildTool::Select;
         state.suppress_build_click = false;
         state.clear_drag();

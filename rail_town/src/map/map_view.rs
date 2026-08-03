@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use rail_map::{map_center_world, world_to_tile, MapGrid, TILE_SIZE};
 
+use crate::input::{ControlAction, KeyBindings};
 use crate::map::camera::{
     ortho_scale_for_zoom, zoom_factor_at, CameraFocusRequest, CameraZoomIndex, MapCamera,
     DEFAULT_ZOOM_INDEX,
@@ -89,13 +90,14 @@ fn set_banner(banner: &mut Query<&mut Node, With<MapViewBanner>>, active: bool) 
 
 pub fn toggle_map_view(
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     map: Res<MapGrid>,
     mut state: ResMut<MapViewState>,
     mut q: Query<(&mut Transform, &mut Projection, &mut CameraZoomIndex), With<MapCamera>>,
     mut banner: Query<&mut Node, With<MapViewBanner>>,
     mut track: ResMut<TrackToolState>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyM) {
+    if !bindings.just_pressed(&keys, ControlAction::MapView) {
         return;
     }
     let Ok((mut transform, mut projection, mut zoom_index)) = q.single_mut() else {

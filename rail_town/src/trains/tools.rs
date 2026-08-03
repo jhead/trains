@@ -14,6 +14,7 @@ use rail_sim::{
     TrackNetwork, GROUND_LAYER,
 };
 
+use crate::input::{ControlAction, KeyBindings};
 use crate::inspect::WorldClickConsumed;
 use crate::lines::LineToolState;
 use crate::map::MapCamera;
@@ -46,6 +47,7 @@ impl TrainPlaceKind {
 pub fn train_tool_input(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<MapCamera>>,
     map: Res<MapGrid>,
@@ -59,7 +61,7 @@ pub fn train_tool_input(
     ui_blocks: Res<UiBlocksWorld>,
     click_consumed: Res<WorldClickConsumed>,
 ) {
-    if keys.just_pressed(KeyCode::KeyT) {
+    if bindings.just_pressed(&keys, ControlAction::BuyTransit) {
         buffer.push(CommandKind::BuyTrain(BuyTrain {
             kind: TrainKind::Transit,
         }));
@@ -70,7 +72,7 @@ pub fn train_tool_input(
         line_state.active = false;
         line_state.clear_draft();
     }
-    if keys.just_pressed(KeyCode::KeyG) {
+    if bindings.just_pressed(&keys, ControlAction::BuyTransport) {
         buffer.push(CommandKind::BuyTrain(BuyTrain {
             kind: TrainKind::Transport,
         }));
@@ -81,8 +83,11 @@ pub fn train_tool_input(
         line_state.active = false;
         line_state.clear_draft();
     }
-    // B / X reclaim track tools.
-    if keys.just_pressed(KeyCode::KeyB) || keys.just_pressed(KeyCode::KeyX) {
+    // The track verbs reclaim the pointer.
+    if bindings.any_just_pressed(
+        &keys,
+        &[ControlAction::TrackTool, ControlAction::DemolishTool],
+    ) {
         train_state.place_mode = false;
         track_state.suppress_build_click = false;
         line_state.active = false;

@@ -25,6 +25,7 @@ use rail_sim::{
     GROUND_LAYER,
 };
 
+use crate::input::{ControlAction, KeyBindings};
 use crate::inspect::WorldClickConsumed;
 use crate::lines::LineToolState;
 use crate::map::MapCamera;
@@ -115,6 +116,7 @@ fn cursor_tile(
 pub fn station_tool_input(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<MapCamera>>,
     map: Res<MapGrid>,
@@ -123,7 +125,7 @@ pub fn station_tool_input(
     mut state: ResMut<StationToolState>,
     mut focus: ToolFocus,
 ) {
-    if keys.just_pressed(KeyCode::KeyP) {
+    if bindings.just_pressed(&keys, ControlAction::PlaceStation) {
         if state.active {
             state.cycle_tier();
         } else {
@@ -141,12 +143,16 @@ pub fn station_tool_input(
     }
 
     // Other tools reclaim focus (they each clear `suppress_build_click` themselves).
-    if keys.just_pressed(KeyCode::KeyB)
-        || keys.just_pressed(KeyCode::KeyX)
-        || keys.just_pressed(KeyCode::KeyT)
-        || keys.just_pressed(KeyCode::KeyG)
-        || keys.just_pressed(KeyCode::KeyL)
-    {
+    if bindings.any_just_pressed(
+        &keys,
+        &[
+            ControlAction::TrackTool,
+            ControlAction::DemolishTool,
+            ControlAction::BuyTransit,
+            ControlAction::BuyTransport,
+            ControlAction::LineTool,
+        ],
+    ) {
         state.leave();
     }
 
@@ -182,7 +188,7 @@ pub fn station_tool_input(
     }
 
     // Upgrade works off the hovered stop whether or not the pointer is free.
-    if keys.just_pressed(KeyCode::KeyU) {
+    if bindings.just_pressed(&keys, ControlAction::UpgradeStation) {
         upgrade_under_cursor(&mut state, &world.stations, &mut buffer);
         return;
     }

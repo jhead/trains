@@ -98,10 +98,40 @@ Design: [`docs/design/12-multiplayer.md`](design/12-multiplayer.md). MP-1 requir
 | Audio settings UI | The five bus rows on the Audio tab draw the kit's meter beside their numeral — the pixel-UI slider (03 §8.4), `hi` fill rather than the diagnostic ramp, since a quiet music bus is a preference and not a fault. `mixer::apply_settings` slews the buses toward the stored values every frame, so a change is audible while the panel is still open. |
 | Panel UI cues | `audio::UiCue` moved outside the `sfx` gate, and `ui::window::panel_cues` emits the open / close sweep from the one place panel visibility flips — the window manager, plus the Settings overlay, which is the only panel it does not own. At most one cue a frame, and opening wins: a panel replacing another is one opening, not a chord. |
 
+## The arc, the art, and the verbs (2026-08-03)
+
+Three brief-audits (economy/loop, world art, town/shell) drove this batch; every
+carried-debt row from the previous table is resolved.
+
+| Item | What landed |
+| --- | --- |
+| The 640x upkeep hole | `opex.rs`'s "sim-minute" divisor was a real minute, so running costs were collected at 1/640 of their authored rate and overextension could not exist. The time base is honest now (`TICKS_PER_SIM_MINUTE = 6`, documented ratio), and upkeep re-derived against **measured** income from a scripted harness (`rail_sim/tests/economy_arc.rs`): an early network keeps ~73% of gross, 200 dead tiles sink it, pruning restores the rate on screen within a minute, paving the map costs more than any railway earns. |
+| Flat fares | `fare = base x (len + len^2/divisor)` on endpoint separation: a 60-tile haul pays ~34x a 4-tile hop, freight steeper. Reaching further is now the lucrative move (08 §2). |
+| Demand went silent at minute 31 | Lifetime spawn cap replaced by a pending-board cap of 3; the interval stretches 4 -> 10 min as the count grows, the spacing floor walks outward, and a full map falls back rather than going quiet. Fifteen opportunities across a two-hour session. |
+| Goals ended at minute 38 | Deadlines spread to ~106 minutes, quotas derived from measured train throughput (never clearable in half the window), and a resolved board generates a harder successor deterministically. |
+| Capital was pocket change | With upkeep real, everything you buy once had become noise (a halt: $40 against ~$950/min net). Track and stations x10, trains x6, the border portal to $15,000 — more than the opening balance, priced like the over-hours commitment 12 §3.1 wants. |
+| Smart route | The default drag is an A* over `tile_build_cost` plus a straightness term — follows contours, picks river narrows, rides existing track free, holds last frame's shape against ties. Shift keeps the ray snap, Ctrl single tile, Alt locks the contour. Commits as one atomic `AutoFillPath`, one undo entry. |
+| Trains route by time | Hop-count BFS -> Dijkstra over each profile's own `ticks_for_leg`, so the fastest route for a train is a route that exists (02 §3's third leg). Tier dwell is wired: an interchange turns a transit around 3x faster than a halt. |
+| Elevation was unreadable | The band ladder now climbs strictly in luminance (L* 23 -> 50) across everything buildable; snow is only the crest on an impassable wall's drawn face, the lit cliff face marks exactly the wall the grade rule refuses, inland water carries three depth steps, and the New Map preview + water glints read the same table. |
+| Map View aliased | Purpose-built schematic plate (flat palette fills, contour lips, line-coloured strokes, tier-sized icons, live train dots), baked on change, never resampled. |
+| Facing collapsed to four looks | The old `custom_size`-stretch facing was a transform in disguise. A baked 32-entry bank at the sixteen realised bearings plus midpoints; zero bank error on straights; nothing rotates, mirrors or stretches. |
+| The town was mute on screen | Town Talk starts open (it is the emotional hook, and the onboarding nudge lands in it); the Peep card composes journey, tenure, routine, household and memory; the town announces finished buildings and asks for bigger stations at capped districts; a departing household's own house is the one that boards up; construction gets dust and a hammer tick; platforms murmur by crowd. |
+| The title showed no railway | Boot lays a short demo line and runs one transit behind the menu (09 §2), through the real command path, then hands the player a clean ledger, full cash and zeroed goals on Begin. |
+| Congestion was invisible between trains | The overlay reads the crossing-memory window (sustained use holds its tint, one-off movements fade); a blocked train's cause row names the queue's head and is a click target that walks the chain; a blocked **ring** that outlasts every remedy raises a Gridlock alert naming the fix. |
+| Plugins were not state-gated | `input::PlayerVerbSet` carries every press-to-verb system and `main.rs` runs it only in `ShellState::Playing`. The world stays alive behind the title; it just is not listening. Input suppression remains as the safety net. |
+| Save format | `SCHEMA_VERSION` 4: gen knobs travel with the seed (a save reproduces its world), mirrors destructure exhaustively (a new field is a compile error, and `peep_waiting` was in fact being dropped), `MoneyLedger` counts paid runs, `GoalBoard` carries its generation. |
+
 ## Carried debt
 
 Things that work but are known-shallow, with the brief that wants more.
 
 | Item | Note |
 | --- | --- |
-| **Gameplay plugins aren't state-gated** | They register systems without a named `SystemSet`, so `main.rs` cannot retro-fit `run_if(in_state(Playing))`. The shell gates by pointer-blocking and input suppression instead, which works. Real gating is one `.in_set(...)` edit per plugin file. |
+| **Single-track rings still deadlock** | The Gridlock alert names it and the fix; the *sim* remedy (a train backing out, or refusing to enter a corridor that cannot pass) is real movement work. Brief 07 §4.3's signals remain the depth extension. |
+| **Train capacity / acceleration** | Brief 07 §3 calls acceleration "the defining trait" and capacity is still one job per train for both kinds. The profile table has the seams; neither dimension exists yet. |
+| **Brief 13 (shadows) is designed, not built** | The commit that added the brief touched only docs. Phase 1 (shade operator, band hems, fray) is the shippable slice. |
+| **Accessibility rows are stored, not wired** | `colour_blind_safe`, `flashes_and_shake`, `hold_repeat_ms` persist and do nothing; `reduced_motion` reaches only the title drift. The palette rework is the L-sized one with real user impact. |
+| **Load is a button, not a screen** | `MenuAction::Load` grabs the newest slot. Named slots, thumbnails (`SaveMeta::with_thumbnail` has no caller) and a list screen are designed in 09 §6. |
+| **Ledger has no per-line breakdown** | 08 §6 wants per-line / per-station contribution and a projection; the ledger is category-level. `MoneyLedger::record` would need a line tag, available at both payout sites. |
+| **Events beyond the stub** | `EventDirector` remains empty. Festival (demand spike) and landslide (temporary closure) are the cheapest two that exercise announce / react / recover (08 §5.2). |
+| **`IndustryRegistry::producer_of`/`consumer_of` iterate a HashMap** | Same nondeterminism hazard the job spawner had; sort or index before anything income-affecting reads them. |

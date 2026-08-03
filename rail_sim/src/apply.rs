@@ -36,6 +36,7 @@ pub fn apply_commands(
             CommandKind::PlaceTrack(_)
             | CommandKind::Demolish(_)
             | CommandKind::AutoFillTrack(_)
+            | CommandKind::AutoFillPath(_)
             | CommandKind::BuyTrain(_)
             | CommandKind::PlaceTrain(_)
             | CommandKind::CreateLine(_)

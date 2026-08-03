@@ -10,7 +10,7 @@ use crate::ids::TileCoord;
 use crate::money::Money;
 
 use super::network::TrackNetwork;
-use super::place::{try_autofill_track, try_demolish, try_place_track};
+use super::place::{try_autofill_track, try_demolish, try_place_path, try_place_track};
 use super::rules::PlacementError;
 use super::terrain::TrackTerrain;
 
@@ -118,6 +118,49 @@ pub fn apply_track_commands(
                         edits.write(TrackEdit::Failed {
                             error,
                             tile: None,
+                        });
+                    }
+                }
+            }
+            CommandKind::AutoFillPath(p) => {
+                match try_place_path(
+                    &mut network,
+                    &mut money,
+                    &mut ledger,
+                    &terrain,
+                    &p.tiles,
+                    p.layer,
+                ) {
+                    Ok(placed) => {
+                        if placed.is_empty() {
+                            edits.write(TrackEdit::Failed {
+                                error: PlacementError::AlreadyOccupied,
+                                tile: p.tiles.last().copied(),
+                            });
+                        } else {
+                            let mut inverse = Vec::with_capacity(placed.len());
+                            for pl in &placed {
+                                edits.write(TrackEdit::Placed {
+                                    id: pl.id,
+                                    tile: pl.piece.tile,
+                                    layer: pl.piece.layer,
+                                    is_bridge: pl.piece.is_bridge(),
+                                });
+                                inverse.push(CommandKind::Demolish(Demolish { track: pl.id }));
+                            }
+                            if replaying {
+                                for inv in inverse {
+                                    history.push_batch_inverse(inv);
+                                }
+                            } else {
+                                history.record_player_action(inverse);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        edits.write(TrackEdit::Failed {
+                            error,
+                            tile: p.tiles.last().copied(),
                         });
                     }
                 }

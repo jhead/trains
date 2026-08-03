@@ -36,13 +36,31 @@ pub const HALF_STEP_DETENT: i32 = 1;
 /// How the cursor maps onto a proposed tile run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PathMode {
-    /// Snap the endpoint onto the nearest of the sixteen rays (default drag).
+    /// Cheapest legal path, weighted toward straightness (default drag).
+    ///
+    /// Terrain-aware — proposed by [`super::route::propose_smart`], not here.
+    /// Brief 04 §2.2: smart is the default "because it is right the
+    /// overwhelming majority of the time, and because it is where the game
+    /// demonstrates that it understands terrain."
     #[default]
+    Smart,
+    /// [`Smart`](Self::Smart), refusing any step that changes height (Alt).
+    ContourLock,
+    /// Snap the endpoint onto the nearest of the sixteen rays (Shift) —
+    /// brief 04 §2.2's "Straight": one direction, terrain be damned.
     Autofill,
-    /// Require the drag to land exactly on one of the sixteen (Shift).
+    /// Require the drag to land exactly on one of the sixteen.
     ExactStraight,
     /// Exactly the cursor tile (Ctrl).
     SingleTile,
+}
+
+impl PathMode {
+    /// Modes routed through the terrain-aware search rather than
+    /// [`propose_path`].
+    pub fn is_smart(self) -> bool {
+        matches!(self, Self::Smart | Self::ContourLock)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +73,10 @@ pub struct ProposedPath {
 }
 
 /// Propose tiles from `from` toward `to` under `mode`.
+///
+/// Pure in the endpoints: the smart modes need terrain and are handled by the
+/// preview before it gets here. A terrain-blind caller asking anyway gets the
+/// ray snap, which is the closest thing this function can honestly offer.
 pub fn propose_path(from: TileCoord, to: TileCoord, mode: PathMode) -> ProposedPath {
     match mode {
         PathMode::SingleTile => ProposedPath {
@@ -74,7 +96,7 @@ pub fn propose_path(from: TileCoord, to: TileCoord, mode: PathMode) -> ProposedP
                 not_straight: true,
             },
         },
-        PathMode::Autofill => {
+        PathMode::Autofill | PathMode::Smart | PathMode::ContourLock => {
             let endpoint = snap_to_direction(from, to);
             let tiles = straight_line(from, endpoint).unwrap_or_else(|| vec![from]);
             ProposedPath {

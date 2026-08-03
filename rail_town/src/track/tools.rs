@@ -1,9 +1,11 @@
 //! Drag-to-build / right-drag demolish → sim [`CommandBuffer`].
 //!
 //! ## Build
-//! Press → drag → release. Live ghost every frame. Default snaps to ortho/45°;
-//! Shift requires an exact straight; Ctrl places a single tile. After a
-//! successful commit the endpoint stays as the continuous-build anchor.
+//! Press → drag → release. Live ghost every frame. The default drag proposes
+//! the smart route (brief 04 §2.2 — cheapest legal path, weighted straight);
+//! Shift snaps to one of the sixteen directions, terrain be damned; Ctrl
+//! places a single tile; Alt holds the contour. After a successful commit the
+//! endpoint stays as the continuous-build anchor.
 //!
 //! ## Demolish
 //! Left-click / left-drag with the Demolish tool, or right-drag from either
@@ -22,7 +24,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use rail_map::{world_to_tile, MapGrid};
-use rail_sim::commands::{AutoFillTrack, Demolish, PlaceTrack};
+use rail_sim::commands::{AutoFillPath, AutoFillTrack, Demolish, PlaceTrack};
 use rail_sim::ids::TileCoord;
 use rail_sim::{
     CommandBuffer, CommandKind, Money, TrackNetwork, TrackTerrain, GROUND_LAYER,
@@ -85,6 +87,10 @@ pub struct TrackToolState {
     pub demolish_preview: Option<DemolishPreview>,
     /// When true (train place mode), ignore build/demolish pointer input.
     pub suppress_build_click: bool,
+    /// Last frame's accepted smart proposal — the shape hold of brief 04
+    /// §2.2. Fed back into the search so an equal-cost alternative cannot
+    /// flicker the ghost; cleared whenever there is no smart preview.
+    pub smart_hold: Option<Vec<TileCoord>>,
 }
 
 impl TrackToolState {
@@ -151,15 +157,31 @@ pub fn demolish_tip(origin: TileCoord, hover: Option<TileCoord>, moved: bool) ->
     }
 }
 
+/// Remember a smart proposal's shape for next frame's tie-breaking, or drop
+/// the hold when the mode is pure or the route was refused.
+fn update_smart_hold(state: &mut TrackToolState, preview: &BuildPreview) {
+    if state.path_mode.is_smart() && preview.reject.is_none() {
+        state.smart_hold = Some(preview.tiles.iter().map(|g| g.tile).collect());
+    } else if !state.path_mode.is_smart() {
+        state.smart_hold = None;
+    }
+}
+
+/// Brief 04 §2.2's modifier table: none = smart, Shift = straight (ray snap,
+/// terrain be damned), Ctrl = single tile, Alt = contour lock. Modifiers are
+/// deliberately literal — they are chords, not rebindable verbs.
 fn path_mode_from_keys(keys: &ButtonInput<KeyCode>) -> PathMode {
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     if ctrl {
         PathMode::SingleTile
     } else if shift {
-        PathMode::ExactStraight
-    } else {
         PathMode::Autofill
+    } else if alt {
+        PathMode::ContourLock
+    } else {
+        PathMode::Smart
     }
 }
 
@@ -297,14 +319,17 @@ pub fn track_tool_input(
             match kind {
                 DragKind::Build => {
                     state.demolish_preview = None;
-                    state.build_preview = Some(preview_build(
+                    let preview = preview_build(
                         &network,
                         &terrain,
                         &money,
                         from,
                         to,
                         state.path_mode,
-                    ));
+                        state.smart_hold.as_deref(),
+                    );
+                    update_smart_hold(&mut state, &preview);
+                    state.build_preview = Some(preview);
                 }
                 DragKind::Demolish => {
                     state.build_preview = None;
@@ -314,22 +339,27 @@ pub fn track_tool_input(
         }
     } else if state.tool == BuildTool::Build {
         if let (Some(from), Some(to)) = (state.anchor, hover) {
-            state.build_preview = Some(preview_build(
+            let preview = preview_build(
                 &network,
                 &terrain,
                 &money,
                 from,
                 to,
                 state.path_mode,
-            ));
+                state.smart_hold.as_deref(),
+            );
+            update_smart_hold(&mut state, &preview);
+            state.build_preview = Some(preview);
             state.demolish_preview = None;
         } else {
             state.build_preview = None;
             state.demolish_preview = None;
+            state.smart_hold = None;
         }
     } else {
         state.build_preview = None;
         state.demolish_preview = None;
+        state.smart_hold = None;
     }
 
     let left_up = mouse.just_released(MouseButton::Left);
@@ -380,6 +410,25 @@ fn commit_build(
                 tile: to,
                 layer: GROUND_LAYER,
             }));
+            state.anchor = Some(to);
+        }
+        PathMode::Smart | PathMode::ContourLock => {
+            // The proposal already holds the routed tiles; commit exactly what
+            // the ghost showed, as one atomic command and one undo entry.
+            let tiles: Vec<TileCoord> = preview.tiles.iter().map(|g| g.tile).collect();
+            if tiles.len() <= 1 {
+                if network.id_at(to, GROUND_LAYER).is_none() {
+                    buffer.push(CommandKind::PlaceTrack(PlaceTrack {
+                        tile: to,
+                        layer: GROUND_LAYER,
+                    }));
+                }
+            } else {
+                buffer.push(CommandKind::AutoFillPath(AutoFillPath {
+                    tiles,
+                    layer: GROUND_LAYER,
+                }));
+            }
             state.anchor = Some(to);
         }
         PathMode::Autofill | PathMode::ExactStraight => {

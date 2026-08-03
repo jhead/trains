@@ -62,12 +62,6 @@ pub fn run_direction(dx: i32, dy: i32) -> Option<(usize, u32)> {
     None
 }
 
-/// The direction an autofill run travels, from its first two tiles.
-fn path_direction(path: &[TileCoord]) -> Option<usize> {
-    let (&a, &b) = (path.first()?, path.get(1)?);
-    dir_index(a, b)
-}
-
 /// Result of a successful place (single tile).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacedTrack {
@@ -139,28 +133,59 @@ pub fn try_autofill_track(
     layer: u8,
 ) -> Result<Vec<PlacedTrack>, PlacementError> {
     let path = straight_line(from, to).ok_or(PlacementError::NotStraight)?;
+    try_place_path(network, money, ledger, terrain, &path, layer)
+}
 
-    // Validate path bridge runs and grades as a whole.
-    path_bridge_spans_ok(terrain, &path)?;
-    path_grades_ok(terrain, &path)?;
-
-    // A half-step run only connects while the tiles it crosses stay clear, so
-    // refuse the whole command rather than charging for a run that would land as
-    // disconnected stubs.
-    if let Some(dir) = path_direction(&path).filter(|&d| is_half_step(d)) {
-        for leg_start in path.iter().take(path.len().saturating_sub(1)) {
-            half_step_run_clear(network, *leg_start, layer, dir)?;
+/// Lay an arbitrary polyline whose consecutive tiles each step along one of
+/// the sixteen directions — the smart-route commit (design 04 §2.2).
+///
+/// Atomic exactly like [`try_autofill_track`]: the whole path is validated,
+/// costed and debited before any piece lands, so a mid-route failure charges
+/// nothing and places nothing. Tiles that already carry track are skipped, and
+/// a half-step leg anywhere along the path demands its crossed tiles clear,
+/// leg by leg, since a bent path has no single run direction.
+pub fn try_place_path(
+    network: &mut TrackNetwork,
+    money: &mut Money,
+    ledger: &mut MoneyLedger,
+    terrain: &TrackTerrain,
+    path: &[TileCoord],
+    layer: u8,
+) -> Result<Vec<PlacedTrack>, PlacementError> {
+    // Every consecutive pair must be one DIR16 step; anything else is not a
+    // shape the graph can link. A half-step leg needs its crossed tiles clear
+    // of existing track *and* of the rest of this same path — a straight run
+    // cannot cross itself, but a bent one can, and placement would sever the
+    // link it just paid for.
+    let on_path: std::collections::HashSet<(i32, i32)> =
+        path.iter().map(|t| (t.x, t.y)).collect();
+    for pair in path.windows(2) {
+        let dir = dir_index(pair[0], pair[1]).ok_or(PlacementError::NotStraight)?;
+        if is_half_step(dir) {
+            half_step_run_clear(network, pair[0], layer, dir)?;
+            for crossed in super::dir::intermediate_tiles(pair[0], dir)
+                .into_iter()
+                .flatten()
+            {
+                if on_path.contains(&(crossed.x, crossed.y)) {
+                    return Err(PlacementError::HalfStepBlocked { tile: crossed });
+                }
+            }
         }
     }
 
+    // Validate path bridge runs and grades as a whole.
+    path_bridge_spans_ok(terrain, path)?;
+    path_grades_ok(terrain, path)?;
+
     let mut to_place: Vec<TileCoord> = Vec::new();
-    for tile in &path {
-        if network.id_at(*tile, layer).is_some() {
+    for &tile in path {
+        if network.id_at(tile, layer).is_some() {
             continue;
         }
         // Per-tile checks (bounds / layer / water / grade to existing / terrain).
-        let _is_bridge = validate_tile_empty(network, terrain, *tile, layer)?;
-        to_place.push(*tile);
+        let _is_bridge = validate_tile_empty(network, terrain, tile, layer)?;
+        to_place.push(tile);
     }
 
     let mut costs = Vec::with_capacity(to_place.len());

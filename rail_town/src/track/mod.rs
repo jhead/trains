@@ -4,6 +4,7 @@ mod feedback;
 mod ghost;
 mod preview;
 mod propose;
+mod route;
 mod sync;
 mod tools;
 mod visuals;

@@ -55,6 +55,9 @@ pub struct DemolishPreview {
 }
 
 /// Preview a build path from anchor → cursor.
+///
+/// `previous` is last frame's accepted smart proposal — the shape hold of
+/// brief 04 §2.2. The pure modes ignore it.
 pub fn preview_build(
     network: &TrackNetwork,
     terrain: &TrackTerrain,
@@ -62,8 +65,42 @@ pub fn preview_build(
     from: TileCoord,
     to: TileCoord,
     mode: PathMode,
+    previous: Option<&[TileCoord]>,
 ) -> BuildPreview {
-    let proposed = propose_path(from, to, mode);
+    let proposed = if mode.is_smart() {
+        let contour = mode == PathMode::ContourLock;
+        match super::route::propose_smart(network, terrain, from, to, contour, previous) {
+            Some(p) => p,
+            // No legal route. Say which constraint refused, loudly (brief 04
+            // §3): contour lock failing is "would have to climb", plain smart
+            // failing means the destination is unreachable.
+            None => {
+                return BuildPreview {
+                    tiles: vec![GhostTile {
+                        tile: to,
+                        kind: TileGhostKind::Invalid,
+                        valid: false,
+                    }],
+                    new_tile_count: 0,
+                    bridge_count: 0,
+                    total_cost_cents: 0,
+                    balance_after_cents: money.cents(),
+                    can_commit: false,
+                    reject: Some(RejectInfo {
+                        message: if contour {
+                            "No level route - everything from here climbs".into()
+                        } else {
+                            "No buildable route to here".into()
+                        },
+                        tiles: vec![to],
+                    }),
+                    endpoint: to,
+                };
+            }
+        }
+    } else {
+        propose_path(from, to, mode)
+    };
     preview_build_proposed(network, terrain, money, proposed)
 }
 
@@ -390,6 +427,7 @@ mod tests {
             TileCoord { x: 1, y: 1 },
             TileCoord { x: 4, y: 1 },
             PathMode::Autofill,
+            None,
         );
         assert_eq!(preview.new_tile_count, 4);
         assert_eq!(preview.total_cost_cents, 4 * TRACK_COST_CENTS);
@@ -413,6 +451,7 @@ mod tests {
             TileCoord { x: 2, y: 1 },
             TileCoord { x: 7, y: 1 },
             PathMode::Autofill,
+            None,
         );
         assert!(!preview.can_commit);
         let msg = preview.reject.unwrap().message;
@@ -432,6 +471,7 @@ mod tests {
             TileCoord { x: 0, y: 0 },
             TileCoord { x: 1, y: 0 },
             PathMode::Autofill,
+            None,
         );
         assert!(!preview.can_commit);
         assert_eq!(

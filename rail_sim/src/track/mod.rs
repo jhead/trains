@@ -23,7 +23,8 @@ pub use dir::{
 pub use network::TrackNetwork;
 pub use piece::{curve_from_link_dirs, TrackKind, TrackPiece};
 pub use place::{
-    run_direction, straight_line, try_autofill_track, try_demolish, try_place_track, PlacedTrack,
+    run_direction, straight_line, try_autofill_track, try_demolish, try_place_path,
+    try_place_track, PlacedTrack,
 };
 pub use rules::{
     grade_to_neighbors_ok, half_step_run_clear, path_bridge_spans_ok, path_grades_ok,
@@ -309,6 +310,131 @@ mod tests {
             }
         );
         assert_eq!(money.cents(), before, "a refused run costs nothing");
+    }
+
+    #[test]
+    fn a_bent_path_lays_every_leg_and_one_bill() {
+        let terrain = map_with_water_strip(2);
+        let mut network = TrackNetwork::new();
+        let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
+
+        // East along y=2, over the 2-wide water, then bend north-east: the
+        // smart-route commit shape a straight autofill cannot express.
+        let path = [
+            TileCoord { x: 1, y: 2 },
+            TileCoord { x: 2, y: 2 },
+            TileCoord { x: 3, y: 2 },
+            TileCoord { x: 4, y: 2 },
+            TileCoord { x: 5, y: 2 },
+            TileCoord { x: 6, y: 1 },
+        ];
+        let placed = try_place_path(
+            &mut network,
+            &mut money,
+            &mut ledger,
+            &terrain,
+            &path,
+            GROUND_LAYER,
+        )
+        .unwrap();
+        assert_eq!(placed.len(), 6);
+        assert_eq!(
+            placed
+                .iter()
+                .filter(|p| p.piece.kind == TrackKind::Bridge)
+                .count(),
+            2,
+            "the water legs land as bridge deck"
+        );
+    }
+
+    #[test]
+    fn a_path_with_a_leg_off_the_sixteen_is_refused_whole() {
+        let terrain = land_map(8, 8);
+        let mut network = TrackNetwork::new();
+        let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
+        let start = money.cents();
+
+        // (3,1) -> (6,2) is off every direction.
+        let path = [
+            TileCoord { x: 1, y: 1 },
+            TileCoord { x: 2, y: 1 },
+            TileCoord { x: 3, y: 1 },
+            TileCoord { x: 6, y: 2 },
+        ];
+        let err = try_place_path(
+            &mut network,
+            &mut money,
+            &mut ledger,
+            &terrain,
+            &path,
+            GROUND_LAYER,
+        )
+        .unwrap_err();
+        assert_eq!(err, PlacementError::NotStraight);
+        assert_eq!(money.cents(), start, "a refused path costs nothing");
+        assert_eq!(network.len(), 0, "and places nothing");
+    }
+
+    #[test]
+    fn a_path_that_crosses_its_own_half_step_is_refused() {
+        let terrain = land_map(12, 12);
+        let mut network = TrackNetwork::new();
+        let mut money = Money::new(500_000);
+        let mut ledger = MoneyLedger::default();
+
+        // The ENE half-step from (2,2) crosses (3,2) and (3,3) — and the path
+        // then bends back through (3,2). Placement would sever the link it
+        // just paid for, so the whole path must be refused up front.
+        let path = [
+            TileCoord { x: 2, y: 2 },
+            TileCoord { x: 4, y: 3 },
+            TileCoord { x: 3, y: 2 },
+        ];
+        let err = try_place_path(
+            &mut network,
+            &mut money,
+            &mut ledger,
+            &terrain,
+            &path,
+            GROUND_LAYER,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, PlacementError::HalfStepBlocked { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(network.len(), 0);
+    }
+
+    #[test]
+    fn a_path_short_of_funds_is_refused_whole() {
+        let terrain = land_map(8, 8);
+        let mut network = TrackNetwork::new();
+        // Two flat tiles' worth, asked to pay for four.
+        let mut money = Money::new(TRACK_COST_CENTS * 2);
+        let mut ledger = MoneyLedger::default();
+
+        let path = [
+            TileCoord { x: 1, y: 1 },
+            TileCoord { x: 2, y: 1 },
+            TileCoord { x: 3, y: 1 },
+            TileCoord { x: 4, y: 1 },
+        ];
+        let err = try_place_path(
+            &mut network,
+            &mut money,
+            &mut ledger,
+            &terrain,
+            &path,
+            GROUND_LAYER,
+        )
+        .unwrap_err();
+        assert_eq!(err, PlacementError::InsufficientFunds);
+        assert_eq!(money.cents(), TRACK_COST_CENTS * 2);
+        assert_eq!(network.len(), 0, "all or nothing");
     }
 
     #[test]

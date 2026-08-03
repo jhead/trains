@@ -37,6 +37,7 @@ pub enum CommandKind {
     PlaceTrack(PlaceTrack),
     Demolish(Demolish),
     AutoFillTrack(AutoFillTrack),
+    AutoFillPath(AutoFillPath),
     BuyTrain(BuyTrain),
     PlaceTrain(PlaceTrain),
     CreateLine(CreateLine),
@@ -70,6 +71,15 @@ pub struct Demolish {
 pub struct AutoFillTrack {
     pub from: TileCoord,
     pub to: TileCoord,
+    pub layer: u8,
+}
+
+/// Smart-route commit (design 04 §2.2): an explicit polyline whose consecutive
+/// tiles each step along one of the sixteen directions. Applied atomically —
+/// all tiles or none, one undo entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoFillPath {
+    pub tiles: Vec<TileCoord>,
     pub layer: u8,
 }
 

@@ -568,6 +568,9 @@ fn apply_pending_world(
 
     commands.insert_resource(map_descriptor_for(&options, &map));
     commands.insert_resource(map_options::track_terrain_from(&map));
+    // The seeder reads the generator's picked sites; without this a New Map
+    // would anchor its opening beat against the boot map's hints.
+    commands.insert_resource(rail_sim::AnchorSites(map.anchor_hints()));
     commands.insert_resource(Money::new(options.cash.cents()));
     commands.insert_resource(CommandBuffer::default());
     commands.insert_resource(CommandHistory::default());
@@ -993,6 +996,12 @@ mod tests {
         assert_eq!(*app.world().resource::<PeepFocus>(), PeepFocus::default());
         assert!(app.world().resource::<TownDensity>().is_empty());
         assert!(app.world().resource::<ComplaintFeed>().is_empty());
+        assert_eq!(
+            app.world().resource::<rail_sim::AnchorSites>().0,
+            app.world().resource::<rail_map::MapGrid>().anchor_hints(),
+            "the seeder must be handed this world's opening sites, not the \
+             boot map's"
+        );
     }
 
     /// Seed sharing (design 02 §5) only reproduces a world if the *settings*

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{StationId, TileCoord};
 use crate::peeps::{ComplaintEntry, ComplaintFeed, TalkKind, SIM_SECONDS_PER_TICK};
 use crate::stations::{
-    GoodKind, IndustryId, IndustryRegistry, StationRegistry, StationService,
+    GoodKind, IndustryId, IndustryRegistry, IndustryTier, StationRegistry, StationService,
 };
 use crate::track::{TrackNetwork, TrackTerrain, GROUND_LAYER};
 use crate::trains::track_for_station;
@@ -51,13 +51,16 @@ const SETTLEMENT_NAMES: &[&str] = &[
     "Lowmarsh",
 ];
 
-const INDUSTRY_SPECS: &[(&str, Option<GoodKind>, Option<GoodKind>)] = &[
-    ("Quarry Ridge", Some(GoodKind::Ore), None),
-    ("Harbor Foundry", None, Some(GoodKind::Ore)),
-    ("Cedar Yard", Some(GoodKind::Lumber), None),
-    ("Builders' Wharf", None, Some(GoodKind::Lumber)),
-    ("High Quarry", Some(GoodKind::Ore), None),
-    ("Mill End", None, Some(GoodKind::Ore)),
+/// Name, lot size, produces, consumes. The lot is how much ground the site
+/// stands on, and therefore how far a goods platform may sit from its centre
+/// (04 §6) — quarries and wharves sprawl, yards do not.
+const INDUSTRY_SPECS: &[(&str, IndustryTier, Option<GoodKind>, Option<GoodKind>)] = &[
+    ("Quarry Ridge", IndustryTier::Complex, Some(GoodKind::Ore), None),
+    ("Harbor Foundry", IndustryTier::Works, None, Some(GoodKind::Ore)),
+    ("Cedar Yard", IndustryTier::Yard, Some(GoodKind::Lumber), None),
+    ("Builders' Wharf", IndustryTier::Complex, None, Some(GoodKind::Lumber)),
+    ("High Quarry", IndustryTier::Works, Some(GoodKind::Ore), None),
+    ("Mill End", IndustryTier::Yard, None, Some(GoodKind::Ore)),
 ];
 
 fn minutes_to_ticks(minutes: u32) -> u32 {
@@ -223,10 +226,10 @@ pub fn spawn_new_demand(
             tile,
         });
     } else {
-        let (name, produces, consumes) =
+        let (name, tier, produces, consumes) =
             INDUSTRY_SPECS[spawner.next_industry % INDUSTRY_SPECS.len()];
         spawner.next_industry = spawner.next_industry.saturating_add(1);
-        let id = industries.insert(name, tile, produces, consumes);
+        let id = industries.insert_tier(name, tile, tier, produces, consumes);
         let label = if produces.is_some() {
             format!("New industry: {name} - not yet served")
         } else {

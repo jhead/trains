@@ -11,6 +11,14 @@
 //! | Station | 2 | 5 | 1× | 14 |
 //! | Interchange | 4 | 8 | 0.6× | 32 |
 //! | Terminus | 3 stub | 6 | 0.9× | 24 |
+//! | Goods platform | 2 | 1 | 1.4× | 4 |
+//!
+//! §6's last line — "freight facilities work the same way: a goods platform
+//! placed against an industry" — is the fifth row. It is a platform like any
+//! other, built with the same tool on the same line, and it carries one extra
+//! rule: it only stands where it touches an industry lot
+//! ([`Industry::abuts`](super::industry::Industry::abuts)). Its catchment is
+//! almost nothing because it serves a works, not a town.
 //!
 //! [`StationTier::Station`] is the default so auto-seeded anchors keep the
 //! pre-tier catchment ([`crate::town::GROWTH_RADIUS`] = 5).
@@ -32,6 +40,9 @@ pub const INTERCHANGE_COST_CENTS: i64 = 40_000;
 
 /// Terminus — three stub platforms, end of line: $260.00.
 pub const TERMINUS_COST_CENTS: i64 = 26_000;
+
+/// Goods platform — two loading faces against an industry: $90.00.
+pub const GOODS_PLATFORM_COST_CENTS: i64 = 9_000;
 
 /// Minimum Chebyshev tiles between two stations — a platform every tile is not
 /// a railway, it is a tram.
@@ -109,11 +120,26 @@ pub const TERMINUS_SPEC: StationTierSpec = StationTierSpec {
     through_running: false,
 };
 
+/// Freight facility — two loading faces, built against an industry lot.
+///
+/// Long dwell (loading, not boarding), almost no catchment: it serves the works
+/// it stands against, and a town does not grow around a coal drop.
+pub const GOODS_PLATFORM_SPEC: StationTierSpec = StationTierSpec {
+    platforms: 2,
+    catchment: 1,
+    dwell_percent: 140,
+    capacity: 4,
+    build_cents: GOODS_PLATFORM_COST_CENTS,
+    maint_cents: 250,
+    arrival_gain: 6,
+    through_running: true,
+};
+
 /// Platform grade of a stop.
 ///
-/// Halt → Station → Interchange is the in-place upgrade ladder. Terminus is a
-/// sibling, not a rung: it is a different shape of railway, so it is built
-/// rather than upgraded into.
+/// Halt → Station → Interchange is the in-place upgrade ladder. Terminus and
+/// GoodsPlatform are siblings, not rungs: each is a different shape of railway,
+/// so they are built rather than upgraded into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum StationTier {
     Halt,
@@ -121,14 +147,20 @@ pub enum StationTier {
     Station,
     Interchange,
     Terminus,
+    /// 04 §6 last line — freight, placed against an industry.
+    ///
+    /// Deliberately last: the discriminant order is the save format's, and a
+    /// new variant in the middle would re-read every stored tier as another one.
+    GoodsPlatform,
 }
 
 impl StationTier {
-    pub const ALL: [StationTier; 4] = [
+    pub const ALL: [StationTier; 5] = [
         Self::Halt,
         Self::Station,
         Self::Interchange,
         Self::Terminus,
+        Self::GoodsPlatform,
     ];
 
     pub fn spec(self) -> StationTierSpec {
@@ -137,6 +169,7 @@ impl StationTier {
             Self::Station => STATION_SPEC,
             Self::Interchange => INTERCHANGE_SPEC,
             Self::Terminus => TERMINUS_SPEC,
+            Self::GoodsPlatform => GOODS_PLATFORM_SPEC,
         }
     }
 
@@ -146,7 +179,14 @@ impl StationTier {
             Self::Station => "Station",
             Self::Interchange => "Interchange",
             Self::Terminus => "Terminus",
+            Self::GoodsPlatform => "Goods Platform",
         }
+    }
+
+    /// `true` for the freight tier, which must stand against an industry lot.
+    #[inline]
+    pub fn needs_industry(self) -> bool {
+        matches!(self, Self::GoodsPlatform)
     }
 
     #[inline]
@@ -194,13 +234,13 @@ impl StationTier {
         (scaled.min(u32::from(u16::MAX)) as u16).max(1)
     }
 
-    /// Position on the upgrade ladder, or `None` for the off-ladder terminus.
+    /// Position on the upgrade ladder, or `None` for the off-ladder tiers.
     pub fn rank(self) -> Option<u8> {
         match self {
             Self::Halt => Some(0),
             Self::Station => Some(1),
             Self::Interchange => Some(2),
-            Self::Terminus => None,
+            Self::Terminus | Self::GoodsPlatform => None,
         }
     }
 
@@ -209,7 +249,7 @@ impl StationTier {
         match self {
             Self::Halt => Some(Self::Station),
             Self::Station => Some(Self::Interchange),
-            Self::Interchange | Self::Terminus => None,
+            Self::Interchange | Self::Terminus | Self::GoodsPlatform => None,
         }
     }
 
@@ -336,8 +376,38 @@ mod tests {
         );
         assert_eq!(StationTier::Interchange.next_upgrade(), None);
         assert_eq!(StationTier::Terminus.next_upgrade(), None);
+        assert_eq!(StationTier::GoodsPlatform.next_upgrade(), None);
         assert!(!StationTier::Station.on_ladder_with(StationTier::Terminus));
+        assert!(
+            !StationTier::Station.on_ladder_with(StationTier::GoodsPlatform),
+            "a passenger stop is not a freight facility with more platforms"
+        );
         assert!(StationTier::Halt.on_ladder_with(StationTier::Interchange));
+    }
+
+    /// 04 §6 last line: freight is a platform tier of its own.
+    #[test]
+    fn the_goods_platform_is_freight_shaped() {
+        let goods = StationTier::GoodsPlatform;
+        assert!(goods.needs_industry(), "it is placed against an industry");
+        assert!(
+            StationTier::ALL
+                .iter()
+                .filter(|t| t.needs_industry())
+                .count()
+                == 1,
+            "no passenger tier asks for an industry"
+        );
+        // It serves a works, not a town, so it draws almost no catchment.
+        assert!(goods.catchment() < StationTier::Halt.catchment());
+        assert!(goods.capacity() < StationTier::Halt.capacity());
+        // Loading is slower than boarding (07 §3: freight dwell scales with load).
+        let transport = crate::trains::TRANSPORT_PROFILE.dwell_ticks;
+        assert!(goods.dwell_ticks(transport) > StationTier::Station.dwell_ticks(transport));
+        // Priced between a halt and the workhorse: cheap enough to serve a
+        // sawmill on spec, dear enough to be a decision.
+        assert!(goods.build_cents() > HALT_COST_CENTS);
+        assert!(goods.build_cents() < STATION_COST_CENTS);
     }
 
     #[test]

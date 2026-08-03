@@ -7,12 +7,16 @@
 //! inverse replayed during an undo look like a fresh player action and wipe the
 //! redo stack.
 //!
+//! # Demolishing a stop a line calls at
+//! 04 §4 makes demolition a first-class verb that *names its consequence*
+//! rather than refusing, so this pass drops the call from every line that has
+//! one and records the slots it took, in [`LineId`] order. The inverse is a
+//! [`PlaceStation`] carrying those slots: the rebuilt stop gets a fresh
+//! [`StationId`], so undo splices *that* id back into the same positions.
+//!
 //! # Wiring seam
 //! [`StationCommand::from_kind`] and [`StationCommand::into_kind`] are the only
-//! two places that name the station variants of [`CommandKind`]. They are inert
-//! until `commands.rs` grows `PlaceStation` / `DemolishStation` /
-//! `UpgradeStation`; filling them in switches the whole path on. Everything
-//! else — validation, money, history, presentation — is already live and tested.
+//! two places that name the station variants of [`CommandKind`].
 
 use bevy_ecs::prelude::*;
 
@@ -22,10 +26,11 @@ use crate::commands::CommandKind;
 use crate::economy::MoneyLedger;
 use crate::history::{CommandHistory, HistoryMode};
 use crate::ids::{LineId, StationId, TileCoord};
-use crate::lines::LineRegistry;
+use crate::lines::{LineRegistry, LineStopSlot};
 use crate::money::Money;
 use crate::track::TrackNetwork;
 
+use super::industry::IndustryRegistry;
 use super::place::{
     try_demolish_station, try_place_station, try_upgrade_station, DemolishStation, PlaceStation,
     StationPlacementError, UpgradeStation,
@@ -50,6 +55,8 @@ pub enum StationEdit {
         tile: TileCoord,
         layer: u8,
         tier: StationTier,
+        /// Lines that lost a call, in [`LineId`] order.
+        dropped_from: Vec<LineId>,
     },
     Retiered {
         id: StationId,
@@ -84,15 +91,8 @@ impl StationCommand {
 
     /// **WIRING SEAM** — recognise the station variants of [`CommandKind`].
     ///
-    /// Replace the body with:
-    /// ```ignore
-    /// match kind {
-    ///     CommandKind::PlaceStation(p) => Some(Self::Place(p.clone())),
-    ///     CommandKind::DemolishStation(d) => Some(Self::Demolish(*d)),
-    ///     CommandKind::UpgradeStation(u) => Some(Self::Upgrade(*u)),
-    ///     _ => None,
-    /// }
-    /// ```
+    /// One of the two functions in the crate that name them; everything else
+    /// works in [`StationCommand`].
     pub fn from_kind(kind: &CommandKind) -> Option<Self> {
         match kind {
             CommandKind::PlaceStation(p) => Some(Self::Place(p.clone())),
@@ -104,14 +104,8 @@ impl StationCommand {
 
     /// **WIRING SEAM** — wrap the intent back into a [`CommandKind`].
     ///
-    /// Replace the body with:
-    /// ```ignore
-    /// Some(match self {
-    ///     Self::Place(p) => CommandKind::PlaceStation(p),
-    ///     Self::Demolish(d) => CommandKind::DemolishStation(d),
-    ///     Self::Upgrade(u) => CommandKind::UpgradeStation(u),
-    /// })
-    /// ```
+    /// The other half of [`Self::from_kind`], used to buffer an intent and to
+    /// record an inverse for undo.
     pub fn into_kind(self) -> Option<CommandKind> {
         Some(match self {
             Self::Place(p) => CommandKind::PlaceStation(p),
@@ -134,15 +128,17 @@ pub fn push_station_command(buffer: &mut CommandBuffer, command: StationCommand)
 }
 
 /// Drain [`PendingWorldCommand`] station kinds into the [`StationRegistry`].
+#[allow(clippy::too_many_arguments)]
 pub fn apply_station_commands(
     mut pending: MessageReader<PendingWorldCommand>,
     mut stations: ResMut<StationRegistry>,
+    industries: Res<IndustryRegistry>,
     mut service: ResMut<StationService>,
     mut money: ResMut<Money>,
     mut ledger: ResMut<MoneyLedger>,
     mut history: ResMut<CommandHistory>,
     network: Res<TrackNetwork>,
-    lines: Res<LineRegistry>,
+    mut lines: ResMut<LineRegistry>,
     mut edits: MessageWriter<StationEdit>,
 ) {
     let commands: Vec<StationCommand> = pending
@@ -157,12 +153,13 @@ pub fn apply_station_commands(
     for command in commands {
         apply_station_command(
             &mut stations,
+            &industries,
             &mut service,
             &mut money,
             &mut ledger,
             &mut history,
             &network,
-            |id| line_using(&lines, id),
+            &mut lines,
             &command,
             &mut |edit| queued.push(edit),
         );
@@ -179,12 +176,13 @@ pub fn apply_station_commands(
 #[allow(clippy::too_many_arguments)]
 pub fn apply_station_command(
     stations: &mut StationRegistry,
+    industries: &IndustryRegistry,
     service: &mut StationService,
     money: &mut Money,
     ledger: &mut MoneyLedger,
     history: &mut CommandHistory,
     network: &TrackNetwork,
-    line_using: impl Fn(StationId) -> Option<LineId>,
+    lines: &mut LineRegistry,
     command: &StationCommand,
     edit: &mut impl FnMut(StationEdit),
 ) {
@@ -197,6 +195,7 @@ pub fn apply_station_command(
     match command {
         StationCommand::Place(p) => match try_place_station(
             stations,
+            industries,
             service,
             money,
             ledger,
@@ -207,6 +206,11 @@ pub fn apply_station_command(
             p.name.clone(),
         ) {
             Ok(placed) => {
+                // Undoing a demolish: put the call back where it was. The stop
+                // is a new id, so the slots are filled with that.
+                for slot in &p.restore_stops {
+                    lines.restore_stop(slot.line, slot.index, placed.id);
+                }
                 edit(StationEdit::Placed {
                     id: placed.id,
                     tile: placed.station.tile,
@@ -222,15 +226,17 @@ pub fn apply_station_command(
             Err(error) => edit(StationEdit::Failed { error, tile }),
         },
         StationCommand::Demolish(d) => {
-            match try_demolish_station(stations, service, money, ledger, d.station, line_using) {
+            match try_demolish_station(stations, service, money, ledger, d.station) {
                 Ok(removed) => {
+                    let (dropped_from, restore_stops) = drop_calls(lines, removed.id);
                     edit(StationEdit::Removed {
                         id: removed.id,
                         tile: removed.tile,
                         layer: removed.layer,
                         tier: removed.tier,
+                        dropped_from,
                     });
-                    // Restore the same tier and name so undo is a true inverse.
+                    // Restore the same tier, name and calls so undo is a true inverse.
                     record(
                         history,
                         replaying,
@@ -239,6 +245,7 @@ pub fn apply_station_command(
                             layer: removed.layer,
                             tier: removed.tier,
                             name: Some(removed.name),
+                            restore_stops,
                         }),
                     );
                 }
@@ -246,7 +253,16 @@ pub fn apply_station_command(
             }
         }
         StationCommand::Upgrade(u) => {
-            match try_upgrade_station(stations, service, money, ledger, network, u.station, u.to) {
+            match try_upgrade_station(
+                stations,
+                industries,
+                service,
+                money,
+                ledger,
+                network,
+                u.station,
+                u.to,
+            ) {
                 Ok(retier) => {
                     edit(StationEdit::Retiered {
                         id: retier.id,
@@ -270,11 +286,31 @@ pub fn apply_station_command(
 }
 
 /// First line that still calls at `station`, if any.
+///
+/// [`LineId`] order, so the answer is the same on every machine and every run.
 pub fn line_using(lines: &LineRegistry, station: StationId) -> Option<LineId> {
-    lines
-        .iter()
-        .find(|line| line.contains_station(station))
-        .map(|line| line.id)
+    lines.lines_calling_at(station).first().copied()
+}
+
+/// Take `station` out of every line that calls there.
+///
+/// Returns the lines that lost a call and the slots to put it back in, both in
+/// [`LineId`] order — the first for the [`StationEdit`], the second for undo.
+fn drop_calls(lines: &mut LineRegistry, station: StationId) -> (Vec<LineId>, Vec<LineStopSlot>) {
+    let calling = lines.lines_calling_at(station);
+    let mut slots: Vec<LineStopSlot> = Vec::new();
+    for line in &calling {
+        let Some(removed) = lines.remove_stop(*line, station) else {
+            continue;
+        };
+        slots.extend(
+            removed
+                .indices
+                .into_iter()
+                .map(|index| LineStopSlot { line: *line, index }),
+        );
+    }
+    (calling, slots)
 }
 
 /// Push an inverse onto the replay batch or record it as a player action.
@@ -302,11 +338,13 @@ mod tests {
 
     struct World {
         stations: StationRegistry,
+        industries: IndustryRegistry,
         service: StationService,
         money: Money,
         ledger: MoneyLedger,
         history: CommandHistory,
         network: TrackNetwork,
+        lines: LineRegistry,
     }
 
     /// Flat land with a straight east-west run of `len` tiles from `(4, 8)`.
@@ -328,11 +366,13 @@ mod tests {
         }
         World {
             stations: StationRegistry::new(),
+            industries: IndustryRegistry::new(),
             service: StationService::default(),
             money: Money::new(1_000_000),
             ledger: MoneyLedger::default(),
             history: CommandHistory::new(),
             network,
+            lines: LineRegistry::new(),
         }
     }
 
@@ -340,25 +380,38 @@ mod tests {
         let mut edits = Vec::new();
         apply_station_command(
             &mut w.stations,
+            &w.industries,
             &mut w.service,
             &mut w.money,
             &mut w.ledger,
             &mut w.history,
             &w.network,
-            |_| None,
+            &mut w.lines,
             &command,
             &mut |edit| edits.push(edit),
         );
         edits
     }
 
+    /// Replay `w`'s newest undo entry, as the command buffer would.
+    fn undo(w: &mut World) -> Vec<StationEdit> {
+        let inverse = w.history.begin_undo().expect("an undo entry");
+        let mut edits = Vec::new();
+        for kind in inverse {
+            let command = StationCommand::from_kind(&kind).expect("a station inverse");
+            edits.extend(apply(w, command));
+        }
+        w.history.finish_replay();
+        edits
+    }
+
     fn place_at(x: i32, tier: StationTier) -> StationCommand {
-        StationCommand::Place(PlaceStation {
-            tile: TileCoord { x, y: 8 },
-            layer: GROUND_LAYER,
+        StationCommand::Place(PlaceStation::new(
+            TileCoord { x, y: 8 },
+            GROUND_LAYER,
             tier,
-            name: None,
-        })
+            None,
+        ))
     }
 
     #[test]
@@ -398,12 +451,12 @@ mod tests {
 
         let edits = apply(
             &mut w,
-            StationCommand::Place(PlaceStation {
-                tile: TileCoord { x: 20, y: 20 },
-                layer: GROUND_LAYER,
-                tier: StationTier::Halt,
-                name: None,
-            }),
+            StationCommand::Place(PlaceStation::new(
+                TileCoord { x: 20, y: 20 },
+                GROUND_LAYER,
+                StationTier::Halt,
+                None,
+            )),
         );
 
         assert!(w.stations.is_empty());
@@ -438,6 +491,7 @@ mod tests {
                 tile: TileCoord { x: 6, y: 8 },
                 layer: GROUND_LAYER,
                 tier: StationTier::Interchange,
+                dropped_from: vec![],
             }]
         );
     }
@@ -469,33 +523,164 @@ mod tests {
         assert_eq!(w.service.tier(id), StationTier::Interchange);
     }
 
-    #[test]
-    fn a_stop_on_a_line_is_refused_with_the_line_named() {
-        let mut w = world(6);
-        apply(&mut w, place_at(6, StationTier::Halt));
-        let id = w.stations.iter().next().expect("station").id;
+    /// Three stops in a row, all called at by one line.
+    fn line_of_three(w: &mut World) -> (LineId, Vec<StationId>) {
+        let mut ids = Vec::new();
+        for x in [5, 9, 13] {
+            apply(w, place_at(x, StationTier::Halt));
+            ids.push(
+                w.stations
+                    .at(TileCoord { x, y: 8 }, GROUND_LAYER)
+                    .expect("station")
+                    .id,
+            );
+        }
+        let line = w
+            .lines
+            .create("Riverside Loop".into(), ids.clone())
+            .expect("line");
+        (line, ids)
+    }
 
-        let mut edits = Vec::new();
-        apply_station_command(
-            &mut w.stations,
-            &mut w.service,
-            &mut w.money,
-            &mut w.ledger,
-            &mut w.history,
-            &w.network,
-            |_| Some(LineId(4)),
-            &StationCommand::Demolish(DemolishStation { station: id }),
-            &mut |edit| edits.push(edit),
+    /// 04 §4: the stop goes and the line loses the call — no refusal.
+    #[test]
+    fn demolishing_a_stop_a_line_calls_at_drops_the_call() {
+        let mut w = world(12);
+        let (line, ids) = line_of_three(&mut w);
+
+        let edits = apply(
+            &mut w,
+            StationCommand::Demolish(DemolishStation { station: ids[1] }),
         );
 
-        assert_eq!(w.stations.len(), 1);
+        assert!(w.stations.get(ids[1]).is_none(), "the stop is gone");
+        assert_eq!(
+            edits,
+            vec![StationEdit::Removed {
+                id: ids[1],
+                tile: TileCoord { x: 9, y: 8 },
+                layer: GROUND_LAYER,
+                tier: StationTier::Halt,
+                dropped_from: vec![line],
+            }],
+            "the edit names the lines that lost a call"
+        );
+        assert_eq!(w.lines.get(line).expect("line").stops, vec![ids[0], ids[2]]);
+        assert!(!w.lines.get(line).expect("line").is_dormant());
+    }
+
+    #[test]
+    fn every_line_calling_there_loses_the_stop() {
+        let mut w = world(12);
+        let (first, ids) = line_of_three(&mut w);
+        let second = w
+            .lines
+            .create("Quarry Run".into(), vec![ids[2], ids[1]])
+            .expect("second line");
+
+        let edits = apply(
+            &mut w,
+            StationCommand::Demolish(DemolishStation { station: ids[1] }),
+        );
+
+        match &edits[0] {
+            StationEdit::Removed { dropped_from, .. } => {
+                assert_eq!(dropped_from, &vec![first, second], "in LineId order");
+            }
+            other => panic!("expected a lift, got {other:?}"),
+        }
+        assert_eq!(w.lines.get(first).expect("line").stops, vec![ids[0], ids[2]]);
+        assert_eq!(w.lines.get(second).expect("line").stops, vec![ids[2]]);
+        assert!(
+            w.lines.get(second).expect("line").is_dormant(),
+            "a line left with one call is dormant, not deleted"
+        );
+        assert_eq!(w.lines.len(), 2, "neither line is thrown away");
+    }
+
+    /// Undo puts the stop *and* the call back — at the same index.
+    #[test]
+    fn undoing_a_demolish_restores_the_stop_in_its_old_place_on_the_line() {
+        let mut w = world(12);
+        let (line, ids) = line_of_three(&mut w);
+        let before = w.money.cents();
+
+        apply(
+            &mut w,
+            StationCommand::Demolish(DemolishStation { station: ids[1] }),
+        );
+        assert_eq!(w.lines.get(line).expect("line").stops.len(), 2);
+
+        undo(&mut w);
+
+        let stops = &w.lines.get(line).expect("line").stops;
+        assert_eq!(stops.len(), 3, "the call came back");
+        let restored = w
+            .stations
+            .at(TileCoord { x: 9, y: 8 }, GROUND_LAYER)
+            .expect("the stop was rebuilt");
+        assert_eq!(
+            stops[1], restored.id,
+            "the rebuilt stop takes the slot the old one held"
+        );
+        assert_eq!(restored.tier, StationTier::Halt);
+        assert_eq!(w.money.cents(), before, "the refund is handed back");
+        assert!(w.history.can_redo(), "the undo is itself redoable");
+    }
+
+    #[test]
+    fn undo_restores_a_stop_called_at_twice_and_wakes_the_line() {
+        let mut w = world(12);
+        let (_, ids) = line_of_three(&mut w);
+        // An out-and-back that calls at the middle stop on the way home.
+        let hub = w
+            .lines
+            .create("Hub Shuttle".into(), vec![ids[1], ids[2], ids[1]])
+            .expect("line");
+
+        apply(
+            &mut w,
+            StationCommand::Demolish(DemolishStation { station: ids[1] }),
+        );
+        assert!(w.lines.get(hub).expect("line").is_dormant());
+
+        undo(&mut w);
+
+        let restored = w
+            .stations
+            .at(TileCoord { x: 9, y: 8 }, GROUND_LAYER)
+            .expect("rebuilt")
+            .id;
+        assert_eq!(
+            w.lines.get(hub).expect("line").stops,
+            vec![restored, ids[2], restored],
+            "both calls come back in their original positions"
+        );
+        assert!(!w.lines.get(hub).expect("line").is_dormant());
+    }
+
+    /// A goods platform is refused where there is nothing to load, and the
+    /// refusal travels the same loud-failure path as every other rule.
+    #[test]
+    fn a_goods_platform_off_an_industry_fails_loudly() {
+        let mut w = world(12);
+        let edits = apply(&mut w, place_at(6, StationTier::GoodsPlatform));
+
+        assert!(w.stations.is_empty());
         assert_eq!(
             edits,
             vec![StationEdit::Failed {
-                error: StationPlacementError::OnLine { line: LineId(4) },
+                error: StationPlacementError::NoIndustryHere,
                 tile: Some(TileCoord { x: 6, y: 8 }),
             }]
         );
+
+        // Put a sawmill beside the line and the same command commits.
+        w.industries
+            .insert("Pine Sawmill", TileCoord { x: 6, y: 6 }, None, None);
+        let edits = apply(&mut w, place_at(6, StationTier::GoodsPlatform));
+        assert_eq!(w.stations.len(), 1);
+        assert!(matches!(edits[0], StationEdit::Placed { .. }));
     }
 
     #[test]

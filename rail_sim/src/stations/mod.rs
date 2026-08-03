@@ -16,7 +16,7 @@
 //! two functions that name the station variants of `CommandKind`.
 
 mod apply;
-mod industry;
+pub(crate) mod industry;
 mod place;
 mod registry;
 mod seed;
@@ -27,7 +27,7 @@ pub use apply::{
     apply_station_command, apply_station_commands, line_using, push_station_command,
     StationCommand, StationEdit,
 };
-pub use industry::{GoodKind, Industry, IndustryId, IndustryRegistry};
+pub use industry::{GoodKind, Industry, IndustryId, IndustryRegistry, IndustryTier};
 pub use place::{
     best_platform_run, platform_runs, suggest_station_name, try_demolish_station,
     try_place_station, try_upgrade_station, validate_station_site, DemolishStation, PlaceStation,
@@ -38,6 +38,7 @@ pub use seed::{seed_stations_and_industries, seed_stations_and_industries_at, An
 pub use service::{StationService, StationServiceScore};
 pub use tier::{
     catchment_influence, max_catchment, station_maintenance_total, StationTier, StationTierSpec,
-    HALT_COST_CENTS, HALT_SPEC, INTERCHANGE_COST_CENTS, INTERCHANGE_SPEC, MIN_STATION_SPACING,
-    STATION_COST_CENTS, STATION_SPEC, TERMINUS_COST_CENTS, TERMINUS_SPEC,
+    GOODS_PLATFORM_COST_CENTS, GOODS_PLATFORM_SPEC, HALT_COST_CENTS, HALT_SPEC,
+    INTERCHANGE_COST_CENTS, INTERCHANGE_SPEC, MIN_STATION_SPACING, STATION_COST_CENTS,
+    STATION_SPEC, TERMINUS_COST_CENTS, TERMINUS_SPEC,
 };

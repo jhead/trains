@@ -32,10 +32,19 @@ Tracks work against [`docs/design/11-roadmap.md`](design/11-roadmap.md). Update 
 | Distinct transit/transport profiles | done |
 | New demand outside network | done |
 | Congestion: reroute, yield, passing loops, double track | done |
+| Goods platform tier, placed against an industry lot | done |
+| Station demolish confirms, then drops the call | done |
 
 Passing loops and double track needed **no track-graph change** — the tile graph
 is 8-connected and auto-links neighbours, so a parallel row of tiles already is
 a loop. The gap was that movement followed a fixed path and waited.
+
+Demolishing a stop a line calls at now asks (04 §4) and then removes the call
+from every line, recording the slots so undo puts them back. A line left with
+fewer than two distinct calls is **kept, dormant** rather than deleted: deleting
+it would strand its trains on a `LineId` that no longer resolves, and it is the
+player's named object. A dormant line hands its trains no next stop, so they
+finish the leg they are on and idle.
 
 ## Phase D — Life
 
@@ -95,14 +104,6 @@ Things that work but are known-shallow, with the brief that wants more.
 
 | Item | Note |
 | --- | --- |
-| **Brief 02 §3.1's 1.5x cost tier is unreachable** | §2.3 requires every height step to be >= 3 units so the renderer draws an edge, but `tile_build_cost` charges 1.5x only at `slope <= 2`. The realised ladder is 1x flat / 6x cross-contour / 10x mountain / 8-20x bridge — still an order of magnitude, but the "gentle slope" row cannot occur. Either drop the row or widen the band to `slope <= 3`. |
-| **`largest_landmass` ignores bridges** | `stations/seed.rs` keeps only the largest 4-connected *land* component, so once a river reaches the map edge no anchor is ever seeded on the far bank and the crossing decision has nothing on the other side of it. Should flood over land plus water narrow enough to bridge. |
 | **Rail sprite bank must match the realised rose** | Brief 01 §5.2 assumed an even 32-entry bank at 11.25 deg steps. The graph's actual tangents are 0 / 26.57 / 45 / 63.43 deg, which are **not** multiples of 11.25 — the nearest entry is 4.07 deg away, above the `spritebank` plate's 2.81 deg target. Bake the bank at the sixteen realised bearings plus interpolants, never at even steps, or the facet-popping the plate names comes straight back. |
-| **Seed sharing no longer reproduces a world** | Options now steer the generator for real, but `rail_sim::save::MapGenOptions` is still a bare version tag and does not record the knobs — so a save says *that* a world was generated, not *how*. Needs a `knobs: u8` field (`rail_map::MapGenOptions::pack()`) plus a `SCHEMA_VERSION` bump. |
-| **Save has three hand-written mirrors** | `ServiceScoreSnapshot`/`StationServiceScore`, `ClockSnapshot`/`SimClock`, `BudgetSnapshot`/`PeepBudget` restore with `..Default::default()`. A new field on the source type **compiles and is silently not saved**. Bump `SCHEMA_VERSION` on any blob-shape change. |
 | **Gameplay plugins aren't state-gated** | They register systems without a named `SystemSet`, so `main.rs` cannot retro-fit `run_if(in_state(Playing))`. The shell gates by pointer-blocking and input suppression instead, which works. Real gating is one `.in_set(...)` edit per plugin file. |
 | **Map View downsamples world sprites** | Now that terrain is textured, nearest-sampling a 4-texel/tile view will alias. Briefs 01 §2.1 and 02 §6 want a purpose-built schematic render, not a downscaled world. |
-| **Station demolish refuses when a line calls there** | Brief 04 §4 wants a confirm dialog naming the consequence. Needs `LineRegistry::remove_stop`. |
-| **Goods platforms against industries** | Brief 04 §6 last line. `Industry` has no tier. |
-| **Peep resources not reset on New Map** | `PeepSpawnState`, `HouseholdRegistry`, `DistrictFlow`, `PeepBudget`, `PeepFocus` aren't publicly re-exported, so the shell can't clear them. Low risk — peeps respawn per station. |
-| **Two world-hash helpers** | `atmosphere/hash.rs` and `map/terrain/material.rs` both define one. Dedupe; the terrain one adds rather than XORs, which is better against diagonal moiré. |

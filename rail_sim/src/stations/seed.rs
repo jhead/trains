@@ -8,7 +8,7 @@
 use crate::ids::TileCoord;
 use crate::track::{GROUND_LAYER, MAX_BRIDGE_SPAN};
 
-use super::industry::{GoodKind, IndustryRegistry};
+use super::industry::{GoodKind, IndustryRegistry, IndustryTier};
 use super::registry::StationRegistry;
 use super::service::StationService;
 
@@ -113,11 +113,15 @@ pub fn seed_stations_and_industries_at(
         .copied()
         .or_else(|| land.get(land.len() / 2).copied());
 
+    // Lot sizes are the opening lesson in freight siting (04 §6): the sawmill
+    // is a 3x3 works you have to bring the line fairly close to, while the
+    // harbour mill is a 5x5 complex a goods platform can meet from further out.
     if let Some(tile) = saw_tile {
         if stations.at(tile, GROUND_LAYER).is_none() {
-            industries.insert(
+            industries.insert_tier(
                 "Pine Sawmill",
                 tile,
+                IndustryTier::Works,
                 Some(GoodKind::Lumber),
                 None,
             );
@@ -125,9 +129,10 @@ pub fn seed_stations_and_industries_at(
     }
     if let Some(tile) = mill_tile {
         if stations.at(tile, GROUND_LAYER).is_none() && industries.at(tile).is_none() {
-            industries.insert(
+            industries.insert_tier(
                 "Harbor Mill",
                 tile,
+                IndustryTier::Complex,
                 None,
                 Some(GoodKind::Lumber),
             );
@@ -278,6 +283,39 @@ mod tests {
         assert!(stations.iter().any(|s| s.name == "Eastgate"));
         assert!(industries.producer_of(GoodKind::Lumber).is_some());
         assert!(industries.consumer_of(GoodKind::Lumber).is_some());
+    }
+
+    #[test]
+    fn seeded_industries_stand_on_lots_a_goods_platform_can_reach() {
+        let mut stations = StationRegistry::new();
+        let mut industries = IndustryRegistry::new();
+        let mut service = StationService::default();
+        seed_stations_and_industries(
+            &mut stations,
+            &mut industries,
+            &mut service,
+            32,
+            32,
+            |_| true,
+        );
+
+        let saw = industries
+            .producer_of(GoodKind::Lumber)
+            .expect("a producer");
+        let mill = industries
+            .consumer_of(GoodKind::Lumber)
+            .expect("a consumer");
+        assert_eq!(saw.tier, IndustryTier::Works);
+        assert_eq!(mill.tier, IndustryTier::Complex);
+        // Every lot is reachable from the ring around it — that ring is where
+        // the player's first goods platform goes.
+        for industry in industries.iter() {
+            let edge = TileCoord {
+                x: industry.tile.x + industry.tier.lot_radius() + 1,
+                y: industry.tile.y,
+            };
+            assert!(industry.abuts(edge), "{} has no approach", industry.name);
+        }
     }
 
     #[test]

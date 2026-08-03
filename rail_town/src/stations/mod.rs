@@ -13,7 +13,7 @@ mod visuals;
 use bevy::prelude::*;
 
 use ghost::{setup_station_hud, sync_station_ghosts, update_station_hud};
-use tools::station_tool_input;
+use tools::{apply_confirmed_demolish, station_tool_input};
 use visuals::sync_station_industry_sprites;
 
 use crate::inspect::SelectionInputSet;
@@ -37,6 +37,7 @@ impl Plugin for StationsPlugin {
                 Update,
                 (
                     station_tool_input.after(SelectionInputSet),
+                    apply_confirmed_demolish.after(station_tool_input),
                     sync_station_ghosts.after(station_tool_input),
                     update_station_hud.after(station_tool_input),
                     sync_station_industry_sprites,

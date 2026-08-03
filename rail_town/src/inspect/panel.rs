@@ -476,16 +476,19 @@ fn build_view(
                 .consumes
                 .map(|g| g.label())
                 .unwrap_or("-");
+            // The lot is what a goods platform has to touch (04 §6), so the
+            // card states it rather than leaving the player to guess.
+            let lot = ind.tier.lot_side();
             InspectorView {
                 fingerprint: format!("in:{}:{}:{}", id.0, produces, consumes),
                 name: ind.name.clone(),
-                type_line: "Industry".into(),
+                type_line: format!("Industry - {}", ind.tier.label()),
                 headline: format!("Produces      {produces}"),
                 trend: String::new(),
                 cause: format!("Consumes {consumes}"),
                 cause_tone: CauseTone::Neutral,
                 body: format!(
-                    "Produces: {produces}\nConsumes: {consumes}\nTile: {}, {}",
+                    "Produces: {produces}\nConsumes: {consumes}\nLot: {lot} by {lot} tiles\nTile: {}, {}",
                     ind.tile.x, ind.tile.y
                 ),
             }

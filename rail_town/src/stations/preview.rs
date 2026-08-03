@@ -4,13 +4,13 @@
 //! ([04 — Building & Tools] §6): the ring shows how far the stop reaches, and
 //! the readout counts the buildings and the unserved anchors already inside it.
 
-use rail_sim::ids::TileCoord;
+use rail_sim::ids::{StationId, TileCoord};
 use rail_sim::stations::{
     best_platform_run, validate_station_site, StationPlacementError, StationRegistry, StationTier,
 };
 use rail_sim::track::{opposite_dir, step};
 use rail_sim::{
-    DemandSpawner, IndustryRegistry, Money, TownDensity, TrackNetwork, GROUND_LAYER,
+    DemandSpawner, IndustryRegistry, LineRegistry, Money, TownDensity, TrackNetwork, GROUND_LAYER,
 };
 
 /// Density at or above this reads as a standing building.
@@ -31,6 +31,8 @@ pub struct StationPreview {
     pub buildings: u32,
     /// Revealed-but-unconnected anchors inside the catchment.
     pub unserved: u32,
+    /// Industry a goods platform here would load (04 §6), if any.
+    pub serves: Option<String>,
     pub can_commit: bool,
     pub reject: Option<String>,
 }
@@ -51,7 +53,8 @@ pub fn preview_station(
     let cost = tier.build_cents();
     let catchment = tier.catchment();
 
-    let outcome = validate_station_site(stations, network, tile, GROUND_LAYER, tier, None);
+    let outcome =
+        validate_station_site(stations, industries, network, tile, GROUND_LAYER, tier, None);
     let mut reject = outcome
         .as_ref()
         .err()
@@ -80,6 +83,10 @@ pub fn preview_station(
         platforms,
         buildings: buildings_in_catchment(density, tile, catchment),
         unserved: unserved_in_catchment(stations, industries, demand, tile, catchment),
+        serves: tier
+            .needs_industry()
+            .then(|| industries.abutting(tile).map(|i| i.name.clone()))
+            .flatten(),
         can_commit: reject.is_none(),
         reject,
     }
@@ -191,30 +198,81 @@ pub fn station_reason(err: StationPlacementError, cost: i64, balance: i64) -> St
         StationPlacementError::NotAStubEnd => {
             "Terminus needs a dead end - the line runs through here".into()
         }
+        StationPlacementError::NoIndustryHere => {
+            "Goods platforms load an industry - none touches this tile".into()
+        }
         StationPlacementError::InsufficientFunds => {
             let short = (cost - balance).max(0);
             format!("Short by {}", format_dollars(short))
         }
         StationPlacementError::UnknownStation => "No station there".into(),
-        StationPlacementError::OnLine { .. } => {
-            "A line still calls here - clear the line first".into()
-        }
         StationPlacementError::NotUpgradable { from, to } => {
             format!("Can't upgrade {} to {}", from.label(), to.label())
         }
     }
 }
 
+/// What lifting `station` would do to the lines that call there.
+///
+/// `None` when no line calls there — that demolish is unremarkable and needs no
+/// confirming. 04 §4: a demolition with a consequence **names the consequence**
+/// rather than being refused, so the first line is who loses a call and the
+/// second (when there is one) is which line is left with nowhere to run.
+pub fn demolish_consequence(lines: &LineRegistry, station: StationId) -> Option<String> {
+    let calling = lines.lines_calling_at(station);
+    let named: Vec<&str> = calling
+        .iter()
+        .filter_map(|id| lines.get(*id))
+        .map(|line| line.name.as_str())
+        .collect();
+    let first = *named.first()?;
+
+    let mut text = match named.len() {
+        1 => format!("{first} stops here. Demolish and drop the stop?"),
+        2 => format!("{first} and 1 other line stop here. Demolish and drop the stop?"),
+        n => format!(
+            "{first} and {} other lines stop here. Demolish and drop the stop?",
+            n - 1
+        ),
+    };
+
+    // A line whose remaining calls are all the same stop is going nowhere.
+    let stranded: Vec<&str> = calling
+        .iter()
+        .filter_map(|id| lines.get(*id))
+        .filter(|line| {
+            let mut left = line.stops.iter().filter(|stop| **stop != station);
+            match left.next() {
+                None => true,
+                Some(first) => left.all(|stop| stop == first),
+            }
+        })
+        .map(|line| line.name.as_str())
+        .collect();
+    match stranded.len() {
+        0 => {}
+        1 => text.push_str(&format!("\n{} has nowhere left to run.", stranded[0])),
+        n => text.push_str(&format!("\n{n} lines have nowhere left to run.")),
+    }
+    Some(text)
+}
+
 /// One-line summary for the tool's cost HUD.
 pub fn station_hud_line(preview: &StationPreview) -> String {
+    // A goods platform is sited by what it loads, not by who lives nearby.
+    let middle = match &preview.serves {
+        Some(industry) => format!("Loads {industry}"),
+        None => format!(
+            "{} buildings  -  {} unserved",
+            preview.buildings, preview.unserved
+        ),
+    };
     format!(
-        "{}  {}  -  {} platforms  -  reach {}\n{} buildings  -  {} unserved\nBalance  {}",
+        "{}  {}  -  {} platforms  -  reach {}\n{middle}\nBalance  {}",
         preview.tier.label(),
         format_dollars(preview.cost_cents),
         preview.tier.platforms(),
         preview.catchment,
-        preview.buildings,
-        preview.unserved,
         format_dollars(preview.balance_after_cents),
     )
 }
@@ -233,7 +291,7 @@ mod tests {
     use super::*;
     use rail_sim::stations::MIN_STATION_SPACING;
     use rail_sim::track::{try_place_track, TrackTerrain};
-    use rail_sim::MoneyLedger;
+    use rail_sim::{IndustryTier, MoneyLedger};
 
     fn line_of(len: i32) -> TrackNetwork {
         let terrain = TrackTerrain::new(32, 32, (0..32 * 32).map(|_| (false, 0i8)));
@@ -299,6 +357,139 @@ mod tests {
         let p = preview_at(7, StationTier::Station, money);
         assert!(!p.can_commit);
         assert_eq!(p.reject.as_deref(), Some("Short by $5.00"));
+    }
+
+    /// 04 §6 last line: the ghost says what the platform would load, and the
+    /// refusal says why there is nothing to load.
+    #[test]
+    fn a_goods_platform_previews_the_industry_it_would_serve() {
+        let mut industries = IndustryRegistry::new();
+        industries.insert_tier(
+            "Pine Sawmill",
+            TileCoord { x: 7, y: 6 },
+            IndustryTier::Works,
+            None,
+            None,
+        );
+        let p = preview_station(
+            &StationRegistry::new(),
+            &industries,
+            &line_of(8),
+            &TownDensity::default(),
+            &DemandSpawner::default(),
+            &Money::new(1_000_000),
+            TileCoord { x: 7, y: 8 },
+            StationTier::GoodsPlatform,
+        );
+        assert!(p.can_commit, "{:?}", p.reject);
+        assert_eq!(p.serves.as_deref(), Some("Pine Sawmill"));
+        assert!(station_hud_line(&p).contains("Loads Pine Sawmill"));
+
+        // Same line, no lot within reach.
+        let p = preview_station(
+            &StationRegistry::new(),
+            &IndustryRegistry::new(),
+            &line_of(8),
+            &TownDensity::default(),
+            &DemandSpawner::default(),
+            &Money::new(1_000_000),
+            TileCoord { x: 7, y: 8 },
+            StationTier::GoodsPlatform,
+        );
+        assert!(!p.can_commit);
+        assert_eq!(
+            p.reject.as_deref(),
+            Some("Goods platforms load an industry - none touches this tile")
+        );
+        assert!(p.serves.is_none());
+    }
+
+    /// The dialog copy: who loses a call, and who is left going nowhere.
+    #[test]
+    fn the_demolish_confirm_names_the_lines_that_call_there() {
+        let (a, b, c) = (StationId(1), StationId(2), StationId(3));
+        let mut lines = LineRegistry::new();
+
+        assert_eq!(
+            demolish_consequence(&lines, b),
+            None,
+            "a stop no line calls at needs no confirming"
+        );
+
+        lines.create("Riverside Loop".into(), vec![a, b, c]).unwrap();
+        assert_eq!(
+            demolish_consequence(&lines, b).as_deref(),
+            Some("Riverside Loop stops here. Demolish and drop the stop?")
+        );
+
+        lines.create("Quarry Run".into(), vec![a, b, c]).unwrap();
+        assert_eq!(
+            demolish_consequence(&lines, b).as_deref(),
+            Some("Riverside Loop and 1 other line stop here. Demolish and drop the stop?")
+        );
+
+        lines.create("Coast Local".into(), vec![b, c]).unwrap();
+        assert_eq!(
+            demolish_consequence(&lines, b)
+                .as_deref()
+                .map(|s| s.lines().next().unwrap().to_string())
+                .as_deref(),
+            Some("Riverside Loop and 2 other lines stop here. Demolish and drop the stop?")
+        );
+    }
+
+    #[test]
+    fn the_demolish_confirm_says_which_line_would_have_nowhere_to_run() {
+        let (a, b) = (StationId(1), StationId(2));
+        let mut lines = LineRegistry::new();
+        lines.create("Riverside Loop".into(), vec![a, b]).unwrap();
+
+        let text = demolish_consequence(&lines, b).expect("a consequence");
+        assert_eq!(
+            text.lines().nth(1),
+            Some("Riverside Loop has nowhere left to run.")
+        );
+
+        lines.create("Quarry Run".into(), vec![a, b]).unwrap();
+        let text = demolish_consequence(&lines, b).expect("a consequence");
+        assert_eq!(text.lines().nth(1), Some("2 lines have nowhere left to run."));
+
+        // A line with somewhere left to go says nothing extra.
+        let mut lines = LineRegistry::new();
+        lines
+            .create("Riverside Loop".into(), vec![a, b, StationId(3)])
+            .unwrap();
+        let text = demolish_consequence(&lines, b).expect("a consequence");
+        assert_eq!(text.lines().count(), 1);
+    }
+
+    /// The shipped bitmap font has a small charset (`docs/BURNDOWN.md`).
+    #[test]
+    fn every_station_string_stays_inside_the_font() {
+        let (a, b) = (StationId(1), StationId(2));
+        let mut lines = LineRegistry::new();
+        lines.create("Riverside Loop".into(), vec![a, b]).unwrap();
+        let text = demolish_consequence(&lines, b).expect("a consequence");
+        assert!(text.is_ascii(), "{text} would draw as tofu");
+
+        for error in [
+            StationPlacementError::NoIndustryHere,
+            StationPlacementError::NoTrack,
+            StationPlacementError::NotAStubEnd,
+            StationPlacementError::UnknownStation,
+            StationPlacementError::InsufficientFunds,
+            StationPlacementError::AlreadyStation,
+            StationPlacementError::InvalidLayer,
+            StationPlacementError::TooClose { distance: 2, min: 3 },
+            StationPlacementError::NoPlatformRoom { have: 1, need: 2 },
+            StationPlacementError::NotUpgradable {
+                from: StationTier::Terminus,
+                to: StationTier::GoodsPlatform,
+            },
+        ] {
+            let reason = station_reason(error, 100, 0);
+            assert!(reason.is_ascii(), "{reason} would draw as tofu");
+        }
     }
 
     #[test]

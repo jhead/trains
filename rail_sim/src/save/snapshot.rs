@@ -995,9 +995,10 @@ fn restore_stations(snapshot: &WorldSnapshot, world: &mut World, report: &mut Re
 
     let mut industries = IndustryRegistry::new();
     for industry in &snapshot.stations.industries {
-        let id = industries.insert(
+        let id = industries.insert_tier(
             industry.name.clone(),
             industry.tile,
+            industry.tier,
             industry.produces,
             industry.consumes,
         );

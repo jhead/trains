@@ -280,12 +280,12 @@ fn drive_stress(
             if cell.water {
                 continue;
             }
-            buffer.push(CommandKind::PlaceStation(PlaceStation {
+            buffer.push(CommandKind::PlaceStation(PlaceStation::new(
                 tile,
-                layer: GROUND_LAYER,
-                tier: StationTier::default(),
-                name: None,
-            }));
+                GROUND_LAYER,
+                StationTier::default(),
+                None,
+            )));
             placed.push(tile);
         }
         // A line through the lot, so the corridor / commercial classification

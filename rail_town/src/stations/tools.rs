@@ -5,10 +5,11 @@
 //! commits, and every rejection names its rule.
 //!
 //! - `P` — select the Station tool; press again to cycle
-//!   Halt → Station → Interchange → Terminus
+//!   Halt → Station → Interchange → Terminus → Goods Platform
 //! - Left click — build the selected tier on the track under the cursor
 //! - `U` — upgrade the station under the cursor to the next tier up
-//! - Right click — lift the station under the cursor (full refund)
+//! - Right click — lift the station under the cursor (full refund). When lines
+//!   call there it asks first, naming them (04 §4).
 //! - `Esc` — leave the tool; `B` / `X` / `T` / `G` / `L` reclaim their own
 
 use bevy::ecs::system::SystemParam;
@@ -17,8 +18,8 @@ use bevy::window::PrimaryWindow;
 use rail_map::{world_to_tile, MapGrid};
 use rail_sim::ids::TileCoord;
 use rail_sim::stations::{
-    line_using, push_station_command, DemolishStation, PlaceStation, StationCommand,
-    StationPlacementError, StationRegistry, StationTier, UpgradeStation,
+    push_station_command, DemolishStation, PlaceStation, StationCommand, StationPlacementError,
+    StationRegistry, StationTier, UpgradeStation,
 };
 use rail_sim::{
     CommandBuffer, DemandSpawner, IndustryRegistry, LineRegistry, Money, TownDensity, TrackNetwork,
@@ -31,16 +32,17 @@ use crate::lines::LineToolState;
 use crate::map::MapCamera;
 use crate::track::{BuildTool, TrackToolState};
 use crate::trains::TrainToolState;
-use crate::ui::UiBlocksWorld;
+use crate::ui::{ConfirmAccepted, ConfirmAction, ConfirmDialog, ConfirmPrompt, UiBlocksWorld};
 
-use super::preview::{preview_station, station_reason, StationPreview};
+use super::preview::{demolish_consequence, preview_station, station_reason, StationPreview};
 
 /// Tier order the `P` key cycles through.
-const TIER_CYCLE: [StationTier; 4] = [
+const TIER_CYCLE: [StationTier; 5] = [
     StationTier::Halt,
     StationTier::Station,
     StationTier::Interchange,
     StationTier::Terminus,
+    StationTier::GoodsPlatform,
 ];
 
 #[derive(Debug, Clone, Default, Resource)]
@@ -124,7 +126,13 @@ pub fn station_tool_input(
     mut buffer: ResMut<CommandBuffer>,
     mut state: ResMut<StationToolState>,
     mut focus: ToolFocus,
+    mut confirm: ResMut<ConfirmDialog>,
 ) {
+    // A question on screen owns the keyboard and the pointer until it is
+    // answered — the tool must not build under its own dialog.
+    if confirm.is_open() {
+        return;
+    }
     if bindings.just_pressed(&keys, ControlAction::PlaceStation) {
         if state.active {
             state.cycle_tier();
@@ -200,7 +208,32 @@ pub fn station_tool_input(
     if mouse.just_pressed(MouseButton::Left) {
         commit_place(&mut state, &mut buffer);
     } else if mouse.just_pressed(MouseButton::Right) {
-        demolish_under_cursor(&mut state, &world.stations, &world.lines, &mut buffer);
+        demolish_under_cursor(
+            &mut state,
+            &world.stations,
+            &world.lines,
+            &mut buffer,
+            &mut confirm,
+        );
+    }
+}
+
+/// Carry out a demolish the player agreed to in the dialog.
+///
+/// The dialog never touches the sim: it hands back the action and the tool that
+/// raised it issues the command, on the tick boundary like every other intent.
+pub fn apply_confirmed_demolish(
+    mut accepted: MessageReader<ConfirmAccepted>,
+    mut buffer: ResMut<CommandBuffer>,
+    mut state: ResMut<StationToolState>,
+) {
+    for ConfirmAccepted(action) in accepted.read() {
+        let ConfirmAction::DemolishStation(station) = action;
+        state.reject = None;
+        push_station_command(
+            &mut buffer,
+            StationCommand::Demolish(DemolishStation { station: *station }),
+        );
     }
 }
 
@@ -215,12 +248,12 @@ fn commit_place(state: &mut StationToolState, buffer: &mut CommandBuffer) {
     state.reject = None;
     push_station_command(
         buffer,
-        StationCommand::Place(PlaceStation {
-            tile: preview.tile,
-            layer: GROUND_LAYER,
-            tier: preview.tier,
-            name: None,
-        }),
+        StationCommand::Place(PlaceStation::new(
+            preview.tile,
+            GROUND_LAYER,
+            preview.tier,
+            None,
+        )),
     );
 }
 
@@ -262,6 +295,7 @@ fn demolish_under_cursor(
     stations: &StationRegistry,
     lines: &LineRegistry,
     buffer: &mut CommandBuffer,
+    confirm: &mut ConfirmDialog,
 ) {
     let Some(tile) = state.hover_tile else {
         return;
@@ -270,13 +304,16 @@ fn demolish_under_cursor(
         state.reject = Some(station_reason(StationPlacementError::UnknownStation, 0, 0));
         return;
     };
-    // Say so at the click rather than letting the sim silently refuse.
-    if let Some(line) = line_using(lines, station.id) {
-        state.reject = Some(station_reason(
-            StationPlacementError::OnLine { line },
-            0,
-            0,
-        ));
+    // 04 §4: a demolish with a consequence asks, and names it. Everything else
+    // is a plain reversible lift and goes straight through.
+    if let Some(body) = demolish_consequence(lines, station.id) {
+        confirm.ask(ConfirmPrompt {
+            title: "Demolish station".into(),
+            body,
+            confirm: "Demolish".into(),
+            action: ConfirmAction::DemolishStation(station.id),
+        });
+        state.reject = None;
         return;
     }
     state.reject = None;
@@ -291,6 +328,31 @@ fn demolish_under_cursor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rail_sim::{CommandKind, StationId};
+
+    #[test]
+    fn saying_yes_in_the_dialog_buffers_the_demolish_command() {
+        let mut app = App::new();
+        app.init_resource::<CommandBuffer>()
+            .init_resource::<StationToolState>()
+            .add_message::<ConfirmAccepted>()
+            .add_systems(Update, apply_confirmed_demolish);
+
+        // Nothing agreed to yet: the sim hears nothing.
+        app.update();
+        assert!(app.world().resource::<CommandBuffer>().pending().is_empty());
+
+        app.world_mut()
+            .write_message(ConfirmAccepted(ConfirmAction::DemolishStation(StationId(7))));
+        app.update();
+
+        let pending = app.world().resource::<CommandBuffer>().pending();
+        assert_eq!(pending.len(), 1, "one command per agreement");
+        assert!(
+            matches!(pending[0].kind, CommandKind::DemolishStation(d) if d.station == StationId(7)),
+            "the dialog's yes becomes the command, on the tick boundary"
+        );
+    }
 
     #[test]
     fn p_cycles_every_tier_and_returns_to_the_start() {

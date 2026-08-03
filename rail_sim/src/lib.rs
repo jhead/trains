@@ -63,7 +63,7 @@ pub use goals::{
 pub use ids::{EntityId, LineId, StationId, TileCoord, TrackId, TrainId};
 pub use lines::{
     apply_line_commands, line_colour_rgba, line_path, suggest_line_name, Line, LineColour,
-    LineDirection, LineRegistry, LINE_PALETTE,
+    LineDirection, LineRegistry, LineStopSlot, RemovedStops, LINE_PALETTE,
 };
 pub use money::{InsufficientFunds, Money, STARTING_CASH_CENTS};
 pub use peeps::{
@@ -87,10 +87,10 @@ pub use stations::{
     apply_station_commands, catchment_influence, push_station_command,
     seed_stations_and_industries, seed_stations_and_industries_at, station_maintenance_total,
     AnchorSites, DemolishStation, GoodKind, Industry,
-    IndustryId, IndustryRegistry, PlaceStation, Station, StationCommand, StationEdit,
+    IndustryId, IndustryRegistry, IndustryTier, PlaceStation, Station, StationCommand, StationEdit,
     StationPlacementError, StationRegistry, StationService, StationServiceScore, StationTier,
-    StationTierSpec, UpgradeStation, HALT_COST_CENTS, INTERCHANGE_COST_CENTS, MIN_STATION_SPACING,
-    STATION_COST_CENTS, TERMINUS_COST_CENTS,
+    StationTierSpec, UpgradeStation, GOODS_PLATFORM_COST_CENTS, HALT_COST_CENTS,
+    INTERCHANGE_COST_CENTS, MIN_STATION_SPACING, STATION_COST_CENTS, TERMINUS_COST_CENTS,
 };
 pub use town::{TownDensity, TownPlugin, GROWTH_RADIUS, MAX_DENSITY};
 pub use track::{
@@ -171,7 +171,12 @@ impl Plugin for SimPlugin {
                         .before(apply_track_commands),
                     apply_track_commands.after(apply_commands),
                     apply_train_commands.after(apply_commands),
-                    apply_line_commands.after(apply_commands),
+                    // Both write `LineRegistry` — the station pass drops the
+                    // calls at a demolished stop. Ordering them explicitly is
+                    // what keeps a tick carrying both kinds deterministic, and
+                    // it puts line edits after the world they are edited
+                    // against has changed.
+                    apply_line_commands.after(apply_station_commands),
                 )
                     .in_set(SimSet::ApplyCommands),
             )

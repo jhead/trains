@@ -17,11 +17,12 @@ pub struct StationSprite {
 
 /// Sprite footprint for a tier, as a fraction of the tile.
 ///
-/// Scales with platform count so the four grades are told apart at a glance.
+/// Scales with platform count so the grades are told apart at a glance. The
+/// goods platform reads as a two-platform stop because that is what it is.
 pub fn tier_sprite_scale(tier: StationTier) -> f32 {
     match tier {
         StationTier::Halt => 0.4,
-        StationTier::Station => 0.55,
+        StationTier::Station | StationTier::GoodsPlatform => 0.55,
         StationTier::Terminus => 0.65,
         StationTier::Interchange => 0.75,
     }

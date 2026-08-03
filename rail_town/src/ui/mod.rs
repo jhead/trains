@@ -14,6 +14,7 @@
 //! | [`kit`] | Metrics, type, colour roles, meters, button chrome |
 //! | [`format`] | Money, rate, clock and date readouts |
 //! | [`window`] | Open / close / drag / stack / `Esc` |
+//! | [`confirm`] | The one modal: an action that names its consequence first |
 //! | [`menu_bar`] | The top block, and the verb and window button groups |
 //! | [`status_strip`] | Money, rate, date and time, speed, alert bell |
 //! | [`health`] | Network health — the permanent readout, and its window |
@@ -34,6 +35,7 @@
 
 mod adapters;
 mod alerts;
+mod confirm;
 mod format;
 mod health;
 pub(crate) mod kit;
@@ -52,6 +54,9 @@ use adapters::{introduce_goals_window, sync_inspector_window, GoalsIntroduced, I
 use alerts::{
     alert_dismiss_all_clicks, alert_row_clicks, setup_alerts_ui, update_alert_row_hover,
     update_alerts_ui,
+};
+use confirm::{
+    confirm_dialog_clicks, confirm_dialog_keys, paint_confirm_dialog, sync_confirm_dialog,
 };
 use health::{
     health_chip_clicks, health_chip_hover, health_refresh_due, network_chip_clicks,
@@ -75,6 +80,7 @@ use window::{
     raise_clicked_window, update_window_chrome, window_close_clicks, PanelCueWatch,
 };
 
+pub use confirm::{ConfirmAccepted, ConfirmAction, ConfirmDialog, ConfirmPrompt};
 pub use window::{UiWindow, WindowEscSet, WindowId, WindowManager};
 
 /// True while the pointer is over a UI button (world clicks should ignore).
@@ -98,14 +104,23 @@ impl Plugin for UiPlugin {
             // `panel_cues` writes one whether or not `AudioPlugin` was added.
             // Registration is idempotent, so the audio plugin still owns it.
             .add_message::<crate::audio::UiCue>()
+            .init_resource::<ConfirmDialog>()
+            .add_message::<ConfirmAccepted>()
             // `Esc` must reach a window before it reaches the pause menu, and a
             // synthetic key must land before anything reads `just_pressed`.
             // Both belong in `PreUpdate`, after real input has been gathered.
             // `ShellPlugin` orders its own `Esc` handling after this set.
+            //
+            // An open confirm dialog is the innermost layer of all, so it takes
+            // the press first and clears it (03 §10.1: one layer per press).
             .configure_sets(PreUpdate, WindowEscSet.after(InputSystems))
             .add_systems(
                 PreUpdate,
-                (inject_synthetic_keys, close_top_window_on_escape)
+                (
+                    inject_synthetic_keys,
+                    confirm_dialog_keys,
+                    close_top_window_on_escape,
+                )
                     .chain()
                     .in_set(WindowEscSet),
             )
@@ -177,6 +192,16 @@ impl Plugin for UiPlugin {
                     alert_dismiss_all_clicks,
                     update_alert_row_hover,
                     undo_redo_input,
+                ),
+            )
+            // The modal. Clicks are read before the rebuild so a press closes
+            // the dialog on the same frame it lands.
+            .add_systems(
+                Update,
+                (
+                    confirm_dialog_clicks,
+                    sync_confirm_dialog.after(confirm_dialog_clicks),
+                    paint_confirm_dialog.after(sync_confirm_dialog),
                 ),
             );
     }

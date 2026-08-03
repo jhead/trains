@@ -7,7 +7,9 @@ use crate::commands::TrainKind;
 use crate::ids::{StationId, TrackId};
 use crate::lines::LineRegistry;
 use crate::peeps::DistrictFlow;
-use crate::stations::{GoodKind, IndustryId, IndustryRegistry, StationRegistry, StationService};
+use crate::stations::{
+    GoodKind, IndustryId, IndustryRegistry, StationRegistry, StationService, StationTier,
+};
 use crate::track::{TrackNetwork, GROUND_LAYER};
 use crate::trains::find_path_for_kind;
 use crate::trains::{track_for_station, Train, TrainCargo, TrainLocation, TrainOnLine};
@@ -226,9 +228,14 @@ pub fn assign_jobs(
                 }
                 continue;
             }
-            // Shuttle empty along the line.
+            // Shuttle empty along the line. A stop demolished out from under
+            // the schedule shifts every index after it, so the destination is
+            // read through `get`: the train re-paths to whatever call is
+            // actually there, and a dormant line simply hands it nothing.
             if let Some(next_idx) = line.next_stop_index(on.next_stop, &mut on.forward) {
-                let dest_station = line.stops[next_idx];
+                let Some(&dest_station) = line.stops.get(next_idx) else {
+                    continue;
+                };
                 if let Some(path) =
                     path_to_station(&network, &stations, train.kind, loc.track, dest_station)
                 {
@@ -248,7 +255,8 @@ pub fn assign_jobs(
             }),
             TrainKind::Transport => board.jobs.iter().position(|j| match j.kind {
                 JobKind::Goods { from, to, .. } => {
-                    path_industries(&network, &industries, train.kind, from, to).is_some()
+                    path_industries(&network, &stations, &industries, train.kind, from, to)
+                        .is_some()
                 }
                 _ => false,
             }),
@@ -278,6 +286,7 @@ pub fn assign_jobs(
             JobKind::Goods { kind, from, to } => {
                 if !take_goods_job(
                     &mut board,
+                    &stations,
                     &industries,
                     &network,
                     train,
@@ -340,7 +349,7 @@ fn try_assign_line_job(
             // train is assigned (line preference over free-roam is the shuttle).
             let idx = board.jobs.iter().position(|j| match j.kind {
                 JobKind::Goods { from, to, .. } => {
-                    path_industries(network, industries, train.kind, from, to).is_some()
+                    path_industries(network, stations, industries, train.kind, from, to).is_some()
                 }
                 _ => false,
             });
@@ -351,6 +360,7 @@ fn try_assign_line_job(
             match job.kind {
                 JobKind::Goods { kind, from, to } => take_goods_job(
                     board,
+                    stations,
                     industries,
                     network,
                     train,
@@ -409,8 +419,10 @@ fn take_passenger_job(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn take_goods_job(
     board: &mut JobBoard,
+    stations: &StationRegistry,
     industries: &IndustryRegistry,
     network: &TrackNetwork,
     train: &Train,
@@ -421,14 +433,14 @@ fn take_goods_job(
     to: IndustryId,
     reward_cents: i64,
 ) -> bool {
-    let Some(leg) = path_industries(network, industries, train.kind, from, to) else {
+    let Some(leg) = path_industries(network, stations, industries, train.kind, from, to) else {
         board.jobs.push(Job {
             kind: JobKind::Goods { kind, from, to },
             reward_cents,
         });
         return false;
     };
-    let Some(from_track) = industry_track(network, industries, from) else {
+    let Some(from_track) = industry_track(network, stations, industries, from) else {
         board.jobs.push(Job {
             kind: JobKind::Goods { kind, from, to },
             reward_cents,
@@ -493,23 +505,313 @@ fn path_stations(
     find_path_for_kind(network, a, b, kind)
 }
 
+/// Where a freight train calls to work an industry.
+///
+/// The goods platform built against the lot (04 §6) if the player put one
+/// there, otherwise the railhead on the industry's own tile — a line run
+/// straight into the works still loads, exactly as it did before platforms.
 fn industry_track(
     network: &TrackNetwork,
+    stations: &StationRegistry,
     industries: &IndustryRegistry,
     id: IndustryId,
 ) -> Option<TrackId> {
     let ind = industries.get(id)?;
+    if let Some(platform) = goods_platform_for(stations, ind) {
+        if let Some(track) = track_for_station(network, platform.tile, platform.layer) {
+            return Some(track);
+        }
+    }
     track_for_station(network, ind.tile, GROUND_LAYER)
+}
+
+/// The goods platform serving `industry`, lowest [`StationId`] first.
+fn goods_platform_for<'a>(
+    stations: &'a StationRegistry,
+    industry: &crate::stations::Industry,
+) -> Option<&'a crate::stations::Station> {
+    stations
+        .iter()
+        .filter(|s| s.tier == StationTier::GoodsPlatform && industry.abuts(s.tile))
+        .min_by_key(|s| s.id.0)
 }
 
 fn path_industries(
     network: &TrackNetwork,
+    stations: &StationRegistry,
     industries: &IndustryRegistry,
     kind: TrainKind,
     from: IndustryId,
     to: IndustryId,
 ) -> Option<Vec<TrackId>> {
-    let a = industry_track(network, industries, from)?;
-    let b = industry_track(network, industries, to)?;
+    let a = industry_track(network, stations, industries, from)?;
+    let b = industry_track(network, stations, industries, to)?;
     find_path_for_kind(network, a, b, kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_app::{App, Update};
+
+    use crate::economy::MoneyLedger;
+    use crate::ids::{TileCoord, TrainId};
+    use crate::money::Money;
+    use crate::stations::{IndustryTier, GOODS_PLATFORM_COST_CENTS};
+    use crate::track::{try_place_track, TrackTerrain};
+
+    /// Flat land with one east-west line along `y = 8`, `x = 2..=17`.
+    fn line_world() -> TrackNetwork {
+        let terrain = TrackTerrain::new(32, 32, (0..32 * 32).map(|_| (false, 0i8)));
+        let mut network = TrackNetwork::new();
+        let mut money = Money::new(10_000_000);
+        let mut ledger = MoneyLedger::default();
+        for x in 2..=17 {
+            try_place_track(
+                &mut network,
+                &mut money,
+                &mut ledger,
+                &terrain,
+                TileCoord { x, y: 8 },
+                GROUND_LAYER,
+            )
+            .expect("track");
+        }
+        network
+    }
+
+    struct Sim {
+        app: App,
+    }
+
+    impl Sim {
+        fn new(
+            network: TrackNetwork,
+            stations: StationRegistry,
+            industries: IndustryRegistry,
+            lines: LineRegistry,
+        ) -> Self {
+            let mut app = App::new();
+            app.init_resource::<JobBoard>()
+                .insert_resource(network)
+                .insert_resource(stations)
+                .insert_resource(industries)
+                .insert_resource(lines)
+                .add_systems(Update, assign_jobs);
+            Self { app }
+        }
+
+        fn spawn(&mut self, kind: TrainKind, at: TrackId, on: Option<TrainOnLine>) {
+            let mut entity = self.app.world_mut().spawn((
+                Train {
+                    id: TrainId(1),
+                    kind,
+                },
+                TrainLocation::at_track(at),
+                TrainCargo::Empty,
+            ));
+            if let Some(on) = on {
+                entity.insert(on);
+            }
+        }
+
+        fn location(&mut self) -> TrainLocation {
+            let mut q = self.app.world_mut().query::<&TrainLocation>();
+            q.iter(self.app.world()).next().expect("a train").clone()
+        }
+    }
+
+    fn railhead(network: &TrackNetwork, x: i32) -> TrackId {
+        network
+            .id_at(TileCoord { x, y: 8 }, GROUND_LAYER)
+            .expect("railhead")
+    }
+
+    /// A stop demolished from the middle of a route shifts every index after
+    /// it. A train still holding the old index must find a call that is
+    /// actually there, not stall or run off the end of the list.
+    #[test]
+    fn a_train_whose_next_stop_was_demolished_repaths_to_a_remaining_stop() {
+        let network = line_world();
+        let mut stations = StationRegistry::new();
+        let a = stations.insert("Eastgate", TileCoord { x: 3, y: 8 }, GROUND_LAYER);
+        let b = stations.insert("Millhaven", TileCoord { x: 9, y: 8 }, GROUND_LAYER);
+        let c = stations.insert("Ridgeline", TileCoord { x: 15, y: 8 }, GROUND_LAYER);
+        let mut lines = LineRegistry::new();
+        let line = lines.create("Riverside Loop".into(), vec![a, b, c]).unwrap();
+
+        // The middle stop is demolished while the train stands at the first.
+        assert_eq!(
+            lines.remove_stop(line, b).expect("b was a call").indices,
+            vec![1]
+        );
+        stations.remove(b);
+
+        let start = railhead(&network, 3);
+        let far = railhead(&network, 15);
+        let mut sim = Sim::new(network, stations, IndustryRegistry::new(), lines);
+        sim.spawn(
+            TrainKind::Transit,
+            start,
+            Some(TrainOnLine {
+                line,
+                // Stale: it was aiming past the end of the shortened route.
+                next_stop: 2,
+                forward: true,
+            }),
+        );
+
+        // One tick to bounce off the clamped end of the shorter route, one to
+        // set off again — the point is that it is never left with nothing.
+        for _ in 0..2 {
+            sim.app.update();
+        }
+
+        let loc = sim.location();
+        assert!(
+            !loc.at_destination(),
+            "the train must be given somewhere to go, not left standing"
+        );
+        assert_eq!(
+            loc.destination(),
+            Some(far),
+            "it re-paths to the stop the line still calls at"
+        );
+    }
+
+    /// A line with nothing left to run: the train idles where it stands rather
+    /// than wedging or driving at a station that no longer exists.
+    #[test]
+    fn a_train_on_a_dormant_line_idles_instead_of_wedging() {
+        let network = line_world();
+        let mut stations = StationRegistry::new();
+        let a = stations.insert("Eastgate", TileCoord { x: 3, y: 8 }, GROUND_LAYER);
+        let b = stations.insert("Millhaven", TileCoord { x: 9, y: 8 }, GROUND_LAYER);
+        let mut lines = LineRegistry::new();
+        let line = lines.create("Eastgate - Millhaven".into(), vec![a, b]).unwrap();
+
+        assert!(lines.remove_stop(line, b).expect("b was a call").dormant);
+        stations.remove(b);
+
+        let start = railhead(&network, 3);
+        let mut sim = Sim::new(network, stations, IndustryRegistry::new(), lines);
+        sim.spawn(
+            TrainKind::Transit,
+            start,
+            Some(TrainOnLine {
+                line,
+                next_stop: 1,
+                forward: true,
+            }),
+        );
+
+        for _ in 0..4 {
+            sim.app.update();
+        }
+
+        let loc = sim.location();
+        assert_eq!(loc.track, start, "it stays put");
+        assert!(loc.at_destination(), "and asks for nothing it cannot reach");
+    }
+
+    /// 04 §6: the goods platform is what a freight train actually calls at.
+    #[test]
+    fn a_goods_train_routes_to_the_platform_built_against_the_industry() {
+        let network = line_world();
+        let mut industries = IndustryRegistry::new();
+        // Both works sit a row off the line, so no track touches either tile.
+        let saw = industries.insert_tier(
+            "Pine Sawmill",
+            TileCoord { x: 4, y: 6 },
+            IndustryTier::Works,
+            Some(GoodKind::Lumber),
+            None,
+        );
+        let mill = industries.insert_tier(
+            "Harbor Mill",
+            TileCoord { x: 14, y: 6 },
+            IndustryTier::Works,
+            None,
+            Some(GoodKind::Lumber),
+        );
+        let mut stations = StationRegistry::new();
+        for (name, x) in [("Sawmill Goods Platform", 4), ("Harbor Goods Platform", 14)] {
+            stations.insert_tier(
+                name,
+                TileCoord { x, y: 8 },
+                GROUND_LAYER,
+                StationTier::GoodsPlatform,
+                GOODS_PLATFORM_COST_CENTS,
+            );
+        }
+
+        let start = railhead(&network, 4);
+        let delivery = railhead(&network, 14);
+        let mut sim = Sim::new(network, stations, industries, LineRegistry::new());
+        sim.app.world_mut().resource_mut::<JobBoard>().jobs.push(Job {
+            kind: JobKind::Goods {
+                kind: GoodKind::Lumber,
+                from: saw,
+                to: mill,
+            },
+            reward_cents: GOODS_DELIVERY_CENTS,
+        });
+        sim.spawn(TrainKind::Transport, start, None);
+
+        sim.app.update();
+
+        assert_eq!(
+            sim.location().destination(),
+            Some(delivery),
+            "the run ends at the platform serving the mill, which is the only \
+             railhead that reaches it at all"
+        );
+        assert!(
+            sim.app.world().resource::<JobBoard>().jobs.is_empty(),
+            "the job was taken"
+        );
+    }
+
+    /// Without a platform, a line run straight into the works still loads.
+    #[test]
+    fn an_industry_with_no_platform_still_loads_off_its_own_railhead() {
+        let network = line_world();
+        let mut industries = IndustryRegistry::new();
+        let saw = industries.insert_tier(
+            "Pine Sawmill",
+            TileCoord { x: 4, y: 8 },
+            IndustryTier::Yard,
+            Some(GoodKind::Lumber),
+            None,
+        );
+        let mill = industries.insert_tier(
+            "Harbor Mill",
+            TileCoord { x: 14, y: 8 },
+            IndustryTier::Yard,
+            None,
+            Some(GoodKind::Lumber),
+        );
+
+        let start = railhead(&network, 4);
+        let end = railhead(&network, 14);
+        let mut sim = Sim::new(
+            network,
+            StationRegistry::new(),
+            industries,
+            LineRegistry::new(),
+        );
+        sim.app.world_mut().resource_mut::<JobBoard>().jobs.push(Job {
+            kind: JobKind::Goods {
+                kind: GoodKind::Lumber,
+                from: saw,
+                to: mill,
+            },
+            reward_cents: GOODS_DELIVERY_CENTS,
+        });
+        sim.spawn(TrainKind::Transport, start, None);
+
+        sim.app.update();
+
+        assert_eq!(sim.location().destination(), Some(end));
+    }
 }

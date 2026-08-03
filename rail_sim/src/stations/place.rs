@@ -4,7 +4,8 @@
 //! is a rule about the line it sits on: there must be track under the tile, and
 //! the tier's platforms must fit in one straight contiguous run through it. A
 //! terminus additionally needs that run to dead-end — stub platforms cannot be
-//! run through.
+//! run through — and a goods platform additionally needs an industry lot to
+//! stand against (§6's last line).
 //!
 //! Validation mirrors [`PlacementError`](crate::track::PlacementError): every
 //! rejection names its rule, and where the rule has a number it carries both the
@@ -13,10 +14,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::economy::{MoneyCategory, MoneyLedger};
-use crate::ids::{LineId, StationId, TileCoord};
+use crate::ids::{StationId, TileCoord};
+use crate::lines::LineStopSlot;
 use crate::money::Money;
 use crate::track::{opposite_dir, step, TrackNetwork, GROUND_LAYER};
 
+use super::industry::IndustryRegistry;
 use super::registry::{Station, StationRegistry};
 use super::service::StationService;
 use super::tier::{StationTier, MIN_STATION_SPACING};
@@ -30,9 +33,36 @@ pub struct PlaceStation {
     pub tier: StationTier,
     /// Optional override; `None` → [`suggest_station_name`].
     pub name: Option<String>,
+    /// Undo payload: splice the new stop back into these lines at these
+    /// positions. Empty for a build the player asked for.
+    ///
+    /// A demolished station cannot come back with its old [`StationId`] — the
+    /// registry issues a fresh one — so the inverse of a demolish carries the
+    /// *slots* rather than the id, and the apply pass fills them with whatever
+    /// id the rebuilt stop was given. See
+    /// [`apply_station_command`](super::apply::apply_station_command).
+    #[serde(default)]
+    pub restore_stops: Vec<LineStopSlot>,
+}
+
+impl PlaceStation {
+    /// A plain player build: no undo payload.
+    pub fn new(tile: TileCoord, layer: u8, tier: StationTier, name: Option<String>) -> Self {
+        Self {
+            tile,
+            layer,
+            tier,
+            name,
+            restore_stops: Vec::new(),
+        }
+    }
 }
 
 /// Lift a platform, refunding what was spent on it.
+///
+/// Any line calling here loses the stop (04 §4: the tool confirms and names that
+/// consequence rather than refusing) — see
+/// [`apply_station_command`](super::apply::apply_station_command).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DemolishStation {
     pub station: StationId,
@@ -63,11 +93,12 @@ pub enum StationPlacementError {
     NoPlatformRoom { have: u8, need: u8 },
     /// A terminus needs a stub end; every run through this tile carries on.
     NotAStubEnd,
+    /// A goods platform is placed **against an industry** (04 §6) and there is
+    /// no lot touching this tile.
+    NoIndustryHere,
     InsufficientFunds,
     /// Demolish / upgrade target missing.
     UnknownStation,
-    /// The stop is a scheduled call on a line — clear the line first.
-    OnLine { line: LineId },
     /// Requested tier is not reachable from the current one.
     NotUpgradable { from: StationTier, to: StationTier },
 }
@@ -169,8 +200,10 @@ fn pick_longest(runs: impl Iterator<Item = PlatformRun>) -> Option<PlatformRun> 
 /// names (an in-place upgrade is not too close to itself).
 ///
 /// Returns the run the platforms would occupy.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_station_site(
     stations: &StationRegistry,
+    industries: &IndustryRegistry,
     network: &TrackNetwork,
     tile: TileCoord,
     layer: u8,
@@ -182,6 +215,10 @@ pub fn validate_station_site(
     }
     if network.id_at(tile, layer).is_none() {
         return Err(StationPlacementError::NoTrack);
+    }
+    // 04 §6: freight facilities are placed against an industry.
+    if tier.needs_industry() && industries.abutting(tile).is_none() {
+        return Err(StationPlacementError::NoIndustryHere);
     }
     match stations.id_at(tile, layer) {
         Some(existing) if Some(existing) != retier => {
@@ -226,6 +263,7 @@ pub fn validate_station_site(
 #[allow(clippy::too_many_arguments)]
 pub fn try_place_station(
     stations: &mut StationRegistry,
+    industries: &IndustryRegistry,
     service: &mut StationService,
     money: &mut Money,
     ledger: &mut MoneyLedger,
@@ -235,7 +273,7 @@ pub fn try_place_station(
     tier: StationTier,
     name: Option<String>,
 ) -> Result<PlacedStation, StationPlacementError> {
-    let run = validate_station_site(stations, network, tile, layer, tier, None)?;
+    let run = validate_station_site(stations, industries, network, tile, layer, tier, None)?;
     let cost = tier.build_cents();
     ledger
         .try_debit(money, MoneyCategory::Construction, cost)
@@ -253,23 +291,18 @@ pub fn try_place_station(
 
 /// Lift a station and credit a full refund of `paid_cents`.
 ///
-/// Refuses while a line still calls here — the stop cannot vanish from under a
-/// schedule. `line_using` reports the first line containing the stop, if any
-/// (see [`LineRegistry::iter`](crate::lines::LineRegistry::iter)).
+/// Lines that call here are **not** a reason to refuse (04 §4: demolition is a
+/// first-class verb, and where it has a consequence the tool names it and asks).
+/// Dropping the call is the caller's job, so that the same pass can record it
+/// for undo — see
+/// [`apply_station_command`](super::apply::apply_station_command).
 pub fn try_demolish_station(
     stations: &mut StationRegistry,
     service: &mut StationService,
     money: &mut Money,
     ledger: &mut MoneyLedger,
     station: StationId,
-    line_using: impl Fn(StationId) -> Option<LineId>,
 ) -> Result<Station, StationPlacementError> {
-    if stations.get(station).is_none() {
-        return Err(StationPlacementError::UnknownStation);
-    }
-    if let Some(line) = line_using(station) {
-        return Err(StationPlacementError::OnLine { line });
-    }
     let removed = stations
         .remove(station)
         .ok_or(StationPlacementError::UnknownStation)?;
@@ -282,8 +315,10 @@ pub fn try_demolish_station(
 ///
 /// Moving up debits the build-cost difference; moving down credits it. The
 /// terminus is off the ladder in both directions — build one instead.
+#[allow(clippy::too_many_arguments)]
 pub fn try_upgrade_station(
     stations: &mut StationRegistry,
+    industries: &IndustryRegistry,
     service: &mut StationService,
     money: &mut Money,
     ledger: &mut MoneyLedger,
@@ -300,7 +335,7 @@ pub fn try_upgrade_station(
     if from == to || !from.on_ladder_with(to) {
         return Err(StationPlacementError::NotUpgradable { from, to });
     }
-    validate_station_site(stations, network, tile, layer, to, Some(station))?;
+    validate_station_site(stations, industries, network, tile, layer, to, Some(station))?;
 
     let delta = from.retier_cents(to);
     if delta > 0 {
@@ -376,6 +411,7 @@ pub fn suggest_station_name(stations: &StationRegistry, tier: StationTier) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stations::industry::{GoodKind, IndustryTier};
     use crate::track::{try_place_track, TrackTerrain};
 
     fn land(w: u32, h: u32) -> TrackTerrain {
@@ -399,12 +435,9 @@ mod tests {
         }
     }
 
-    fn no_lines(_: StationId) -> Option<LineId> {
-        None
-    }
-
     struct World {
         stations: StationRegistry,
+        industries: IndustryRegistry,
         service: StationService,
         money: Money,
         ledger: MoneyLedger,
@@ -417,6 +450,7 @@ mod tests {
         lay_run(&mut network, &terrain, 4, 8, track_len);
         World {
             stations: StationRegistry::new(),
+            industries: IndustryRegistry::new(),
             service: StationService::default(),
             money: Money::new(1_000_000),
             ledger: MoneyLedger::default(),
@@ -427,6 +461,7 @@ mod tests {
     fn place(w: &mut World, x: i32, tier: StationTier) -> Result<PlacedStation, StationPlacementError> {
         try_place_station(
             &mut w.stations,
+            &w.industries,
             &mut w.service,
             &mut w.money,
             &mut w.ledger,
@@ -463,6 +498,7 @@ mod tests {
         let mut w = world(8);
         let err = try_place_station(
             &mut w.stations,
+            &w.industries,
             &mut w.service,
             &mut w.money,
             &mut w.ledger,
@@ -482,6 +518,7 @@ mod tests {
         let mut w = world(8);
         let err = try_place_station(
             &mut w.stations,
+            &w.industries,
             &mut w.service,
             &mut w.money,
             &mut w.ledger,
@@ -571,6 +608,7 @@ mod tests {
 
         let retier = try_upgrade_station(
             &mut w.stations,
+            &w.industries,
             &mut w.service,
             &mut w.money,
             &mut w.ledger,
@@ -603,6 +641,7 @@ mod tests {
         assert_eq!(
             try_upgrade_station(
                 &mut w.stations,
+                &w.industries,
                 &mut w.service,
                 &mut w.money,
                 &mut w.ledger,
@@ -630,6 +669,7 @@ mod tests {
         assert_eq!(
             try_upgrade_station(
                 &mut w.stations,
+                &w.industries,
                 &mut w.service,
                 &mut w.money,
                 &mut w.ledger,
@@ -654,6 +694,7 @@ mod tests {
         for to in [StationTier::Interchange, StationTier::Halt] {
             try_upgrade_station(
                 &mut w.stations,
+                &w.industries,
                 &mut w.service,
                 &mut w.money,
                 &mut w.ledger,
@@ -684,7 +725,6 @@ mod tests {
             &mut w.money,
             &mut w.ledger,
             placed.id,
-            no_lines,
         )
         .expect("demolish");
 
@@ -692,23 +732,6 @@ mod tests {
         assert_eq!(w.money.cents(), before, "demolish refunds in full");
         assert!(w.stations.is_empty());
         assert_eq!(w.service.score(placed.id).deliveries, 0);
-    }
-
-    #[test]
-    fn a_stop_on_a_line_cannot_be_lifted_from_under_it() {
-        let mut w = world(8);
-        let placed = place(&mut w, 6, StationTier::Halt).expect("halt");
-        let err = try_demolish_station(
-            &mut w.stations,
-            &mut w.service,
-            &mut w.money,
-            &mut w.ledger,
-            placed.id,
-            |_| Some(LineId(3)),
-        )
-        .unwrap_err();
-        assert_eq!(err, StationPlacementError::OnLine { line: LineId(3) });
-        assert_eq!(w.stations.len(), 1, "refused demolish must not remove");
     }
 
     #[test]
@@ -721,10 +744,84 @@ mod tests {
                 &mut w.money,
                 &mut w.ledger,
                 StationId(99),
-                no_lines,
             )
             .unwrap_err(),
             StationPlacementError::UnknownStation
+        );
+    }
+
+    /// 04 §6 last line — the freight rule, and the reason it names.
+    #[test]
+    fn a_goods_platform_must_stand_against_an_industry() {
+        let mut w = world(24);
+        // Track runs y=8 from x=4; the sawmill lot is centred two tiles below,
+        // so its 3x3 lot reaches y=7 and the ring reaches the line at y=8.
+        w.industries.insert_tier(
+            "Pine Sawmill",
+            TileCoord { x: 6, y: 6 },
+            IndustryTier::Works,
+            Some(GoodKind::Lumber),
+            None,
+        );
+
+        let placed = place(&mut w, 6, StationTier::GoodsPlatform).expect("against the lot");
+        assert_eq!(placed.station.tier, StationTier::GoodsPlatform);
+        assert_eq!(placed.station.name, "Ashford Goods Platform");
+
+        // Far down the same line there is nothing to load.
+        assert_eq!(
+            place(&mut w, 20, StationTier::GoodsPlatform).unwrap_err(),
+            StationPlacementError::NoIndustryHere
+        );
+        // A passenger stop is welcome there.
+        place(&mut w, 20, StationTier::Halt).expect("halts do not need an industry");
+    }
+
+    #[test]
+    fn a_bigger_lot_can_be_reached_from_further_down_the_line() {
+        let mut w = world(24);
+        w.industries.insert_tier(
+            "Quarry Ridge",
+            TileCoord { x: 10, y: 5 },
+            IndustryTier::Complex,
+            Some(GoodKind::Ore),
+            None,
+        );
+        // 5x5 lot reaches y=7; the ring touches the line at y=8.
+        place(&mut w, 10, StationTier::GoodsPlatform).expect("the complex reaches the line");
+
+        let mut w = world(24);
+        w.industries.insert_tier(
+            "Cedar Yard",
+            TileCoord { x: 10, y: 5 },
+            IndustryTier::Yard,
+            Some(GoodKind::Lumber),
+            None,
+        );
+        // A one-tile lot three rows away touches nothing.
+        assert_eq!(
+            place(&mut w, 10, StationTier::GoodsPlatform).unwrap_err(),
+            StationPlacementError::NoIndustryHere
+        );
+    }
+
+    #[test]
+    fn a_goods_platform_still_obeys_every_other_platform_rule() {
+        let mut w = world(1);
+        w.industries.insert_tier(
+            "Pine Sawmill",
+            TileCoord { x: 4, y: 7 },
+            IndustryTier::Yard,
+            Some(GoodKind::Lumber),
+            None,
+        );
+        // One tile of line: the industry is there, the platforms are not.
+        assert_eq!(
+            place(&mut w, 4, StationTier::GoodsPlatform).unwrap_err(),
+            StationPlacementError::NoPlatformRoom {
+                have: 1,
+                need: StationTier::GoodsPlatform.platforms(),
+            }
         );
     }
 

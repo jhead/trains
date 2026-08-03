@@ -8,5 +8,5 @@ mod registry;
 pub use apply::apply_line_commands;
 pub use registry::{
     line_colour_rgba, line_path, suggest_line_name, Line, LineColour, LineDirection, LineRegistry,
-    LINE_PALETTE,
+    LineStopSlot, RemovedStops, LINE_PALETTE,
 };

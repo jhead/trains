@@ -43,6 +43,27 @@ pub enum LineDirection {
     OutAndBack,
 }
 
+/// Where a stop sat in a line's sequence.
+///
+/// Recorded when a station is demolished out from under a line so undo can put
+/// the call back exactly where it was — see [`LineRegistry::restore_stop`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineStopSlot {
+    pub line: LineId,
+    /// Index the stop occupied before it was removed.
+    pub index: usize,
+}
+
+/// What [`LineRegistry::remove_stop`] took out.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RemovedStops {
+    /// Indices the station occupied, ascending. A station may be called at more
+    /// than once (an out-and-back through a hub), and all of them go.
+    pub indices: Vec<usize>,
+    /// The line is left [dormant](Line::is_dormant) — kept, but not running.
+    pub dormant: bool,
+}
+
 /// A named coloured ordered sequence of stations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Line {
@@ -63,13 +84,29 @@ impl Line {
         self.stops.iter().position(|s| *s == id)
     }
 
+    /// `true` when the line has nowhere left to run.
+    ///
+    /// Fewer than two calls, or every call at the same stop — which is what an
+    /// out-and-back is left with once the far end is demolished. A dormant line
+    /// is **kept, not deleted**: it is the player's named object, its trains
+    /// still point at an id that resolves, and putting the stop back (undo, or
+    /// editing the route) makes it run again. Deleting it would strand every
+    /// assigned train on a line id that no longer exists.
+    pub fn is_dormant(&self) -> bool {
+        self.stops.len() < 2 || self.stops.iter().all(|s| *s == self.stops[0])
+    }
+
     /// Next stop index when shuttling out-and-back.
     ///
-    /// `forward` is mutated when bouncing at an end.
+    /// `forward` is mutated when bouncing at an end. `current` is clamped into
+    /// range first: a stop demolished from the middle of the sequence shifts
+    /// every index after it, and a train still holding the old one must bounce
+    /// off the end of the shorter line rather than index past it.
     pub fn next_stop_index(&self, current: usize, forward: &mut bool) -> Option<usize> {
-        if self.stops.len() < 2 {
+        if self.is_dormant() {
             return None;
         }
+        let current = current.min(self.stops.len() - 1);
         if *forward {
             if current + 1 >= self.stops.len() {
                 *forward = false;
@@ -144,6 +181,60 @@ impl LineRegistry {
 
     pub fn remove(&mut self, id: LineId) -> Option<Line> {
         self.lines.remove(&id)
+    }
+
+    /// Every line that calls at `station`, in [`LineId`] order.
+    ///
+    /// Sorted because the registry is a `HashMap`: the demolish path records an
+    /// undo payload from this and the confirm dialog names the lines from it,
+    /// and neither may vary run to run.
+    pub fn lines_calling_at(&self, station: StationId) -> Vec<LineId> {
+        let mut ids: Vec<LineId> = self
+            .lines
+            .values()
+            .filter(|line| line.contains_station(station))
+            .map(|line| line.id)
+            .collect();
+        ids.sort_unstable_by_key(|id| id.0);
+        ids
+    }
+
+    /// Drop every call at `station` from `line`.
+    ///
+    /// `None` when the line is unknown or never called there. The stop list is
+    /// only ever shortened — nothing is renumbered or collapsed — so the
+    /// returned indices put the route back exactly as it was
+    /// ([`Self::restore_stop`]). A line left with fewer than two distinct calls
+    /// is reported [`RemovedStops::dormant`] and kept; see [`Line::is_dormant`].
+    pub fn remove_stop(&mut self, line: LineId, station: StationId) -> Option<RemovedStops> {
+        let line = self.lines.get_mut(&line)?;
+        let indices: Vec<usize> = line
+            .stops
+            .iter()
+            .enumerate()
+            .filter(|(_, stop)| **stop == station)
+            .map(|(index, _)| index)
+            .collect();
+        if indices.is_empty() {
+            return None;
+        }
+        line.stops.retain(|stop| *stop != station);
+        Some(RemovedStops {
+            dormant: line.is_dormant(),
+            indices,
+        })
+    }
+
+    /// Splice `station` back in at `index` (clamped to the end of the route).
+    ///
+    /// The inverse of [`Self::remove_stop`]: restoring the recorded indices in
+    /// ascending order rebuilds the original sequence.
+    pub fn restore_stop(&mut self, line: LineId, index: usize, station: StationId) -> bool {
+        let Some(line) = self.lines.get_mut(&line) else {
+            return false;
+        };
+        line.stops.insert(index.min(line.stops.len()), station);
+        true
     }
 
     pub fn assign_train(&mut self, line: LineId, train: TrainId) -> bool {
@@ -264,6 +355,119 @@ mod tests {
         assert!(path.len() >= 5);
         assert_eq!(path.first(), network.id_at(TileCoord { x: 1, y: 2 }, GROUND_LAYER).as_ref());
         assert_eq!(path.last(), network.id_at(TileCoord { x: 5, y: 2 }, GROUND_LAYER).as_ref());
+    }
+
+    /// Three stops in, one demolished, two left: the line runs on.
+    #[test]
+    fn remove_stop_takes_the_call_out_and_leaves_the_line_running() {
+        let mut lines = LineRegistry::new();
+        let (a, b, c) = (StationId(1), StationId(2), StationId(3));
+        let id = lines.create("Riverside Loop".into(), vec![a, b, c]).unwrap();
+
+        let removed = lines.remove_stop(id, b).expect("b was a call");
+        assert_eq!(removed.indices, vec![1]);
+        assert!(!removed.dormant, "two stops still make a route");
+        assert_eq!(lines.get(id).unwrap().stops, vec![a, c]);
+    }
+
+    #[test]
+    fn remove_stop_drops_every_call_at_the_same_station() {
+        // An out-and-back through a hub calls there twice; both go.
+        let mut lines = LineRegistry::new();
+        let (a, b, c) = (StationId(1), StationId(2), StationId(3));
+        let id = lines.create("Hub Shuttle".into(), vec![a, b, c, b]).unwrap();
+
+        let removed = lines.remove_stop(id, b).expect("b was a call");
+        assert_eq!(removed.indices, vec![1, 3]);
+        assert_eq!(lines.get(id).unwrap().stops, vec![a, c]);
+    }
+
+    #[test]
+    fn remove_stop_reports_nothing_for_a_station_the_line_never_called_at() {
+        let mut lines = LineRegistry::new();
+        let id = lines
+            .create("Coast".into(), vec![StationId(1), StationId(2)])
+            .unwrap();
+        assert_eq!(lines.remove_stop(id, StationId(9)), None);
+        assert_eq!(lines.remove_stop(LineId(99), StationId(1)), None);
+        assert_eq!(lines.get(id).unwrap().stops.len(), 2);
+    }
+
+    /// The degenerate case: the line is **kept, dormant**, never deleted.
+    #[test]
+    fn a_line_left_under_two_stops_goes_dormant_rather_than_being_deleted() {
+        let mut lines = LineRegistry::new();
+        let (a, b) = (StationId(1), StationId(2));
+        let id = lines.create("Eastgate - Millhaven".into(), vec![a, b]).unwrap();
+
+        let removed = lines.remove_stop(id, b).expect("b was a call");
+        assert!(removed.dormant);
+        assert!(lines.get(id).is_some(), "the player's line still exists");
+        assert!(lines.get(id).unwrap().is_dormant());
+        assert_eq!(lines.len(), 1);
+    }
+
+    /// An out-and-back reduced to the same stop twice is going nowhere either.
+    #[test]
+    fn a_route_calling_only_at_one_station_is_dormant() {
+        let mut lines = LineRegistry::new();
+        let (a, b) = (StationId(1), StationId(2));
+        let id = lines.create("There and Back".into(), vec![a, b, a]).unwrap();
+
+        let removed = lines.remove_stop(id, b).expect("b was a call");
+        assert!(removed.dormant, "A - A is not a route");
+        assert_eq!(lines.get(id).unwrap().stops, vec![a, a]);
+        let mut forward = true;
+        assert_eq!(
+            lines.get(id).unwrap().next_stop_index(0, &mut forward),
+            None,
+            "a dormant line hands its trains nowhere to go"
+        );
+    }
+
+    #[test]
+    fn restoring_the_recorded_indices_rebuilds_the_original_route() {
+        let mut lines = LineRegistry::new();
+        let (a, b, c) = (StationId(1), StationId(2), StationId(3));
+        let id = lines.create("Hub Shuttle".into(), vec![a, b, c, b]).unwrap();
+        let before = lines.get(id).unwrap().stops.clone();
+
+        let removed = lines.remove_stop(id, b).expect("b was a call");
+        for index in removed.indices {
+            assert!(lines.restore_stop(id, index, b));
+        }
+
+        assert_eq!(lines.get(id).unwrap().stops, before);
+        assert!(!lines.get(id).unwrap().is_dormant());
+    }
+
+    #[test]
+    fn lines_calling_at_a_stop_come_back_in_id_order() {
+        let mut lines = LineRegistry::new();
+        let (a, b, c) = (StationId(1), StationId(2), StationId(3));
+        let first = lines.create("First".into(), vec![a, b]).unwrap();
+        let second = lines.create("Second".into(), vec![c, b]).unwrap();
+        let _elsewhere = lines.create("Elsewhere".into(), vec![a, c]).unwrap();
+
+        assert_eq!(lines.lines_calling_at(b), vec![first, second]);
+        assert!(lines.lines_calling_at(StationId(9)).is_empty());
+    }
+
+    /// A stop removed from the middle shifts every index after it; a train
+    /// still holding the old one must bounce, not index past the end.
+    #[test]
+    fn a_stale_stop_index_clamps_instead_of_running_off_the_end() {
+        let line = Line {
+            id: LineId(1),
+            name: "Test".into(),
+            colour: LineColour(0),
+            stops: vec![StationId(1), StationId(2)],
+            trains: vec![],
+            direction: LineDirection::OutAndBack,
+        };
+        let mut forward = false;
+        let next = line.next_stop_index(7, &mut forward).expect("a stop to aim at");
+        assert!(next < line.stops.len(), "index {next} is off the route");
     }
 
     #[test]

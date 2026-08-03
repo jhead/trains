@@ -19,3 +19,18 @@ bevy = { workspace = true, features = ["2d"] }
 rail_sim = { path = "../rail_sim" }
 rail_map = { path = "../rail_map" }
 rail_net = { path = "../rail_net" }
+
+# The `2d` feature brings in `bevy_render` but no web backend, and `bevy` is
+# pulled with `default-features = false`, so a wasm build would compile and then
+# fail at adapter request with no renderer at all.
+#
+# WebGL2 rather than WebGPU: it is the one backend every current browser has,
+# and nothing here needs compute. WebGPU can be added alongside later — Bevy
+# picks it when present and falls back — but it is not worth locking Safari and
+# older Firefox out of the Pages build for.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { workspace = true, features = ["webgl2"] }
+# `std::time::SystemTime::now` panics outright on wasm32-unknown-unknown, and
+# the seed roller needs a wall clock. Bevy already depends on this, so it costs
+# nothing in the tree; `bevy::platform::time::Instant` covers the monotonic side.
+web-time = "1"

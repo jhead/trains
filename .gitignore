@@ -6,6 +6,9 @@
 *.wasm
 dist/
 .trunk/
+# Local web build output. `web/index.html` is the page and is tracked; the
+# wasm-bindgen artefacts beside it are built by `./scripts/web` and by CI.
+web/rail_town*
 
 # IDE / OS
 .DS_Store

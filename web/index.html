@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Rail Town</title>
+    <meta
+      name="description"
+      content="A calm pixel-art sandbox about laying railway by hand and watching a small town grow around the service you provide."
+    />
+    <style>
+      /* Palette from rail_town/src/palette.rs, so the page the game loads into
+         is the same world as the game. */
+      :root {
+        --bg0: #12111a;
+        --bg1: #1b1a26;
+        --outline: #241f2e;
+        --rail-l: #b9c2cf;
+        --rail-s: #e8eef5;
+        --hi: #f2c14e;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg0);
+        color: var(--rail-l);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overscroll-behavior: none;
+      }
+
+      /* The canvas follows this element (Bevy's `fit_canvas_to_parent`), so the
+         page owns layout and the game owns everything inside it. */
+      #stage {
+        position: fixed;
+        inset: 0;
+        display: block;
+      }
+
+      #rail-town {
+        display: block;
+        width: 100%;
+        height: 100%;
+        /* Pixel contract: the browser must never smooth our texels. */
+        image-rendering: pixelated;
+        outline: none;
+      }
+
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        padding: 24px;
+        text-align: center;
+        background: var(--bg0);
+        transition: opacity 400ms ease;
+      }
+
+      #boot.gone {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 28px;
+        letter-spacing: 6px;
+        text-transform: uppercase;
+        color: var(--rail-s);
+        font-weight: 600;
+      }
+
+      p {
+        margin: 0;
+        max-width: 46ch;
+        line-height: 1.6;
+        font-size: 13px;
+      }
+
+      .dim {
+        color: #6f6a80;
+      }
+
+      .bar {
+        width: min(320px, 70vw);
+        height: 6px;
+        background: var(--bg1);
+        border: 1px solid var(--outline);
+        overflow: hidden;
+      }
+
+      .bar span {
+        display: block;
+        height: 100%;
+        width: 30%;
+        background: var(--hi);
+        animation: sweep 1.4s ease-in-out infinite;
+      }
+
+      @keyframes sweep {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(360%);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .bar span {
+          animation: none;
+          width: 100%;
+        }
+      }
+
+      #failed {
+        display: none;
+        max-width: 52ch;
+        color: #d8654f;
+      }
+
+      code {
+        color: var(--hi);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage"><canvas id="rail-town"></canvas></div>
+
+    <div id="boot">
+      <h1>Rail Town</h1>
+      <p class="dim">
+        Laying the first rails. The engine is a few megabytes, so the first load
+        takes a moment; after that it is cached.
+      </p>
+      <div class="bar"><span></span></div>
+      <p id="failed">
+        The game could not start. It needs WebGL2 and a recent desktop browser.
+        The console has the details.
+      </p>
+    </div>
+
+    <script type="module">
+      const boot = document.getElementById("boot");
+      const failed = document.getElementById("failed");
+
+      // Bevy hands control to its own loop and never resolves `init`, so the
+      // overlay is cleared on the first painted frame instead of on a promise.
+      const clear = () => {
+        boot.classList.add("gone");
+        setTimeout(() => boot.remove(), 500);
+      };
+
+      try {
+        const init = (await import("./rail_town.js")).default;
+        init().catch((err) => {
+          // Bevy's winit loop unwinds through an exception by design; that one
+          // is not a failure and must not raise the error panel.
+          if (!`${err}`.includes("Using exceptions for control flow")) {
+            throw err;
+          }
+        });
+        requestAnimationFrame(() => requestAnimationFrame(clear));
+      } catch (err) {
+        console.error(err);
+        document.querySelector(".bar").remove();
+        failed.style.display = "block";
+      }
+    </script>
+  </body>
+</html>

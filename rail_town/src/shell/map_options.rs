@@ -444,9 +444,18 @@ fn splitmix64(mut x: u64) -> u64 {
 /// `rail_town` has no `rand` dependency and does not need one for this: the wall
 /// clock mixed through [`splitmix64`] is plenty of entropy for "give me another
 /// map", and it keeps the crate's dependency list honest.
+///
+/// The clock has to come from `web-time` on wasm — `std::time::SystemTime::now`
+/// does not merely return a poor value there, it **panics**, and this runs
+/// during boot to pick the title screen's world.
 pub fn roll_seed() -> u64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    #[cfg(target_arch = "wasm32")]
+    use web_time::{SystemTime, UNIX_EPOCH};
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x5eed_5eed);
     splitmix64(nanos) % (SEED_MAX + 1)

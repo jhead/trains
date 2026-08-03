@@ -48,3 +48,14 @@ opt-level = 1
 
 [profile.test.package."*"]
 opt-level = 3
+
+# The web build is what these are for. An unstripped Bevy wasm is ~66 MB, and
+# nobody waits for that — `strip` drops the name section, and thin LTO removes
+# the cross-crate dead code a 2D game never calls. `opt-level` stays at the
+# default 3: this is a simulation with a fixed tick, and trading its frame time
+# for a smaller download would be the wrong way round.
+#
+# Native release gets the same treatment, which is only ever an improvement.
+[profile.release]
+lto = "thin"
+strip = true

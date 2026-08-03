@@ -44,16 +44,32 @@ use track::TrackPlugin;
 use trains::TrainsPlugin;
 use ui::UiPlugin;
 
+/// The primary window, native and web.
+///
+/// On the web the game binds to the page's own `#rail-town` canvas and follows
+/// its parent's size, so the page decides layout and the browser's own
+/// shortcuts (`Ctrl`/`Cmd` chords, `F5`) keep working — `prevent_default` on
+/// everything would swallow them, and this game reads plain keys.
+fn primary_window() -> Window {
+    Window {
+        title: "Rail Town".into(),
+        resolution: (1280, 720).into(),
+        #[cfg(target_arch = "wasm32")]
+        canvas: Some("#rail-town".into()),
+        #[cfg(target_arch = "wasm32")]
+        fit_canvas_to_parent: true,
+        #[cfg(target_arch = "wasm32")]
+        prevent_default_event_handling: false,
+        ..default()
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "Rail Town".into(),
-                        resolution: (1280, 720).into(),
-                        ..default()
-                    }),
+                    primary_window: Some(primary_window()),
                     ..default()
                 })
                 // Pixel contract: nearest sampling is the default for every

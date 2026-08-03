@@ -2,6 +2,12 @@
 
 Calm pixel-art railway sandbox. Design brief: [`DESIGN.md`](./DESIGN.md).
 
+**[Play in the browser →](https://jhead.github.io/rail-town/)**
+
+Needs WebGL2 and a keyboard. The first load pulls a few megabytes of engine and
+is then cached. Every push to `main` republishes it
+([workflow](.github/workflows/pages.yml)).
+
 ## Docs
 
 - [`docs/design/`](./docs/design/README.md) — **the design briefs**: art direction, world, UI, building, inspection, town, lines, economy, shell, audio, roadmap

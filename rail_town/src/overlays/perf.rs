@@ -49,7 +49,7 @@ fn scope_table() -> &'static ScopeTable {
 }
 
 /// Accumulates nanoseconds into the named bucket when it is dropped.
-pub(crate) struct ScopeGuard(Option<(&'static str, std::time::Instant)>);
+pub(crate) struct ScopeGuard(Option<(&'static str, bevy::platform::time::Instant)>);
 
 impl Drop for ScopeGuard {
     fn drop(&mut self) {
@@ -73,7 +73,7 @@ impl Drop for ScopeGuard {
 #[inline]
 pub(crate) fn scope(name: &'static str) -> ScopeGuard {
     if SCOPES_ON.load(std::sync::atomic::Ordering::Relaxed) {
-        ScopeGuard(Some((name, std::time::Instant::now())))
+        ScopeGuard(Some((name, bevy::platform::time::Instant::now())))
     } else {
         ScopeGuard(None)
     }

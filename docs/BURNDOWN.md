@@ -104,6 +104,4 @@ Things that work but are known-shallow, with the brief that wants more.
 
 | Item | Note |
 | --- | --- |
-| **Rail sprite bank must match the realised rose** | Brief 01 §5.2 assumed an even 32-entry bank at 11.25 deg steps. The graph's actual tangents are 0 / 26.57 / 45 / 63.43 deg, which are **not** multiples of 11.25 — the nearest entry is 4.07 deg away, above the `spritebank` plate's 2.81 deg target. Bake the bank at the sixteen realised bearings plus interpolants, never at even steps, or the facet-popping the plate names comes straight back. |
 | **Gameplay plugins aren't state-gated** | They register systems without a named `SystemSet`, so `main.rs` cannot retro-fit `run_if(in_state(Playing))`. The shell gates by pointer-blocking and input suppression instead, which works. Real gating is one `.in_set(...)` edit per plugin file. |
-| **Map View downsamples world sprites** | Now that terrain is textured, nearest-sampling a 4-texel/tile view will alias. Briefs 01 §2.1 and 02 §6 want a purpose-built schematic render, not a downscaled world. |

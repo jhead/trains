@@ -1,5 +1,6 @@
-//! Train buy / place tools and placeholder sprites.
+//! Train buy / place tools, the facing bank, and the sprites that read it.
 
+mod bank;
 mod tools;
 mod visuals;
 

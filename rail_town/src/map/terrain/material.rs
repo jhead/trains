@@ -171,9 +171,9 @@ pub fn surface_height(height: i8, water: bool) -> i16 {
 
 /// Map height / kind onto the binding terrain ramps (brief 01 §3).
 ///
-/// Shared kind+height → colour contract for schematic reads (Map View,
-/// overlays); the world render goes through the atlas instead.
-#[allow(dead_code)]
+/// Shared kind+height → colour contract for schematic reads: this is what the
+/// Map View plate ([`crate::map`]'s `schematic`) fills a tile with. The world
+/// render goes through the atlas instead.
 #[inline]
 pub fn terrain_color(kind: TerrainKind, height: i8) -> Color {
     material_of(kind).step(shade_for(kind, height))

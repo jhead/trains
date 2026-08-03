@@ -7,6 +7,10 @@ use rail_sim::{StationRegistry, StationService, TileOccupancy, TownDensity, Trac
 
 use super::score::{color_for_strength, strength_for};
 use super::{ActiveOverlay, OverlayKind};
+use crate::map::{MapViewState, SCHEMATIC_OVERLAY_Z};
+
+/// Overlay band in the world layer stack (brief 01 §6.1).
+const OVERLAY_Z: f32 = 4.5;
 
 #[derive(Component)]
 pub struct OverlayTileSprite {
@@ -17,6 +21,7 @@ pub struct OverlayTileSprite {
 pub fn sync_overlay_sprites(
     mut commands: Commands,
     overlay: Res<ActiveOverlay>,
+    map_view: Res<MapViewState>,
     map: Res<MapGrid>,
     stations: Res<StationRegistry>,
     service: Res<StationService>,
@@ -63,6 +68,14 @@ pub fn sync_overlay_sprites(
     tiles.sort_by_key(|t| (t.y, t.x));
     tiles.dedup();
 
+    // The Map View draws its own opaque plate over the world, so an overlay has
+    // to sit above it there or it would simply be buried (brief 05 §6).
+    let z = if map_view.active {
+        SCHEMATIC_OVERLAY_Z
+    } else {
+        OVERLAY_Z
+    };
+
     for tile in tiles {
         let strength = strength_for(
             overlay.0,
@@ -79,7 +92,7 @@ pub fn sync_overlay_sprites(
         let (wx, wy) = tile_to_world(tile);
         commands.spawn((
             Sprite::from_color(color, Vec2::splat(TILE_SIZE)),
-            Transform::from_xyz(wx, wy, 4.5),
+            Transform::from_xyz(wx, wy, z),
             OverlayTileSprite { coord: tile },
         ));
     }

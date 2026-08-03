@@ -5,6 +5,7 @@
 
 mod camera;
 mod map_view;
+mod schematic;
 mod terrain;
 
 use bevy::prelude::*;
@@ -15,10 +16,15 @@ use map_view::{
     block_zoom_in_map_view, exit_map_view_before_focus, map_view_click_fly, setup_map_view_banner,
     toggle_map_view,
 };
+use schematic::{
+    mark_schematic_dirty, rebake_schematic, setup_schematic, sync_schematic_trains,
+    sync_schematic_visibility, SchematicState,
+};
 use terrain::{rebuild_dirty_terrain, setup_terrain, TerrainDirty};
 
 pub use camera::{CameraFocusRequest, MapCamera};
 pub use map_view::MapViewState;
+pub use schematic::SCHEMATIC_OVERLAY_Z;
 
 /// Inserts a generated [`MapGrid`] and registers spawn / camera systems.
 pub struct MapPlugin {
@@ -44,10 +50,17 @@ impl Plugin for MapPlugin {
             .init_resource::<crate::input::KeyBindings>()
             .init_resource::<CameraFocusRequest>()
             .init_resource::<MapViewState>()
+            .init_resource::<SchematicState>()
             .init_resource::<TerrainDirty>()
             .add_systems(
                 Startup,
-                (setup_map_camera, setup_terrain, setup_map_view_banner).chain(),
+                (
+                    setup_map_camera,
+                    setup_terrain,
+                    setup_map_view_banner,
+                    setup_schematic,
+                )
+                    .chain(),
             )
             .add_systems(
                 Update,
@@ -63,6 +76,20 @@ impl Plugin for MapPlugin {
                         .after(toggle_map_view)
                         .after(camera_zoom),
                 ),
+            )
+            // The Map View's own render. Painting follows the toggle and the
+            // camera, so the plate is right on the frame the view opens.
+            .add_systems(
+                Update,
+                (
+                    mark_schematic_dirty,
+                    rebake_schematic,
+                    sync_schematic_visibility,
+                    sync_schematic_trains,
+                )
+                    .chain()
+                    .after(toggle_map_view)
+                    .after(camera_pan),
             );
     }
 }

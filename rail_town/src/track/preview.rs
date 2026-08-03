@@ -439,7 +439,8 @@ mod tests {
     fn insufficient_funds_names_shortfall() {
         let terrain = land(8, 8);
         let network = TrackNetwork::new();
-        let money = Money::new(1_500); // $15 — one tile short of two
+        // A tile and a half's worth, asked to pay for two.
+        let money = Money::new(rail_sim::TRACK_COST_CENTS * 3 / 2);
         let preview = preview_build(
             &network,
             &terrain,
@@ -450,9 +451,10 @@ mod tests {
             None,
         );
         assert!(!preview.can_commit);
+        let shortfall = rail_sim::TRACK_COST_CENTS / 2;
         assert_eq!(
             preview.reject.as_ref().map(|r| r.message.as_str()),
-            Some("Short by $5.00")
+            Some(format!("Short by ${}.00", shortfall / 100).as_str())
         );
     }
 

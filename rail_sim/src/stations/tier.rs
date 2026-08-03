@@ -29,20 +29,20 @@ use crate::ids::TileCoord;
 
 use super::registry::{Station, StationRegistry};
 
-/// Halt — one short platform: $40.00 = 4× a flat track tile.
-pub const HALT_COST_CENTS: i64 = 4_000;
+/// Halt — one short platform: $400.00 = 4x a flat track tile.
+pub const HALT_COST_CENTS: i64 = 40_000;
 
-/// Station — two platforms, the workhorse: $120.00.
-pub const STATION_COST_CENTS: i64 = 12_000;
+/// Station — two platforms, the workhorse: $1,200.00.
+pub const STATION_COST_CENTS: i64 = 120_000;
 
-/// Interchange — four platforms where lines meet: $400.00.
-pub const INTERCHANGE_COST_CENTS: i64 = 40_000;
+/// Interchange — four platforms where lines meet: $4,000.00.
+pub const INTERCHANGE_COST_CENTS: i64 = 400_000;
 
-/// Terminus — three stub platforms, end of line: $260.00.
-pub const TERMINUS_COST_CENTS: i64 = 26_000;
+/// Terminus — three stub platforms, end of line: $2,600.00.
+pub const TERMINUS_COST_CENTS: i64 = 260_000;
 
-/// Goods platform — two loading faces against an industry: $90.00.
-pub const GOODS_PLATFORM_COST_CENTS: i64 = 9_000;
+/// Goods platform — two loading faces against an industry: $900.00.
+pub const GOODS_PLATFORM_COST_CENTS: i64 = 90_000;
 
 /// Minimum Chebyshev tiles between two stations — a platform every tile is not
 /// a railway, it is a tram.
@@ -68,9 +68,8 @@ pub struct StationTierSpec {
     /// [`crate::economy::opex`] on which minute this is and why it matters.
     ///
     /// Design 08 §3.3: *"an interchange nobody uses is a genuine liability"*.
-    /// About a quarter of build cost a minute, rising with tier — an
-    /// interchange on a branch nobody rides costs `$80` a minute to keep the
-    /// lights on, which is a fifth of what it cost to build, every minute.
+    /// An interchange on a branch nobody rides costs `$80` a minute to keep
+    /// the lights on — its build price again every fifty minutes, forever.
     pub maint_cents_per_real_min: i64,
     /// Score added per arrival (bigger stops turn service into reputation faster).
     pub arrival_gain: u8,
@@ -136,7 +135,9 @@ pub const GOODS_PLATFORM_SPEC: StationTierSpec = StationTierSpec {
     dwell_percent: 140,
     capacity: 4,
     build_cents: GOODS_PLATFORM_COST_CENTS,
-    maint_cents: 250,
+    // Between a Halt and a Station, on the same real-minute scale: a loading
+    // face is cheap to keep, but it is still staff and hardstanding.
+    maint_cents_per_real_min: 2_500,
     arrival_gain: 6,
     through_running: true,
 };

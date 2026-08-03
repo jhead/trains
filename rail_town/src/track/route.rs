@@ -44,8 +44,9 @@ use super::propose::ProposedPath;
 ///
 /// A quarter of a flat tile per step of the rose: a 90° turn prices like one
 /// flat tile, so straightness settles ties and gentle S-bends beat zigzags,
-/// while a genuinely cheaper alignment still wins on cost.
-const TURN_PENALTY_CENTS: i64 = 250;
+/// while a genuinely cheaper alignment still wins on cost. Derived from the
+/// tile price so a capital re-scale cannot silently flatten the weighting.
+const TURN_PENALTY_CENTS: i64 = rail_sim::TRACK_COST_CENTS / 4;
 
 /// Discount for a step that lands on the previous proposal's path.
 ///
@@ -60,7 +61,7 @@ const PREVIOUS_SHAPE_DISCOUNT_CENTS: i64 = 1;
 /// back keeps the shallow run the honest winner for a genuinely shallow drag
 /// while a straight drag proposes the straight line. The player who wants the
 /// sparse-run discount on a cardinal alignment can still lay it with Shift.
-const HALF_STEP_EXTRA_CENTS: i64 = 900;
+const HALF_STEP_EXTRA_CENTS: i64 = rail_sim::TRACK_COST_CENTS * 9 / 10;
 
 /// Popped-node ceiling. A 96x96 map holds ~156k states; past a quarter
 /// million something is pathological and the honest answer is "no route".

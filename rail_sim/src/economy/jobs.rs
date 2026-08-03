@@ -586,7 +586,7 @@ mod tests {
     use super::*;
     use bevy_app::{App, Update};
 
-    use crate::economy::MoneyLedger;
+    use crate::economy::{MoneyLedger, GOODS_DELIVERY_CENTS};
     use crate::ids::{TileCoord, TrainId};
     use crate::money::Money;
     use crate::stations::{IndustryTier, GOODS_PLATFORM_COST_CENTS};

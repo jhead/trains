@@ -42,7 +42,7 @@ use super::manifest::{
 /// ($400) plus two goods trains ($750 each) plus most of a mile of track — the
 /// most distant, least immediately useful thing on the build menu, and it should
 /// pay off over hours.
-pub const BORDER_PORTAL_COST_CENTS: i64 = 150_000;
+pub const BORDER_PORTAL_COST_CENTS: i64 = 1_500_000;
 
 /// Sim ticks a train spends in transit beyond the portal.
 ///
@@ -612,7 +612,9 @@ mod tests {
         }
         World {
             registry: BorderRegistry::new(42),
-            money: Money::new(1_000_000),
+            // A border is a mid-game commitment costing more than the opening
+            // balance, so the fixture is a railway that has already earned.
+            money: Money::new(10_000_000),
             ledger: MoneyLedger::default(),
             network,
             terrain,
@@ -684,7 +686,7 @@ mod tests {
         // On the edge, but no track was ever laid at (15, 2).
         let err = open(&mut w, TileCoord { x: 15, y: 2 }, BorderEdge::East).unwrap_err();
         assert_eq!(err, BorderError::NoTrack);
-        assert_eq!(w.money.cents(), 1_000_000, "a refusal must not charge");
+        assert_eq!(w.money.cents(), 10_000_000, "a refusal must not charge");
     }
 
     #[test]

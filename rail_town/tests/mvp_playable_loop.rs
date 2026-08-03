@@ -198,6 +198,12 @@ fn mvp_playable_loop_delivers_and_complains() {
     let mut app = App::new();
     app.add_plugins(SimPlugin);
     app.insert_resource(terrain.clone());
+    // This test exercises the whole loop — build, assign, deliver, complain —
+    // not the opening-affordability curve, which `rail_sim/tests/economy_arc.rs`
+    // owns. Connecting every seeded anchor at once is deliberately beyond the
+    // opening balance (design 08 §9.3), so fund the build phase like the
+    // earned railway it represents.
+    app.insert_resource(Money::new(10_000_000));
 
     // Seed stations / industries via SimPlugin's Update hook.
     app.world_mut().run_schedule(Update);

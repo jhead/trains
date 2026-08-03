@@ -10,9 +10,9 @@ use crate::stations::{GoodKind, IndustryId};
 use super::profile::TrainProfile;
 
 /// Cost to buy a transit (passenger) train: $500.
-pub const TRANSIT_COST_CENTS: i64 = 50_000;
+pub const TRANSIT_COST_CENTS: i64 = 300_000;
 /// Cost to buy a transport (goods) train: $750.
-pub const TRANSPORT_COST_CENTS: i64 = 75_000;
+pub const TRANSPORT_COST_CENTS: i64 = 450_000;
 
 pub fn buy_cost(kind: TrainKind) -> i64 {
     match kind {

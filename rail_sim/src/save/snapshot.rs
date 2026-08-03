@@ -58,7 +58,7 @@ use crate::WorldAnchorsSeeded;
 /// A save written by a different version is refused with
 /// [`SaveError::VersionMismatch`](super::SaveError::VersionMismatch); there is
 /// no silent partial read.
-pub const SCHEMA_VERSION: u16 = 3;
+pub const SCHEMA_VERSION: u16 = 4;
 
 /// Terrain generator revision recorded with the map.
 ///

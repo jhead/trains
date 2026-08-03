@@ -10,7 +10,7 @@ use super::rules::PlacementError;
 use super::terrain::TrackTerrain;
 
 /// Base cost for flat plains / along-contour land track: $10.00 = **1×**.
-pub const TRACK_COST_CENTS: i64 = 1_000;
+pub const TRACK_COST_CENTS: i64 = 10_000;
 
 /// Minimum bridge cost (span 1): **8×** base — $80.00.
 pub const BRIDGE_COST_CENTS: i64 = TRACK_COST_CENTS * 8;

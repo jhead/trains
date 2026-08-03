@@ -429,16 +429,143 @@ mod tests {
             let o = (y * width + x) * 4;
             [data[o], data[o + 1], data[o + 2]]
         };
+        use crate::map::terrain::material::{rgba, Material, SHADES};
+        // Sampled by ramp rather than by exact colour: a base tile is textured,
+        // so which of a material's steps a given texel lands on is a world hash's
+        // business. Which *ramp* it is drawn from is the contract.
+        let ramp = |m: Material| {
+            (0..SHADES)
+                .map(|s| {
+                    let c = rgba(m.step(s));
+                    [c[0], c[1], c[2]]
+                })
+                .collect::<Vec<_>>()
+        };
         let top = texel(width / 2, 4);
         let bottom = texel(width / 2, width - 5);
-        let rock = crate::map::terrain::material::rgba(crate::palette::ROCK_D);
-        let water = crate::map::terrain::material::rgba(crate::palette::WATER_M);
-        assert_eq!(top, [rock[0], rock[1], rock[2]], "north must be at the top");
-        assert_eq!(
-            bottom,
-            [water[0], water[1], water[2]],
-            "south must be at the bottom"
+        assert!(
+            ramp(Material::Rock).contains(&top),
+            "north must be at the top, in rock: {top:?}"
         );
+        assert!(
+            ramp(Material::Water).contains(&bottom),
+            "south must be at the bottom, in water: {bottom:?}"
+        );
+    }
+
+    /// A strip of every elevation band, composited exactly as the game does it,
+    /// and measured. The colour table having a monotonic ladder in it is not the
+    /// same claim as the *screen* having one — texture, transitions, contours and
+    /// faces all land on the same tiles — so this pins the whole pipeline.
+    #[test]
+    fn a_composited_band_strip_climbs_in_luminance() {
+        use crate::map::terrain::material::texel_lightness;
+        use rail_map::{TerrainKind, Tile};
+
+        // Two tiles per band, west to east, at the heights `rail_map` bands
+        // elevation to and the kinds it gives them (`gen.rs`).
+        const LADDER: [(TerrainKind, i8); 6] = [
+            (TerrainKind::Plains, 0),
+            (TerrainKind::Plains, 4),
+            (TerrainKind::Hills, 7),
+            (TerrainKind::Hills, 10),
+            (TerrainKind::Mountain, 13),
+            (TerrainKind::Mountain, 16),
+        ];
+        const BAND_TILES: u32 = 2;
+        let tiles_w = LADDER.len() as u32 * BAND_TILES;
+
+        let mut map = MapGrid::empty(tiles_w, 3, 1);
+        for y in 0..3i32 {
+            for x in 0..tiles_w as i32 {
+                let (kind, height) = LADDER[x as usize / BAND_TILES as usize];
+                *map.get_mut(TileCoord { x, y }).unwrap() = Tile {
+                    height,
+                    water: false,
+                    kind,
+                };
+            }
+        }
+
+        let a = atlas();
+        let data = composite_chunk(&map, &a, 0, 0);
+        let width = (tiles_w * CELL) as usize;
+        let height = 3 * CELL as usize;
+        let texel = |x: usize, y: usize| {
+            let o = (y * width + x) * 4;
+            [data[o], data[o + 1], data[o + 2], data[o + 3]]
+        };
+
+        // Sample the middle of each band only. Faces run at most 9 texels in
+        // from an east or west edge and material lips at most 7, so a 12-texel
+        // margin leaves nothing but the band's own fill and texture.
+        const MARGIN: usize = 12;
+        let band_width = (BAND_TILES * CELL) as usize;
+        let mean: Vec<f32> = (0..LADDER.len())
+            .map(|band| {
+                let x0 = band * band_width + MARGIN;
+                let x1 = (band + 1) * band_width - MARGIN;
+                let mut total = 0.0;
+                let mut n = 0.0;
+                for y in 0..height {
+                    for x in x0..x1 {
+                        total += texel_lightness(texel(x, y));
+                        n += 1.0;
+                    }
+                }
+                total / n
+            })
+            .collect();
+
+        for band in 1..5 {
+            assert!(
+                mean[band] > mean[band - 1],
+                "band {band} does not read as higher than band {}: {mean:?}",
+                band - 1
+            );
+        }
+        // One rung is tight: `GRASS_M` → `HILL_M` is 0.85 L* because the grass
+        // and hill ramps sit on the same three lightness tiers. That rung is
+        // also the plains/hills *material* boundary, which brief 01 §6.2.1 draws
+        // as an authored transition with its own lip and shadow line — so it is
+        // the one step in the ladder that does not have to carry itself on value
+        // alone. Every rung inside a material clears a full ramp step.
+        for band in 1..5 {
+            let same_material = LADDER[band].0 == LADDER[band - 1].0;
+            assert!(
+                !same_material || mean[band] - mean[band - 1] > 8.0,
+                "band {band} steps within its material but barely changes value: {mean:?}"
+            );
+        }
+        assert!(
+            mean[5] >= mean[4] - 0.5,
+            "the wall must not read as lower than the ground below it: {mean:?}"
+        );
+
+        // The wall's own read: its west face carries the brightest terrain
+        // texels on the whole strip, and nothing that light is a fill.
+        let crest = crate::map::terrain::material::rgba(crate::palette::SNOW);
+        let crest_lightness = texel_lightness(crest);
+        let mut crest_texels = 0usize;
+        for y in 0..height {
+            for x in 0..width {
+                let px = texel(x, y);
+                if px == crest {
+                    crest_texels += 1;
+                    // The snow is on the wall's face, not out in the field.
+                    assert!(
+                        x >= 5 * band_width - MARGIN && x < 5 * band_width + MARGIN,
+                        "snow at ({x}, {y}) is nowhere near a wall face"
+                    );
+                } else {
+                    assert!(
+                        texel_lightness(px) < crest_lightness,
+                        "something on the strip outshines the wall's crest at ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert!(crest_texels > 0, "the wall was drawn without a lit crest");
     }
 
     #[test]

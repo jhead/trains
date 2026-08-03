@@ -6,6 +6,10 @@
 
 use rail_map::MapGrid;
 use rail_sim::ids::TileCoord;
+// The height `rail_sim` refuses to build at, imported rather than copied: it is
+// already a dependency of this crate, so there is no reason for the wall the
+// renderer draws and the wall the rules enforce to drift apart.
+use rail_sim::MOUNTAIN_HEIGHT_MIN;
 
 use super::atlas::{
     base_cell, cliff_cell, cliff_corner_cell, sun_lip_cell, terrace_cell, transition_cell, DIR_S,
@@ -15,18 +19,38 @@ use super::material::{
     elevation_band, material_of, shade_for, surface_height, variant_for, Material,
 };
 
-/// Height drop that draws a step face.
+/// Height drop that draws a face at all.
 ///
-/// Three bands is `rail_sim`'s "steep hillside, cut-and-fill" at 6× cost. Below
-/// it the ground is merely rolling, and a face on every rolling edge reads as
+/// Three units is `rail_sim`'s "steep hillside, cut-and-fill" at 6× cost, and
+/// the smallest step a generated map puts between two elevation bands. Below it
+/// the ground is merely rolling, and a face on every rolling edge reads as
 /// fencing rather than as landscape.
 pub const STEP_DELTA: i16 = 3;
 
-/// Height drop that draws a full banded cliff face.
+/// Height drop that is worth filling a diagonal-only notch for.
 ///
-/// Four bands is `MAX_GRADE`: the last delta track may cross at all. A full
-/// face on screen therefore means *this is the edge of what you can build*.
+/// Four units is `MAX_GRADE`, the last delta track may cross at all. A corner
+/// nub is a small mark dropped in open ground, so it is spent only where the
+/// land really falls away rather than merely steps.
 pub const CLIFF_DELTA: i16 = 4;
+
+/// How hard a face is drawn: 0 is a bank in shadow, 1 the full banded cliff with
+/// a lit `SNOW` crest.
+///
+/// **Severity is a legality read, not a height read.** It used to fire on
+/// `drop >= CLIFF_DELTA`, which was exactly backwards on a generated map: the
+/// only four-unit step there is band 0 → 1, which is `MAX_GRADE` and therefore
+/// *legal*, while the impassable wall — band 4 → 5, whose high side is rock at
+/// or above [`MOUNTAIN_HEIGHT_MIN`] — is a three-unit step and drew the dull
+/// bank. The brightest edge in the landscape was marking the one step track can
+/// cross and never the wall it cannot.
+///
+/// So the crest now means one thing: the ground above this face cannot be built
+/// on at any price (brief 02 §3.2). A legal grade-4 bank draws severity 0.
+#[inline]
+fn face_severity(high_side: i8) -> usize {
+    usize::from(high_side >= MOUNTAIN_HEIGHT_MIN)
+}
 
 /// Base + 5 transition pieces + 4 cliff faces + 4 cliff corners + 4 contours
 /// + 2 sun lips.
@@ -149,17 +173,16 @@ pub fn resolve_tile(map: &MapGrid, coord: TileCoord) -> TileDraw {
 
     // Cliff faces. This is what turns a heightmap into a landscape the player
     // can route around: without them the elevation data may as well not exist.
+    // *This* tile is the high side of every face it draws, so its own height is
+    // what decides whether the face is a wall or a bank (see `face_severity`).
+    let severity = face_severity(tile.height);
     let mut faced = [false; 4];
     for (dir, &delta) in DIR_OFFSETS.iter().enumerate() {
         let Some(neighbour) = neighbour_surface(map, coord, delta) else {
             continue;
         };
-        let drop = height - neighbour;
-        if drop >= CLIFF_DELTA {
-            draw.push(cliff_cell(dir, 1));
-            faced[dir] = true;
-        } else if drop >= STEP_DELTA {
-            draw.push(cliff_cell(dir, 0));
+        if height - neighbour >= STEP_DELTA {
+            draw.push(cliff_cell(dir, severity));
             faced[dir] = true;
         }
     }
@@ -201,7 +224,13 @@ pub fn resolve_tile(map: &MapGrid, coord: TileCoord) -> TileDraw {
         }
         if rise >= 1 {
             draw.push(terrace_cell(dir));
-        } else if (1..STEP_DELTA).contains(&-rise) && (dir == DIR_S || dir == DIR_W) {
+        } else if (1..STEP_DELTA).contains(&-rise)
+            && (dir == DIR_S || dir == DIR_W)
+            // A material already on its ramp's cap has nothing lighter to be lit
+            // with, so the lip would draw nothing (`atlas::paint_sun_lip`). The
+            // fill step already separates the two bands; skip the empty layer.
+            && material.light_mark(shade).is_some()
+        {
             draw.push(sun_lip_cell(material, shade, dir));
         }
     }
@@ -338,6 +367,92 @@ mod tests {
         );
     }
 
+    /// Which severity each cliff face in a draw list was drawn at.
+    fn face_severities(layers: &[u16]) -> Vec<usize> {
+        layers
+            .iter()
+            .map(|c| *c as usize)
+            .filter(|c| (CLIFF_BASE..CLIFF_CORNER_BASE).contains(c))
+            .map(|c| (c - CLIFF_BASE) % 2)
+            .collect()
+    }
+
+    #[test]
+    fn the_lit_face_marks_the_wall_and_not_the_step_over_it() {
+        // The inversion this replaces. Severity fired on `drop >= CLIFF_DELTA`,
+        // but on a generated map the only four-unit step is band 0 → 1, which is
+        // `MAX_GRADE` and therefore legal — so the game's brightest face marked
+        // the one step track *can* cross, while the impassable band 4 → 5 wall
+        // is a three-unit step and drew the dull bank.
+
+        // Band 1 (h=4) over band 0 (h=0): a legal grade-4 bank.
+        let bank = grid(3, 3, |_, y| {
+            land(if y >= 2 { 4 } else { 0 }, TerrainKind::Plains)
+        });
+        assert_eq!(
+            face_severities(&layers(&bank, 1, 2)),
+            vec![0],
+            "a bank track may climb must not be drawn as a wall"
+        );
+
+        // Band 5 (h=16) over band 4 (h=13): a three-unit step, and the wall.
+        let wall = grid(3, 3, |_, y| {
+            land(if y >= 2 { 16 } else { 13 }, TerrainKind::Mountain)
+        });
+        assert_eq!(
+            face_severities(&layers(&wall, 1, 2)),
+            vec![1],
+            "the one step track can never cross must draw the lit face"
+        );
+
+        // Band 4 (h=13) over band 3 (h=10): steep, expensive, still buildable.
+        let steep = grid(3, 3, |_, y| {
+            if y >= 2 {
+                land(13, TerrainKind::Mountain)
+            } else {
+                land(10, TerrainKind::Hills)
+            }
+        });
+        assert_eq!(face_severities(&layers(&steep, 1, 2)), vec![0]);
+    }
+
+    #[test]
+    fn severity_follows_the_rule_that_refuses_the_build() {
+        // The renderer's threshold is `rail_sim`'s, not a number of its own.
+        assert_eq!(face_severity(MOUNTAIN_HEIGHT_MIN - 1), 0);
+        assert_eq!(face_severity(MOUNTAIN_HEIGHT_MIN), 1);
+        assert_eq!(face_severity(MOUNTAIN_HEIGHT_MIN + 8), 1);
+    }
+
+    #[test]
+    fn every_wall_on_a_real_map_is_drawn_as_one() {
+        // Not a sample: every impassable tile with lower ground beside it draws
+        // the lit face, and no buildable tile ever does.
+        let map = generate_map(64, 64, DEFAULT_MAP_SEED);
+        let mut walls_drawn = 0usize;
+        for y in 0..map.height as i32 {
+            for x in 0..map.width as i32 {
+                let coord = TileCoord { x, y };
+                let tile = map.tile(coord);
+                let draw = resolve_tile(&map, coord);
+                let severities = face_severities(draw.layers());
+                if tile.water || tile.height < MOUNTAIN_HEIGHT_MIN {
+                    assert!(
+                        severities.iter().all(|s| *s == 0),
+                        "buildable ground at ({x}, {y}) drew a wall"
+                    );
+                } else {
+                    assert!(
+                        severities.iter().all(|s| *s == 1),
+                        "the wall at ({x}, {y}) drew a bank"
+                    );
+                    walls_drawn += severities.len();
+                }
+            }
+        }
+        assert!(walls_drawn > 0, "a standard map has impassable rock in it");
+    }
+
     #[test]
     fn a_gentle_slope_draws_no_cliff() {
         let map = grid(3, 3, |_, y| land(2 + y as i8, TerrainKind::Plains));
@@ -431,6 +546,23 @@ mod tests {
             land(if x == 0 || y == 0 { 2 } else { 4 }, TerrainKind::Plains)
         });
         assert_eq!(count_in(&layers(&map, 1, 1), SUN_LIP_BASE..usize::MAX), 2);
+    }
+
+    #[test]
+    fn a_crest_with_nothing_lighter_to_light_it_draws_no_lip() {
+        // Hills at band 3 fill with `HILL_L`, the top of their ramp, so there is
+        // no lighter step for a sun lip. Drawing one anyway painted a cell of
+        // fill-coloured texels. The band step still reads — from the fill.
+        let map = grid(3, 3, |x, _| {
+            land(if x == 0 { 8 } else { 10 }, TerrainKind::Hills)
+        });
+        let high = layers(&map, 1, 1);
+        assert!(Material::Hill
+            .light_mark(shade_for(TerrainKind::Hills, 10))
+            .is_none());
+        assert_eq!(count_in(&high, SUN_LIP_BASE..usize::MAX), 0);
+        // And the pair's other half is still drawn, so the step is not lost.
+        assert_eq!(count_in(&layers(&map, 0, 1), TERRACE_BASE..SUN_LIP_BASE), 1);
     }
 
     #[test]

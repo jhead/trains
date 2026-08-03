@@ -11,20 +11,24 @@
 //!
 //! | Range | Contents |
 //! | --- | --- |
-//! | `0..60` | base — 5 materials × 4 ramp steps × 3 world-hashed variants |
-//! | `60..140` | transitions — 4 boundaries × (16 edge masks + 4 inner corners) |
-//! | `140..148` | cliff faces — 4 directions × 2 severities |
-//! | `148..152` | cliff corners — diagonal-only drops |
-//! | `152..156` | terrace contours — the shadow at the foot of a band step |
-//! | `156..196` | sun lips — 5 materials × 4 ramp steps × the two sunlit edges |
+//! | `0..45` | base — 5 materials × 3 fill steps × 3 world-hashed variants |
+//! | `45..125` | transitions — 4 boundaries × (16 edge masks + 4 inner corners) |
+//! | `125..133` | cliff faces — 4 directions × 2 severities |
+//! | `133..137` | cliff corners — diagonal-only drops |
+//! | `137..141` | terrace contours — the shadow at the foot of a band step |
+//! | `141..171` | sun lips — 5 materials × 3 fill steps × the two sunlit edges |
+//!
+//! Ramps are four steps but only three of them are *fills*: a material's
+//! reserved cap (`SNOW`, `WATER_F`) has no base cell and no lip cell of its own.
+//! It is reachable only as the light mark on the step below it.
 
 use bevy::prelude::Resource;
 use rail_map::TILE_SIZE;
 
-use crate::palette::{OUTLINE, ROCK_D, ROCK_L, ROCK_M, WATER_F};
+use crate::palette::{OUTLINE, ROCK_D, ROCK_M, SNOW, WATER_F};
 
 use super::material::{
-    rgba, world_hash, Material, BOUNDARY_COUNT, MATERIALS, MATERIAL_COUNT, SHADES, VARIANTS,
+    rgba, world_hash, Material, BOUNDARY_COUNT, FILL_SHADES, MATERIALS, MATERIAL_COUNT, VARIANTS,
 };
 
 /// Texels per tile edge — the pixel contract's source tile size (brief 01 §2.1).
@@ -37,13 +41,13 @@ pub const TRANSITION_PIECES: usize = 20;
 /// First piece index that is an inner corner rather than an edge mask.
 pub const TRANSITION_CORNER: usize = 16;
 
-pub const BASE_CELLS: usize = MATERIAL_COUNT * SHADES * VARIANTS;
+pub const BASE_CELLS: usize = MATERIAL_COUNT * FILL_SHADES * VARIANTS;
 pub const TRANSITION_BASE: usize = BASE_CELLS;
 pub const CLIFF_BASE: usize = TRANSITION_BASE + BOUNDARY_COUNT * TRANSITION_PIECES;
 pub const CLIFF_CORNER_BASE: usize = CLIFF_BASE + 8;
 pub const TERRACE_BASE: usize = CLIFF_CORNER_BASE + 4;
 pub const SUN_LIP_BASE: usize = TERRACE_BASE + 4;
-pub const CELL_COUNT: usize = SUN_LIP_BASE + MATERIAL_COUNT * SHADES * 2;
+pub const CELL_COUNT: usize = SUN_LIP_BASE + MATERIAL_COUNT * FILL_SHADES * 2;
 
 /// Directions, image-space: row 0 is north, column 0 is west.
 pub const DIR_N: usize = 0;
@@ -55,7 +59,8 @@ pub const DIR_W: usize = 3;
 
 #[inline]
 pub fn base_cell(material: Material, shade: usize, variant: usize) -> usize {
-    ((material.index() * SHADES) + shade.min(SHADES - 1)) * VARIANTS + variant.min(VARIANTS - 1)
+    ((material.index() * FILL_SHADES) + shade.min(FILL_SHADES - 1)) * VARIANTS
+        + variant.min(VARIANTS - 1)
 }
 
 #[inline]
@@ -83,7 +88,7 @@ pub fn terrace_cell(dir: usize) -> usize {
 pub fn sun_lip_cell(material: Material, shade: usize, dir: usize) -> usize {
     debug_assert!(dir == DIR_S || dir == DIR_W);
     SUN_LIP_BASE
-        + (material.index() * SHADES + shade.min(SHADES - 1)) * 2
+        + (material.index() * FILL_SHADES + shade.min(FILL_SHADES - 1)) * 2
         + usize::from(dir == DIR_W)
 }
 
@@ -113,7 +118,7 @@ impl TerrainAtlas {
         };
 
         for material in MATERIALS {
-            for shade in 0..SHADES {
+            for shade in 0..FILL_SHADES {
                 for variant in 0..VARIANTS {
                     let index = base_cell(material, shade, variant);
                     paint_base(&mut atlas.cell(index), material, shade, variant);
@@ -135,7 +140,7 @@ impl TerrainAtlas {
             paint_cliff_corner(&mut atlas.cell(cliff_corner_cell(dir)), dir);
         }
         for material in MATERIALS {
-            for shade in 0..SHADES {
+            for shade in 0..FILL_SHADES {
                 for dir in [DIR_S, DIR_W] {
                     let index = sun_lip_cell(material, shade, dir);
                     paint_sun_lip(&mut atlas.cell(index), material, shade, dir);
@@ -267,15 +272,22 @@ const CLIFF_SALT: u32 = 0x6D0F_3B29;
 
 fn paint_base(cell: &mut Cell, material: Material, shade: usize, variant: usize) {
     let base = rgba(material.step(shade));
-    let light = rgba(material.highlight(shade));
+    let shadow = rgba(material.shadow(shade));
+    let lit = material.texture_mark(shade).map(rgba);
     // At the bottom of a ramp there is nothing darker in the material's own
     // hue, and borrowing the violet shadow leaves grass looking dirty. Texture
     // the darkest step with the one above it instead: blades catching light.
     let dark = if shade == 0 {
-        light
+        lit.unwrap_or(shadow)
     } else {
-        rgba(material.shadow(shade))
+        shadow
     };
+    // The mirror image at the top: a step with nothing lighter available to it
+    // — the head of the ramp, or a material whose only lighter colour is its
+    // reserved cap — would otherwise mark itself in the fill colour, six
+    // invisible rects a tile. Fall back to the step below, so a plateau still
+    // carries texture and every mark that is paid for is seen.
+    let light = lit.unwrap_or(dark);
     cell.fill(base);
 
     let seed = world_hash(
@@ -474,16 +486,22 @@ const STRATA: [bool; 8] = [false, false, true, false, false, false, true, false]
 fn paint_cliff(cell: &mut Cell, dir: usize, severity: usize) {
     let deep = rgba(ROCK_D);
     let sunlit = dir == DIR_S || dir == DIR_W;
-    // A step is a bank in shadow; only a face at the grade limit gets the body
-    // and crest of a proper cliff. That keeps the brightest rock in the
-    // landscape meaning exactly one thing: track cannot cross here.
+    // Severity 1 is a face `rail_sim` will not let track cross at any price;
+    // severity 0 is a bank in shadow that it will (see `autotile`). Only the
+    // wall gets the body and the crest of a proper cliff, so the brightest rock
+    // in the landscape means exactly one thing: you cannot build through here.
     let body = rgba(if severity == 1 && sunlit {
         ROCK_M
     } else {
         ROCK_D
     });
+    // `SNOW` lives here and nowhere else on flat-lit ground. It is the rock
+    // ramp's reserved extreme (brief 01 §3.2) and it is spent on one texel row:
+    // the lit crest of an impassable face, exactly as a sun lip spends a
+    // material's light step on the crest of a band step. Filling peaks with it
+    // put the game's brightest colour under the `hi` accent and lost both.
     let crest = rgba(if severity == 1 && sunlit {
-        ROCK_L
+        SNOW
     } else {
         ROCK_M
     });
@@ -594,8 +612,14 @@ fn paint_terrace(cell: &mut Cell, dir: usize) {
 /// falls away to the low south-western sun, never a flat fill. Paired with the
 /// contour shadow below it, a one-band rise reads as a step from directly
 /// above, which is what makes slope direction legible (brief 02 §2.3).
+///
+/// A material already sitting on its cap has nothing lighter to be lit with, and
+/// a lip painted in the fill colour is a cell's worth of invisible texels. The
+/// cell is left empty instead, and `autotile::resolve_tile` never asks for it.
 fn paint_sun_lip(cell: &mut Cell, material: Material, shade: usize, dir: usize) {
-    let lit = rgba(material.highlight(shade));
+    let Some(lit) = material.light_mark(shade).map(rgba) else {
+        return;
+    };
     for t in 0..CELL as i32 {
         let h = world_hash(t, dir as i32, EDGE_SALT.wrapping_add(shade as u32));
         // A broken lip reads as a lit edge; an unbroken one reads as a border.
@@ -629,10 +653,10 @@ mod tests {
 
     #[test]
     fn cell_ranges_do_not_overlap() {
-        assert_eq!(BASE_CELLS, 60);
-        assert_eq!(CLIFF_BASE, 140);
-        assert_eq!(CELL_COUNT, 196);
-        assert!(base_cell(Material::Rock, SHADES - 1, VARIANTS - 1) < TRANSITION_BASE);
+        assert_eq!(BASE_CELLS, 45);
+        assert_eq!(CLIFF_BASE, 125);
+        assert_eq!(CELL_COUNT, 171);
+        assert!(base_cell(Material::Rock, FILL_SHADES - 1, VARIANTS - 1) < TRANSITION_BASE);
         assert!(transition_cell(BOUNDARY_COUNT - 1, TRANSITION_PIECES - 1) < CLIFF_BASE);
         assert!(cliff_cell(DIR_W, 1) < CLIFF_CORNER_BASE);
         assert!(cliff_corner_cell(3) < TERRACE_BASE);
@@ -643,7 +667,7 @@ mod tests {
     fn base_cells_are_fully_opaque_and_contiguous() {
         let a = atlas();
         for material in MATERIALS {
-            for shade in 0..SHADES {
+            for shade in 0..FILL_SHADES {
                 for variant in 0..VARIANTS {
                     let px = cell_pixels(&a, base_cell(material, shade, variant));
                     assert_eq!(px.len(), (CELL * CELL) as usize);
@@ -683,7 +707,7 @@ mod tests {
     fn base_tiles_are_textured_not_flat_rectangles() {
         let a = atlas();
         for material in MATERIALS {
-            for shade in 0..SHADES {
+            for shade in 0..FILL_SHADES {
                 let px = cell_pixels(&a, base_cell(material, shade, 0));
                 let distinct = px.iter().collect::<std::collections::HashSet<_>>().len();
                 assert!(
@@ -739,7 +763,13 @@ mod tests {
     #[test]
     fn cliff_faces_are_banded_rock_not_a_gradient() {
         let a = atlas();
-        let rock = [rgba(ROCK_D), rgba(ROCK_M), rgba(ROCK_L)];
+        // `SNOW` is the rock ramp's cap, spent on the crest of a wall.
+        let rock = [
+            rgba(ROCK_D),
+            rgba(ROCK_M),
+            rgba(crate::palette::ROCK_L),
+            rgba(SNOW),
+        ];
         for dir in 0..4 {
             for severity in 0..2 {
                 let px = cell_pixels(&a, cliff_cell(dir, severity));
@@ -795,9 +825,107 @@ mod tests {
     }
 
     #[test]
+    fn snow_is_a_crest_and_never_a_field() {
+        // Brief 01 §3.2: `SNOW` is reserved. It used to be the flat fill for
+        // every impassable peak — the brightest colour in the game, L* 84
+        // against 35 for grass, on 5.5% of the map, all of it saying "you cannot
+        // build here" in the loudest voice available. It now appears only where
+        // a light step is drawn: the crest of a wall, and the lip on rock that
+        // steps down to the sun.
+        let a = atlas();
+        let snow = rgba(SNOW);
+        let lit_faces: std::collections::HashSet<usize> = [DIR_S, DIR_W]
+            .into_iter()
+            .map(|dir| cliff_cell(dir, 1))
+            .collect();
+        let rock_lips: std::collections::HashSet<usize> = [DIR_S, DIR_W]
+            .into_iter()
+            .map(|dir| sun_lip_cell(Material::Rock, 2, dir))
+            .collect();
+
+        for index in 0..CELL_COUNT {
+            let snowy = cell_pixels(&a, index)
+                .iter()
+                .filter(|p| **p == snow)
+                .count();
+            if lit_faces.contains(&index) || rock_lips.contains(&index) {
+                assert!(snowy > 0, "cell {index} is a lit rock crest with no snow");
+                // A crest, not a field: one texel row of a 32×32 cell.
+                assert!(
+                    snowy <= CELL as usize * 2,
+                    "cell {index} wears {snowy} texels of snow — that is a fill"
+                );
+            } else {
+                assert_eq!(snowy, 0, "cell {index} spent snow off a lit rock crest");
+            }
+        }
+
+        // In particular: no base tile, at any shade or variant, is ever snow.
+        for shade in 0..FILL_SHADES {
+            for variant in 0..VARIANTS {
+                let px = cell_pixels(&a, base_cell(Material::Rock, shade, variant));
+                assert!(
+                    !px.contains(&snow),
+                    "a mountain field is filled with snow at shade {shade}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn light_marks_are_visible_or_are_not_painted() {
+        // `Material::highlight` used to return the base colour at the top of a
+        // ramp, so the atlas stamped six light rects per snow tile and five per
+        // shallow-water tile in the fill colour: paid for, never seen. Every
+        // light mark must now differ from the ground it lands on, and a lip with
+        // nowhere to go must not be drawn at all.
+        let a = atlas();
+        for material in MATERIALS {
+            for shade in 0..FILL_SHADES {
+                let base = rgba(material.step(shade));
+                let px = cell_pixels(&a, base_cell(material, shade, 0));
+                assert!(
+                    px.iter().any(|p| *p != base),
+                    "{material:?} shade {shade} is an unmarked field"
+                );
+                if let Some(light) = material.texture_mark(shade) {
+                    assert!(
+                        px.contains(&rgba(light)),
+                        "{material:?} shade {shade} lost its light marks"
+                    );
+                }
+                if let Some(cap) = material.reserved_cap() {
+                    assert!(
+                        !px.contains(&rgba(cap)),
+                        "{material:?} shade {shade} spent its reserved cap on flat texture"
+                    );
+                }
+
+                for dir in [DIR_S, DIR_W] {
+                    let lip = cell_pixels(&a, sun_lip_cell(material, shade, dir));
+                    let painted = lip.iter().filter(|p| p[3] == 255).count();
+                    match material.light_mark(shade) {
+                        Some(light) => {
+                            assert!(painted > 0, "{material:?} shade {shade} lip is empty");
+                            assert!(
+                                lip.iter().all(|p| p[3] == 0 || *p == rgba(light)),
+                                "{material:?} shade {shade} lip left its ramp"
+                            );
+                        }
+                        None => assert_eq!(
+                            painted, 0,
+                            "{material:?} shade {shade} painted a lip it cannot light"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn atlas_uses_only_palette_colours() {
         use crate::palette::{
-            GRASS_D, GRASS_L, GRASS_M, HILL_D, HILL_L, HILL_M, SAND_D, SAND_L, SAND_M, SNOW,
+            GRASS_D, GRASS_L, GRASS_M, HILL_D, HILL_L, HILL_M, ROCK_L, SAND_D, SAND_L, SAND_M,
             WATER_D, WATER_L, WATER_M,
         };
         let allowed: std::collections::HashSet<[u8; 4]> = [

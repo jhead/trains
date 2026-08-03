@@ -32,7 +32,9 @@ impl Plugin for TrackPlugin {
             .add_systems(
                 Update,
                 (
-                    track_tool_input.after(SelectionInputSet),
+                    track_tool_input
+                        .after(SelectionInputSet)
+                        .in_set(crate::input::PlayerVerbSet),
                     sync_track_ghosts.after(track_tool_input),
                     update_build_feedback_ui.after(track_tool_input),
                     sync_flash_sprites.after(update_build_feedback_ui),

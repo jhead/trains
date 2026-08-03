@@ -23,7 +23,9 @@ impl Plugin for TrainsPlugin {
             .add_systems(
                 Update,
                 (
-                    train_tool_input.after(SelectionInputSet),
+                    train_tool_input
+                        .after(SelectionInputSet)
+                        .in_set(crate::input::PlayerVerbSet),
                     sync_train_sprites,
                     sync_train_stop_indicators.after(sync_train_sprites),
                     sync_train_smoke.after(sync_train_sprites),

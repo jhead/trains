@@ -25,7 +25,9 @@ impl Plugin for LinesPlugin {
             .add_systems(
                 Update,
                 (
-                    line_tool_input.after(SelectionInputSet),
+                    line_tool_input
+                        .after(SelectionInputSet)
+                        .in_set(crate::input::PlayerVerbSet),
                     update_lines_panel,
                     line_row_clicks,
                     assign_train_clicks,

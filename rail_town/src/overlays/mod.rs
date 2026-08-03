@@ -61,7 +61,7 @@ impl Plugin for OverlaysPlugin {
             .add_systems(
                 Update,
                 (
-                    overlay_hotkeys,
+                    overlay_hotkeys.in_set(crate::input::PlayerVerbSet),
                     sync_overlay_sprites,
                     update_overlay_legend.after(overlay_hotkeys),
                 ),

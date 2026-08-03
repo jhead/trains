@@ -70,12 +70,14 @@ impl Plugin for MapPlugin {
                 Update,
                 (
                     rebuild_dirty_terrain,
-                    map_view_click_fly,
+                    map_view_click_fly.in_set(crate::input::PlayerVerbSet),
                     exit_map_view_before_focus.after(map_view_click_fly),
                     apply_camera_focus.after(exit_map_view_before_focus),
-                    camera_pan,
-                    camera_zoom,
-                    toggle_map_view.after(camera_zoom),
+                    camera_pan.in_set(crate::input::PlayerVerbSet),
+                    camera_zoom.in_set(crate::input::PlayerVerbSet),
+                    toggle_map_view
+                        .after(camera_zoom)
+                        .in_set(crate::input::PlayerVerbSet),
                     block_zoom_in_map_view
                         .after(toggle_map_view)
                         .after(camera_zoom),

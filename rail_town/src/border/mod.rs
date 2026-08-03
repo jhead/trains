@@ -45,7 +45,7 @@ impl Plugin for BorderPresentationPlugin {
                 sync_border_yards,
                 animate_yard_trains.after(sync_border_yards),
                 light_yard_windows.after(sync_border_yards),
-                neighbours_panel_input,
+                neighbours_panel_input.in_set(crate::input::PlayerVerbSet),
                 update_neighbours_panel.after(neighbours_panel_input),
                 neighbour_button_hover,
                 neighbour_button_clicks,

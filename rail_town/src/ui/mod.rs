@@ -164,7 +164,7 @@ impl Plugin for UiPlugin {
                     alert_bell_clicks,
                     update_menu_row,
                     menu_row_clicks,
-                    window_hotkeys,
+                    window_hotkeys.in_set(crate::input::PlayerVerbSet),
                     refresh_menu_key_labels,
                 ),
             )
@@ -191,7 +191,7 @@ impl Plugin for UiPlugin {
                     alert_row_clicks,
                     alert_dismiss_all_clicks,
                     update_alert_row_hover,
-                    undo_redo_input,
+                    undo_redo_input.in_set(crate::input::PlayerVerbSet),
                 ),
             )
             // The modal. Clicks are read before the rebuild so a press closes

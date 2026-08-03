@@ -36,7 +36,7 @@ use overlays::OverlaysPlugin;
 use palette::BG0;
 use rail_net::{ManifestService, NeighborService};
 use rail_sim::SimPlugin;
-use shell::ShellPlugin;
+use shell::{ShellPlugin, ShellState};
 use sim_bridge::SimBridgePlugin;
 use stations::StationsPlugin;
 use town::TownPresentationPlugin;
@@ -67,6 +67,14 @@ fn main() {
         // The live input map. After the shell, which is where the player's own
         // bindings are read off disk, and before anything that reads a key.
         .add_plugins(InputMapPlugin)
+        // The real state gating (burn-down, "gameplay plugins aren't
+        // state-gated"): every player verb sits in one set, and the set only
+        // runs while the player is playing. The world itself keeps running
+        // behind the title - it just isn't listening.
+        .configure_sets(
+            Update,
+            input::PlayerVerbSet.run_if(in_state(ShellState::Playing)),
+        )
         .add_plugins(SimPlugin)
         .add_plugins(SimBridgePlugin)
         // Seeded terrain + pan/zoom camera (default seed 42, 64×64).

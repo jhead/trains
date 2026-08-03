@@ -40,7 +40,12 @@ impl Plugin for InspectPlugin {
                 Startup,
                 (setup_inspector_panel, setup_selection_outline, setup_hover),
             )
-            .add_systems(Update, selection_click_input.in_set(SelectionInputSet))
+            .add_systems(
+                Update,
+                selection_click_input
+                    .in_set(SelectionInputSet)
+                    .in_set(crate::input::PlayerVerbSet),
+            )
             .add_systems(
                 Update,
                 (

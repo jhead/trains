@@ -15,7 +15,13 @@ pub struct SimBridgePlugin;
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<KeyBindings>()
-            .add_systems(Update, (time_controls_input, sync_virtual_time_from_clock));
+            .add_systems(
+                Update,
+                (
+                    time_controls_input.in_set(crate::input::PlayerVerbSet),
+                    sync_virtual_time_from_clock,
+                ),
+            );
     }
 }
 

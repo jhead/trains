@@ -36,7 +36,9 @@ impl Plugin for StationsPlugin {
             .add_systems(
                 Update,
                 (
-                    station_tool_input.after(SelectionInputSet),
+                    station_tool_input
+                        .after(SelectionInputSet)
+                        .in_set(crate::input::PlayerVerbSet),
                     apply_confirmed_demolish.after(station_tool_input),
                     sync_station_ghosts.after(station_tool_input),
                     update_station_hud.after(station_tool_input),

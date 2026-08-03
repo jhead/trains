@@ -132,6 +132,17 @@ fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
         || keys.pressed(KeyCode::SuperRight)
 }
 
+/// Every system that turns a press into a gameplay verb — tools, panels,
+/// camera control, speed, undo.
+///
+/// `main.rs` gates this whole set on `ShellState::Playing`, which is the real
+/// state gating the burn-down asked for: the shell's input suppression stays
+/// as a safety net, but a menu being up now means the verbs never run at all.
+/// Sim and presentation stay out of the set on purpose — the title screen's
+/// world is alive by design (09 §2), it just isn't listening.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlayerVerbSet;
+
 /// Installs [`KeyBindings`] and keeps it in step with the Controls tab.
 ///
 /// Gameplay plugins `init_resource::<KeyBindings>()` for themselves so they work

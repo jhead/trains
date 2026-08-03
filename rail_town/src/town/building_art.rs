@@ -302,18 +302,7 @@ impl BuildingAtlas {
     }
 }
 
-/// World-anchored hash. Integer inputs only — never screen position, never time.
-pub fn world_hash(x: i32, y: i32, salt: u32) -> u32 {
-    let mut h = 0x9E37_79B9_u32;
-    h ^= (x as u32).wrapping_mul(0x85EB_CA6B);
-    h = h.rotate_left(13).wrapping_mul(0xC2B2_AE35);
-    h ^= (y as u32).wrapping_mul(0x27D4_EB2F);
-    h = h.rotate_left(11).wrapping_mul(0x1656_67B1);
-    h ^= salt.wrapping_mul(0x9E37_79B1);
-    h ^= h >> 15;
-    h = h.wrapping_mul(0x2545_F491);
-    h ^ (h >> 16)
-}
+pub(crate) use crate::hash::world_hash;
 
 /// Bake every frame into one nearest-sampled atlas image.
 pub fn bake_atlas(

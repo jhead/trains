@@ -66,6 +66,8 @@ pub struct SfxBank {
     pub demolish: ClipSet,
     pub invalid: ClipSet,
     pub tool_switch: ClipSet,
+    /// A hammer on a building site — 06 §3.1's "occasional sound".
+    pub hammer: ClipSet,
     // -- trains (§3.2) --
     pub whistle: ClipSet,
     pub brake: ClipSet,
@@ -99,6 +101,7 @@ pub fn bake_bank(mut commands: Commands, mut clips: ResMut<Assets<SampleClip>>) 
         demolish: ctx.positional(3, demolish),
         invalid: ctx.positional(2, invalid),
         tool_switch: ctx.flat(1, tool_switch),
+        hammer: ctx.positional(3, hammer),
         whistle: ctx.positional(3, whistle),
         brake: ctx.positional(2, brake),
         depart_transit: ctx.positional(2, depart_transit),
@@ -168,6 +171,24 @@ fn clack(variant: usize, rng: &mut Rng) -> Canvas {
     c.partial(0.002, 96.0 * pitch, 0.60, 0.005, 0.048, 0.15, 0.90);
     // Body, so the burst is not bare noise.
     c.noise_soft(rng, 0.0, 0.06, 280.0, 0.35, 0.004, 0.030);
+    c
+}
+
+/// A hammer on timber, from across a field.
+///
+/// Brief 06 §3.1 wants the scaffold to hold *"with a small dust puff and
+/// occasional sound"*, and §1's rule is never to startle: this is the quietest
+/// positional family in the bank, because it is texture at the edge of hearing
+/// rather than an event the player is meant to look at. Woody rather than
+/// metallic — a building site, not a forge.
+fn hammer(variant: usize, rng: &mut Rng) -> Canvas {
+    let pitch = semitones(-1.0 + variant as f32 * 1.7);
+    let mut c = Canvas::new(0.20);
+    // The strike itself: a short, dry tick.
+    c.noise_band(rng, 0.0, 0.035, 1900.0 * pitch, 1250.0 * pitch, 6.0, 0.55, 0.0015, 0.010);
+    // Timber body under it, so it lands on something rather than in air.
+    c.partial(0.001, 210.0 * pitch, 0.42, 0.003, 0.055, 0.11, 0.94);
+    c.noise_soft(rng, 0.0, 0.09, 420.0, 0.20, 0.004, 0.038);
     c
 }
 

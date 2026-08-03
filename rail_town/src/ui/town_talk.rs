@@ -1,10 +1,18 @@
 //! Town Talk — the living feed, in a window.
 //!
-//! **Closed by default.** It was a permanent panel in the bottom-left corner,
-//! which put chatter on screen at all times whether or not the player had asked
-//! for any. 03 §1: nothing is permanent unless it is permanently relevant, and
-//! flavour is by definition not. It opens from the menu row or `Y`, and it
-//! remembers where the player left it.
+//! **Open from the first frame, and the only window that is.** It shipped
+//! closed on the argument that the feed is flavour and 03 §1 keeps flavour off
+//! the screen. That argument was wrong about what this panel is. DESIGN.md:
+//! *"Peeps have moods and opinions and voice them publicly … the complaint feed
+//! is both the diagnostic layer and the emotional hook."* 05 §4 builds the whole
+//! ambient voice on it, and `onboarding::nudge` speaks the game's opening line —
+//! *"Westbrook is eight tiles east. They'd like a railway."* — into it. A closed
+//! feed silences the hook and the tutorial in one go, which is a worse failure
+//! than a busy corner.
+//!
+//! It is still a window, not chrome: [`WindowManager::new`] opens it exactly the
+//! way the player would, so `Esc`, the close box and the menu row all behave
+//! normally, and a player who closes it has closed it for good.
 //!
 //! Rows stay click-to-locate: a complaint that cannot take you to its source is
 //! just noise.

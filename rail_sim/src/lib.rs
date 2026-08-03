@@ -79,7 +79,7 @@ pub use peeps::{
     DistrictFlow, DistrictFlowState, Facing, Household, HouseholdId, HouseholdRegistry, Journey,
     JourneyLeg, JourneyMemory, JourneyOutcome, JourneyRecord, JourneyStage, Mood, Peep, PeepBudget,
     PeepDetail, PeepFocus, PeepId, PeepPosition, PeepRole, PeepSpawnState, PeepsPlugin, Routine,
-    TalkKind, TownTalkEntry, TownTalkFeed, WaitingAtStation, BAD_JOURNEYS_TO_LEAVE,
+    TalkKind, TownTalkEntry, TownTalkFeed, VacatedHomes, WaitingAtStation, BAD_JOURNEYS_TO_LEAVE,
     COMPLAINT_DEDUPE_TICKS, COMPLAINT_WAIT_SECS, DAY_MINUTES, GAVE_UP_WAIT_FLAG, MAX_COMPLAINTS,
     MAX_DETAILED_PEEPS, MAX_TOWN_TALK, MEMORY_DEPTH, PEEPS_PER_STATION, SIM_SECONDS_PER_TICK,
     TICKS_PER_DAY,

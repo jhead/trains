@@ -70,8 +70,8 @@ use bevy::ui::UiScale;
 use bevy::window::PrimaryWindow;
 use rail_map::{world_to_tile, MapGrid, TerrainKind, TILE_SIZE};
 use rail_sim::{
-    commands::TrainKind, IndustryRegistry, Mood, Peep, StationRegistry, StationService, TileCoord,
-    TrackNetwork, Train, TrainLocation, WaitingAtStation,
+    commands::TrainKind, IndustryRegistry, Journey, Mood, Peep, StationRegistry, StationService,
+    TileCoord, TrackNetwork, Train, TrainLocation, WaitingAtStation,
 };
 
 use crate::map::{MapCamera, MapViewState};
@@ -226,8 +226,20 @@ pub struct HoverWorld<'w, 's> {
     sprites: WorldPickSprites<'w, 's>,
 }
 
-/// Peeps, and where they are queueing if they are.
-type PeepQuery<'w, 's> = Query<'w, 's, (&'static Peep, Option<&'static WaitingAtStation>)>;
+/// Peeps, where they are queueing, and what they are actually doing.
+///
+/// [`WaitingAtStation`] is on **every** peep, always — it names the stop this
+/// leg uses, not a queue they are standing in — so the [`Journey`] is what says
+/// whether the wait it carries is a real one.
+type PeepQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Peep,
+        Option<&'static WaitingAtStation>,
+        Option<&'static Journey>,
+    ),
+>;
 type LotQuery<'w, 's> =
     Query<'w, 's, (Entity, &'static BuildingLot, &'static Sprite, &'static Transform)>;
 type PropQuery<'w, 's> =
@@ -637,7 +649,7 @@ fn lot_detail(lot: &BuildingLot, peeps: &PeepQuery) -> String {
     if lot.district == District::Industrial {
         return format!("{district} - goods");
     }
-    let residents = peeps.iter().filter(|(p, _)| p.home == lot.tile).count();
+    let residents = peeps.iter().filter(|(p, _, _)| p.home == lot.tile).count();
     match residents {
         0 => format!("{district} - empty"),
         1 => format!("{district} - 1 resident"),
@@ -719,21 +731,47 @@ fn describe_world(sel: Selectable, world: &HoverWorld, peeps: &PeepQuery) -> (St
             };
             (format!("Train {}", id.0), detail)
         }
-        Selectable::Peep(id) => match peeps.iter().find(|(p, _)| p.id == id) {
-            Some((p, waiting)) => {
+        Selectable::Peep(id) => match peeps.iter().find(|(p, _, _)| p.id == id) {
+            Some((p, waiting, journey)) => {
                 let mood = match p.mood {
                     Mood::Content => "Content",
                     Mood::Uneasy => "Uneasy",
                     Mood::Frustrated => "Frustrated",
                 };
-                let detail = match waiting {
-                    Some(w) => format!("{mood} - waiting {} min", w.wait_secs / 60),
-                    None => mood.to_string(),
-                };
-                (p.name.clone(), detail)
+                (p.name.clone(), peep_detail(mood, waiting, journey))
             }
             None => ("Someone".into(), "Resident".into()),
         },
+    }
+}
+
+/// Mood, plus the one fact about this peep that is actually true right now.
+///
+/// The bug this replaces: **every** peep read *"waiting N min"*, including one
+/// halfway down a lane, because [`WaitingAtStation`] is a permanent component
+/// rather than a flag — it names the stop this leg uses and carries a wait that
+/// only means anything on the platform. A peep who is walking, riding or asleep
+/// at home is not waiting, and saying so of all of them made the one number
+/// that should have been diagnostic into noise. So the wait is shown only while
+/// [`JourneyStage::is_waiting`] agrees, and otherwise the peep says what they
+/// are doing.
+fn peep_detail(
+    mood: &str,
+    waiting: Option<&WaitingAtStation>,
+    journey: Option<&Journey>,
+) -> String {
+    // No journey at all is the pre-journey wait model: the component's presence
+    // *was* the platform. Tests and save fixtures still build peeps that way.
+    let on_platform = journey.map_or(true, |j| j.stage.is_waiting());
+    if on_platform {
+        return match waiting {
+            Some(w) => format!("{mood} - waiting {} min", w.wait_secs / 60),
+            None => mood.to_string(),
+        };
+    }
+    match journey {
+        Some(j) => format!("{mood} - {}", j.stage.label().to_lowercase()),
+        None => mood.to_string(),
     }
 }
 
@@ -1016,6 +1054,86 @@ fn overlap_area(a: Rect, b: Rect) -> f32 {
     let w = (a.max.x.min(b.max.x) - a.min.x.max(b.min.x)).max(0.0);
     let h = (a.max.y.min(b.max.y) - a.min.y.max(b.min.y)).max(0.0);
     w * h
+}
+
+#[cfg(test)]
+mod peep_hover_tests {
+    use super::*;
+    use rail_sim::{JourneyStage, Routine, StationId, TileCoord};
+
+    fn journey_at(stage: JourneyStage) -> Journey {
+        let routine = Routine::from_seed(
+            7,
+            TileCoord { x: 2, y: 2 },
+            StationId(1),
+            TileCoord { x: 9, y: 9 },
+            StationId(2),
+        );
+        let mut journey = Journey::new(&routine);
+        journey.set_stage(stage);
+        journey
+    }
+
+    fn waiting(secs: u32) -> WaitingAtStation {
+        let mut w = WaitingAtStation::at(StationId(1));
+        w.wait_secs = secs;
+        w
+    }
+
+    #[test]
+    fn only_a_peep_on_the_platform_is_waiting() {
+        let w = waiting(11 * 60);
+        assert_eq!(
+            peep_detail(
+                "Frustrated",
+                Some(&w),
+                Some(&journey_at(JourneyStage::WaitingOnPlatform))
+            ),
+            "Frustrated - waiting 11 min"
+        );
+    }
+
+    #[test]
+    fn a_peep_mid_journey_never_reads_as_waiting() {
+        // The reported bug: `WaitingAtStation` is permanent, so everybody
+        // hovered as "waiting N min" — walkers, riders, and people at home.
+        let w = waiting(11 * 60);
+        for stage in [
+            JourneyStage::AtHome,
+            JourneyStage::WalkingToStation,
+            JourneyStage::Boarding,
+            JourneyStage::Riding,
+            JourneyStage::Alighting,
+            JourneyStage::WalkingToDestination,
+            JourneyStage::SpendingTime,
+            JourneyStage::WalkingInstead,
+            JourneyStage::LeavingTown,
+        ] {
+            let line = peep_detail("Content", Some(&w), Some(&journey_at(stage)));
+            assert!(
+                !line.contains("waiting"),
+                "{stage:?} hovered as a platform wait: {line}"
+            );
+            assert!(line.starts_with("Content - "), "{stage:?} lost its mood: {line}");
+            assert!(line.is_ascii(), "{stage:?} tooltip is not ASCII: {line}");
+        }
+        assert_eq!(
+            peep_detail("Content", Some(&w), Some(&journey_at(JourneyStage::Riding))),
+            "Content - riding"
+        );
+    }
+
+    #[test]
+    fn a_peep_with_no_journey_keeps_the_old_wait_model() {
+        // Save fixtures and the pre-journey tests build peeps with only a
+        // `WaitingAtStation`; there the component's presence *is* the platform.
+        let w = waiting(120);
+        assert_eq!(
+            peep_detail("Uneasy", Some(&w), None),
+            "Uneasy - waiting 2 min"
+        );
+        assert_eq!(peep_detail("Uneasy", None, None), "Uneasy");
+    }
 }
 
 #[cfg(test)]

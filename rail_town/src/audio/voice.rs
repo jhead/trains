@@ -58,6 +58,8 @@ pub enum VoiceKind {
     Town,
     /// Muffled machinery, only while working.
     Industry,
+    /// A platform crowd, scaling with how many are waiting (brief 10 §3.3).
+    Murmur,
     /// A train in motion: roll, sleepers, rumble.
     Rolling,
     /// The sparse ambient score.
@@ -66,13 +68,14 @@ pub enum VoiceKind {
 
 impl VoiceKind {
     /// Voices whose character is a landscape rather than an object.
-    pub const BEDS: [VoiceKind; 6] = [
+    pub const BEDS: [VoiceKind; 7] = [
         VoiceKind::Wind,
         VoiceKind::Water,
         VoiceKind::Forest,
         VoiceKind::Night,
         VoiceKind::Town,
         VoiceKind::Industry,
+        VoiceKind::Murmur,
     ];
 
     pub fn label(self) -> &'static str {
@@ -83,6 +86,7 @@ impl VoiceKind {
             Self::Night => "night",
             Self::Town => "town",
             Self::Industry => "industry",
+            Self::Murmur => "murmur",
             Self::Rolling => "rolling",
             Self::Music => "music",
         }
@@ -627,6 +631,52 @@ impl VoiceRender {
         (murmur * 0.32 + upper * 0.22) * breath * (0.25 + 0.75 * live) + self.grains_out()
     }
 
+    fn murmur(&mut self) -> f32 {
+        // Brief 10 §3.3: a platform crowd, scaling with how many are waiting.
+        // `density` is that count, normalised; `tone` is how near the platform
+        // is. Deliberately *not* the town bed with a different weight — a
+        // crowd is voices, and voices sit in a narrower, higher band than the
+        // doors-and-carts activity of a district.
+        let n = self.rng.bipolar();
+        let crowd = self.density;
+
+        // A vowel-shaped pair of formants: the sound of people rather than the
+        // sound of a place.
+        let f1 = svf_f(lerp(320.0, 520.0, self.tone), SR);
+        let d1 = svf_damp(1.6);
+        let low = self.svf_a.step(n, f1, d1).band * band_norm(f1, d1);
+        let f2 = svf_f(lerp(900.0, 1400.0, self.tone), SR);
+        let d2 = svf_damp(2.2);
+        let high = self.svf_b.step(n, f2, d2).band * band_norm(f2, d2) * crowd;
+        // Conversation arrives in swells, never at a steady level.
+        let swell = 0.55 + 0.45 * (0.5 + 0.5 * self.drift(0.09, 0.041));
+
+        // The odd voice carrying over the rest. Sparse: this is texture, not an
+        // alarm, and a platform that chattered would be the loudest thing on a
+        // quiet map.
+        if self.next_event == 0 {
+            self.schedule(lerp(11.0, 1.6, crowd));
+            if crowd > 0.05 {
+                let v = self.rng.range(190.0, 420.0);
+                let delay = (self.rng.range(0.0, 0.35) * SR) as u32;
+                let bend = self.rng.range(0.88, 1.12);
+                self.spawn_grain(Grain::tone(
+                    delay,
+                    v,
+                    v * bend,
+                    0.05 * crowd,
+                    0.06,
+                    0.16,
+                    0.34,
+                ));
+            }
+        } else {
+            self.next_event -= 1;
+        }
+
+        (low * 0.30 + high * 0.20) * swell * crowd + self.grains_out() * 0.7
+    }
+
     fn industry(&mut self) -> f32 {
         // Muffled, and only while working. Never a beat: the thump breathes at
         // well under 1 Hz and has a 40 ms attack.
@@ -752,6 +802,7 @@ impl Iterator for VoiceRender {
             VoiceKind::Night => self.night(),
             VoiceKind::Town => self.town(),
             VoiceKind::Industry => self.industry(),
+            VoiceKind::Murmur => self.murmur(),
             VoiceKind::Rolling => self.rolling(),
             VoiceKind::Music => self.music(),
         };
@@ -820,6 +871,7 @@ mod tests {
             VoiceKind::Night,
             VoiceKind::Town,
             VoiceKind::Industry,
+            VoiceKind::Murmur,
             VoiceKind::Rolling,
             VoiceKind::Music,
         ] {
@@ -864,6 +916,28 @@ mod tests {
         assert!(
             alive > dead * 2.0,
             "thriving {alive} should clearly outweigh declining {dead}"
+        );
+    }
+
+    #[test]
+    fn an_empty_platform_is_silent_and_a_full_one_is_not() {
+        // Brief 10 §3.3 — the murmur scales with how many are waiting, and it
+        // is texture rather than an alarm: audible, never prominent.
+        let (empty, _) = measure(VoiceKind::Murmur, 4.0, |p| {
+            p.set_tone(0.6);
+            p.set_density(0.0);
+        });
+        let (crowd, _) = measure(VoiceKind::Murmur, 4.0, |p| {
+            p.set_tone(0.6);
+            p.set_density(1.0);
+        });
+        assert_eq!(empty, 0.0, "an empty platform must make no sound at all");
+        assert!(crowd > 0.004, "a full platform is inaudible: {crowd}");
+
+        let (town, _) = measure(VoiceKind::Town, 4.0, full);
+        assert!(
+            crowd < town * 1.5,
+            "the crowd {crowd} should not out-shout the town {town}"
         );
     }
 

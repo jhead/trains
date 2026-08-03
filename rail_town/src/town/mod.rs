@@ -5,6 +5,7 @@ mod peep_sprites;
 
 use bevy::prelude::*;
 
+use buildings::dust::step_construction_dust;
 use buildings::sync_building_sprites;
 use peep_sprites::{sync_peep_focus, sync_peep_sprites};
 
@@ -15,7 +16,11 @@ pub use buildings::building_art::BuildingAtlas;
 pub use buildings::BuildingWindows;
 // Read by `inspect::hover`, so hovering a building can name it.
 pub use buildings::districts::District;
-pub use buildings::{lot_condition, lot_label, BuildingLot, RuralKind, RuralProp};
+pub use buildings::{lot_condition, lot_label, BuildingLot, LotPhase, RuralKind, RuralProp};
+// Read by `audio::build`: the hammer's cadence is measured against the hold the
+// brief names, so a change to one has to look at the other.
+#[cfg(test)]
+pub use buildings::SCAFFOLD_SECS;
 #[cfg(test)]
 pub use buildings::TownBuildingsPlugin;
 pub use peep_sprites::PeepSprite;
@@ -28,6 +33,8 @@ impl Plugin for TownPresentationPlugin {
             Update,
             (
                 sync_building_sprites,
+                // The puffs the phase machine kicks up (06 §3.1).
+                step_construction_dust.after(sync_building_sprites),
                 // Publish the camera's region of interest before drawing, so the
                 // sim's bounded peep simulation follows what the player is watching.
                 sync_peep_focus,

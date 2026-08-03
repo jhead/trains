@@ -152,6 +152,26 @@ impl JourneyMemory {
         self.bad_streak >= BAD_JOURNEYS_TO_LEAVE
     }
 
+    /// The last few legs at a glance — *"Recent trips: good, good, walked."*
+    ///
+    /// Newest first, the same order the ring is kept in, so the leftmost verdict
+    /// is the one that just happened. Presentation-ready and owned here rather
+    /// than assembled by the Inspector: a panel that reaches into `recent` and
+    /// spells out its own verdicts is a second copy of this rule waiting to
+    /// disagree with [`Self::tolerance_line`].
+    pub fn verdict_line(&self, count: usize) -> String {
+        if self.recent.is_empty() {
+            return "No trips yet.".into();
+        }
+        let verdicts: Vec<&str> = self
+            .recent
+            .iter()
+            .take(count.max(1))
+            .map(|r| r.outcome.label())
+            .collect();
+        format!("Recent trips: {}.", verdicts.join(", "))
+    }
+
     /// Plain-language history line for the Peep card.
     pub fn tolerance_line(&self) -> String {
         if self.recent.is_empty() {
@@ -259,6 +279,21 @@ mod tests {
         assert_eq!(mem.recent.len(), MEMORY_DEPTH);
         assert_eq!(mem.last().unwrap().ended_tick, (MEMORY_DEPTH + 3) as u64);
         assert_eq!(mem.lifetime_journeys, (MEMORY_DEPTH + 4) as u32);
+    }
+
+    #[test]
+    fn the_verdict_line_reads_newest_first_and_stays_ascii() {
+        let mut mem = JourneyMemory::default();
+        assert_eq!(mem.verdict_line(3), "No trips yet.");
+
+        mem.record(record(JourneyOutcome::Good));
+        mem.record(record(JourneyOutcome::Slow));
+        mem.record(record(JourneyOutcome::GaveUp));
+        assert_eq!(mem.verdict_line(3), "Recent trips: walked, slow, good.");
+        // Bounded by the caller, and never by more than the ring holds.
+        assert_eq!(mem.verdict_line(1), "Recent trips: walked.");
+        assert_eq!(mem.verdict_line(99), "Recent trips: walked, slow, good.");
+        assert!(mem.verdict_line(3).is_ascii(), "the bitmap font has no other glyphs");
     }
 
     #[test]

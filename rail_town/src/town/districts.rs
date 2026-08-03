@@ -7,7 +7,7 @@
 //! a consequence rather than as the only finished part of the map.
 
 use rail_sim::{
-    GoodKind, IndustryRegistry, StationRegistry, TileCoord, TrackNetwork, GROUND_LAYER,
+    GoodKind, IndustryRegistry, Station, StationRegistry, TileCoord, TrackNetwork, GROUND_LAYER,
     GROWTH_RADIUS,
 };
 
@@ -141,6 +141,14 @@ pub fn classify(
 ///
 /// Kept separate from [`classify`] so the district decision stays cheap; a
 /// lumber yard and an ore yard differ by variant, not by silhouette family.
+/// The stop a block belongs to — the district's *name*, for Town Talk.
+///
+/// Ties break on station id so the line a player reads never depends on the
+/// registry's `HashMap` order.
+pub fn nearest_station(tile: TileCoord, stations: &StationRegistry) -> Option<&Station> {
+    stations.iter().min_by_key(|s| (cheb(s.tile, tile), s.id.0))
+}
+
 pub fn nearest_good(tile: TileCoord, industries: &IndustryRegistry) -> Option<GoodKind> {
     industries
         .iter()

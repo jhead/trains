@@ -50,6 +50,55 @@ impl Household {
     }
 }
 
+/// Most departures the channel remembers before it starts dropping the oldest.
+///
+/// A queue nobody drains must not grow without bound — a headless sim with no
+/// presentation is a supported configuration, and this is a hint, not a ledger.
+const MAX_VACATED: usize = 64;
+
+/// Home tiles a household has just left for good.
+///
+/// The one thing town presentation cannot work out for itself: **which**
+/// building emptied. [`TownDensity`](crate::town::TownDensity) is a field, so a
+/// district losing a family reads as *slightly less dense everywhere*, and the
+/// lot planner then picks a lot to board up from the world hash. That is how a
+/// named departure — *"The Aldertons left Westbrook"* — ended up boarding some
+/// other family's house up, which makes brief 06 §3.2's whole sequence a lie.
+///
+/// Written by [`peeps_move_away`](super::peeps_move_away), **drained** by the
+/// town's lot planner. Drained rather than read, because it is a list of events:
+/// a consumer that only peeked would replay the same departure every frame.
+#[derive(Debug, Clone, Default, Resource)]
+pub struct VacatedHomes {
+    tiles: Vec<TileCoord>,
+}
+
+impl VacatedHomes {
+    /// Note that the family on `tile` has gone.
+    pub fn mark(&mut self, tile: TileCoord) {
+        if self.tiles.contains(&tile) {
+            return;
+        }
+        self.tiles.push(tile);
+        while self.tiles.len() > MAX_VACATED {
+            self.tiles.remove(0);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tiles.len()
+    }
+
+    /// Take everything marked, leaving the channel empty.
+    pub fn drain(&mut self) -> Vec<TileCoord> {
+        std::mem::take(&mut self.tiles)
+    }
+}
+
 /// Every household in the town, keyed by id.
 #[derive(Debug, Clone, Default, Resource)]
 pub struct HouseholdRegistry {
@@ -210,6 +259,30 @@ mod tests {
         assert_eq!(restored.get(a).unwrap().moved_in_tick, 7);
         let fresh = restored.insert(tile(5, 5), StationId(1), 8);
         assert_ne!(fresh, a);
+    }
+
+    #[test]
+    fn the_vacated_channel_is_a_drain_not_a_log() {
+        let mut vacated = VacatedHomes::default();
+        assert!(vacated.is_empty());
+        vacated.mark(tile(4, 4));
+        vacated.mark(tile(4, 4));
+        vacated.mark(tile(9, 1));
+        assert_eq!(vacated.len(), 2, "one departure is one entry");
+        assert_eq!(vacated.drain(), vec![tile(4, 4), tile(9, 1)]);
+        assert!(vacated.is_empty(), "draining must not replay a departure");
+    }
+
+    #[test]
+    fn an_undrained_channel_stays_bounded() {
+        // A headless sim with no presentation is supported; this is a hint.
+        let mut vacated = VacatedHomes::default();
+        for i in 0..(MAX_VACATED as i32 + 20) {
+            vacated.mark(tile(i, 0));
+        }
+        assert_eq!(vacated.len(), MAX_VACATED);
+        let held = vacated.drain();
+        assert_eq!(held.last(), Some(&tile(MAX_VACATED as i32 + 19, 0)));
     }
 
     #[test]

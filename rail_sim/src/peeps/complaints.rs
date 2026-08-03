@@ -88,8 +88,15 @@ impl ComplaintEntry {
                     )
                 }
             }
+            // Praise with no station is the *town* being pleased rather than a
+            // person — *"New shopfront opened near Eastgate"* — and carries its
+            // own whole sentence, exactly as Opportunity and Warning do.
             TalkKind::Praise => {
-                format!("{} - smooth ride via {}", self.peep_name, self.station_name)
+                if self.station_name.is_empty() {
+                    self.peep_name.clone()
+                } else {
+                    format!("{} - smooth ride via {}", self.peep_name, self.station_name)
+                }
             }
             TalkKind::Opportunity => {
                 if self.station_name.is_empty() {
@@ -195,6 +202,34 @@ impl ComplaintFeed {
 
     pub fn iter(&self) -> impl Iterator<Item = &ComplaintEntry> {
         self.entries.iter()
+    }
+
+    /// True when the **town itself** already said something of `kind` about
+    /// `station` within `within` ticks.
+    ///
+    /// [`Self::push`] deduplicates *complaints*, because six people about one
+    /// platform is one problem with six voices. The town is not a voice: two
+    /// buildings finishing in the same street, or a district that is still full
+    /// a minute later, are one thing to mention once. So a town line asks before
+    /// it speaks rather than pushing and hoping.
+    ///
+    /// A town line is one with **no `station_name`** — the shape every
+    /// whole-sentence entry in this feed already uses. That is also what keeps
+    /// this from confusing a resident's praise (*"Mara - smooth ride via
+    /// Eastgate"*) with the town's.
+    pub fn town_spoke_recently(
+        &self,
+        kind: TalkKind,
+        station: StationId,
+        tick: u64,
+        within: u64,
+    ) -> bool {
+        self.entries.iter().any(|e| {
+            e.kind == kind
+                && e.station_name.is_empty()
+                && e.station_id == Some(station)
+                && tick.saturating_sub(e.sim_tick) <= within
+        })
     }
 
     pub fn latest_line(&self) -> Option<String> {
@@ -320,6 +355,72 @@ mod tests {
             e.display_line(),
             "The Aldertons left Westbrook - 22 minutes to anywhere"
         );
+    }
+
+    /// The town speaking, rather than somebody in it.
+    fn town_line(kind: TalkKind, text: &str, tick: u64, sid: u64) -> ComplaintEntry {
+        ComplaintEntry {
+            kind,
+            peep_name: text.into(),
+            station_name: String::new(),
+            wait_minutes: 0,
+            sim_tick: tick,
+            peep_id: None,
+            station_id: Some(StationId(sid)),
+            tile: None,
+            count: 1,
+        }
+    }
+
+    #[test]
+    fn a_town_praise_line_carries_its_own_sentence() {
+        let e = town_line(
+            TalkKind::Praise,
+            "New shopfront opened near Eastgate",
+            4,
+            1,
+        );
+        assert_eq!(e.display_line(), "New shopfront opened near Eastgate");
+    }
+
+    #[test]
+    fn the_town_asks_before_it_repeats_itself() {
+        let mut feed = ComplaintFeed::default();
+        assert!(!feed.town_spoke_recently(TalkKind::Praise, StationId(1), 10, 600));
+
+        feed.push(town_line(TalkKind::Praise, "New townhouse near Eastgate", 10, 1));
+        assert!(feed.town_spoke_recently(TalkKind::Praise, StationId(1), 12, 600));
+        assert!(
+            !feed.town_spoke_recently(TalkKind::Praise, StationId(1), 900, 600),
+            "the quiet window has to expire"
+        );
+        assert!(
+            !feed.town_spoke_recently(TalkKind::Praise, StationId(2), 12, 600),
+            "one district's news must not silence another's"
+        );
+        assert!(
+            !feed.town_spoke_recently(TalkKind::Opportunity, StationId(1), 12, 600),
+            "kinds are separate: growth and a request are different things"
+        );
+    }
+
+    #[test]
+    fn a_resident_praising_a_station_does_not_silence_the_town() {
+        // The one that would bite in a well-served town: peep praise is common
+        // exactly when buildings are going up.
+        let mut feed = ComplaintFeed::default();
+        feed.push(ComplaintEntry {
+            kind: TalkKind::Praise,
+            peep_name: "Mara".into(),
+            station_name: "Eastgate".into(),
+            wait_minutes: 0,
+            sim_tick: 10,
+            peep_id: Some(PeepId(1)),
+            station_id: Some(StationId(1)),
+            tile: None,
+            count: 1,
+        });
+        assert!(!feed.town_spoke_recently(TalkKind::Praise, StationId(1), 12, 600));
     }
 
     #[test]

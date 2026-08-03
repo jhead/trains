@@ -68,6 +68,8 @@ pub mod gain {
     pub const DEMOLISH: f32 = 0.24;
     pub const INVALID: f32 = 0.17;
     pub const TOOL_SWITCH: f32 = 0.11;
+    /// The quietest positional family: a building site heard across a field.
+    pub const HAMMER: f32 = 0.10;
 
     pub const WHISTLE: f32 = 0.34;
     pub const BRAKE: f32 = 0.20;

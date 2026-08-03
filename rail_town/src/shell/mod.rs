@@ -64,6 +64,7 @@
 //! deliberate — a Mode row that silently did nothing is exactly what this
 //! change was made to remove.
 
+mod boot_demo;
 pub mod controls;
 mod goals_panel;
 mod map_options;
@@ -84,7 +85,7 @@ use rail_sim::{
     DistrictFlow, EventDirector, GoalBoard, HouseholdRegistry, IndustryRegistry, JobBoard,
     LineRegistry, MaintenanceAccrual, MapDescriptor, Money, MoneyLedger, Peep, PeepBudget,
     PeepFocus, PeepSpawnState, StationRegistry, StationService, TileOccupancy, TownDensity,
-    TrackNetwork, Train, TrainYard, WorldAnchorsSeeded,
+    TrackNetwork, Train, TrainYard, VacatedHomes, WorldAnchorsSeeded,
 };
 
 use crate::inspect::Selection;
@@ -107,6 +108,7 @@ pub use settings_panel::SettingsPanel;
 #[allow(unused_imports)]
 pub use widgets::{MenuAction, MenuActivated, MenuCursor, ShellUi};
 
+use boot_demo::{boot_world_is_untouched, lay_boot_demo_line, release_boot_world, BootDemo};
 use new_map::{DraftMapOptions, PreviewImage};
 use widgets::{menu_keyboard_nav, menu_pointer, paint_menu_items, sync_menu_cursor};
 
@@ -241,6 +243,7 @@ impl Plugin for ShellPlugin {
             .init_resource::<ShellSaveRequest>()
             .init_resource::<AutosaveTimer>()
             .init_resource::<title::DriftClock>()
+            .init_resource::<BootDemo>()
             .add_message::<MenuActivated>()
             // The set exists in both schedules: a new map installs its world
             // during the state transition, a load installs one mid-`Update`.
@@ -254,7 +257,7 @@ impl Plugin for ShellPlugin {
             .add_systems(OnEnter(ShellState::Paused), reset_cursor)
             .add_systems(
                 OnEnter(ShellState::Playing),
-                apply_pending_world.in_set(WorldRebuildSet),
+                (apply_pending_world.in_set(WorldRebuildSet), release_boot_world),
             )
             .add_systems(OnEnter(ShellState::Paused), pause_sim)
             .add_systems(OnEnter(ShellState::Playing), resume_sim)
@@ -293,6 +296,10 @@ impl Plugin for ShellPlugin {
                 Update,
                 (
                     title::spawn_title_if_missing.run_if(in_state(ShellState::Title)),
+                    // Design §2 wants trains moving behind the menu, so the boot
+                    // world builds itself one short line. Boot only, and never
+                    // once the player has taken the world over.
+                    lay_boot_demo_line.run_if(boot_world_is_untouched),
                     pause::spawn_pause_if_missing.run_if(in_state(ShellState::Paused)),
                     new_map::seed_typing.run_if(in_state(ShellState::NewMap)),
                     new_map::rebuild_new_map_screen
@@ -600,6 +607,7 @@ fn apply_pending_world(
     commands.insert_resource(DistrictFlow::default());
     commands.insert_resource(PeepBudget::default());
     commands.insert_resource(PeepFocus::default());
+    commands.insert_resource(VacatedHomes::default());
     commands.insert_resource(ComplaintFeed::default());
     commands.insert_resource(WorldAnchorsSeeded(false));
     commands.insert_resource(Selection::default());

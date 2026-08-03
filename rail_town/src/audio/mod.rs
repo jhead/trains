@@ -175,6 +175,8 @@ impl Plugin for AudioPlugin {
                     build::drain_build_queue.after(build::collect_track_edits),
                     build::watch_stations,
                     build::watch_tool_switch,
+                    // 06 §3.1 — the occasional sound of a building going up.
+                    build::construction_ticks,
                     // §2 — the bed.
                     ambience::drive_ambience,
                     // §3.2 — the network.
@@ -209,8 +211,8 @@ mod tests {
     use bevy::asset::AssetPlugin;
     use rail_map::generate_map;
     use rail_sim::{
-        AlertBoard, IndustryRegistry, Money, StationRegistry, TileOccupancy, TownDensity,
-        TrackEdit, TrackNetwork,
+        AlertBoard, DistrictFlow, IndustryRegistry, Money, StationRegistry, TileOccupancy,
+        TownDensity, TrackEdit, TrackNetwork,
     };
 
     use crate::lines::LineToolState;
@@ -234,6 +236,8 @@ mod tests {
         app.insert_resource(TownDensity::default());
         app.insert_resource(IndustryRegistry::default());
         app.insert_resource(StationRegistry::default());
+        // The murmur layer reads how many are waiting on each platform.
+        app.insert_resource(DistrictFlow::default());
         app.insert_resource(TrackNetwork::default());
         app.insert_resource(TileOccupancy::default());
         app.insert_resource(Money::sandbox_starting());

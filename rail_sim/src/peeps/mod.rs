@@ -53,7 +53,7 @@ pub use flow::{
     FLOW_DECAY_TICKS, MAX_PENDING_TRIPS,
 };
 pub use household::{
-    Household, HouseholdId, HouseholdRegistry, HOUSEHOLD_MAX, HOUSEHOLD_MIN,
+    Household, HouseholdId, HouseholdRegistry, VacatedHomes, HOUSEHOLD_MAX, HOUSEHOLD_MIN,
 };
 pub use journey::{
     advance_journeys, boardable_train, station_track, tick_clock_label, Facing, Journey,
@@ -70,9 +70,10 @@ pub use names::{
 };
 pub use resident::{
     advance_peep_waits, district_capacity, mood_from_experience, peeps_move_away,
-    spawn_peep_households, Mood, Peep, WaitingAtStation, HOME_MAX_RADIUS, HOME_MIN_RADIUS,
-    HOUSEHOLDS_PER_STATION, MAX_PEEPS_PER_STATION, MAX_TOWN_POPULATION, MOVE_IN_INTERVAL_TICKS,
-    PEEPS_PER_DENSITY, PEEPS_PER_STATION, REPOPULATE_SCORE, SIM_SECONDS_PER_TICK,
+    spawn_peep_households, tier_headcount_cap, Mood, Peep, WaitingAtStation,
+    DISTRICT_FULL_TALK_TICKS, HOME_MAX_RADIUS, HOME_MIN_RADIUS, HOUSEHOLDS_PER_STATION,
+    MAX_PEEPS_PER_STATION, MAX_TOWN_POPULATION, MOVE_IN_INTERVAL_TICKS, PEEPS_PER_DENSITY,
+    PEEPS_PER_STATION, REPOPULATE_SCORE, SIM_SECONDS_PER_TICK,
 };
 pub use routine::{
     clock_label, minute_in_window, PeepRole, Routine, DAY_MINUTES, DEPART_WINDOW_MINUTES,
@@ -127,6 +128,7 @@ impl Plugin for PeepsPlugin {
             .init_resource::<DistrictFlow>()
             .init_resource::<PeepBudget>()
             .init_resource::<PeepFocus>()
+            .init_resource::<VacatedHomes>()
             .init_resource::<WalkRouter>()
             .add_systems(
                 FixedUpdate,

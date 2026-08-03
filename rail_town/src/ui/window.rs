@@ -34,6 +34,10 @@
 //! **once, here** ([`panel_cues`]), not by each panel: this resource is the one
 //! place a panel's visibility actually flips, so a window that spawns, despawns
 //! and respawns its own body cannot chatter, and a new window costs nothing.
+//!
+//! [`panel_cues`] records the first frame rather than announcing it, which is
+//! what keeps [`WindowManager::new`]'s boot-open Town Talk silent: a panel that
+//! was already up is not a panel the player just opened.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -155,15 +159,30 @@ impl Default for WindowManager {
 }
 
 impl WindowManager {
+    /// Every window closed, except the one the game speaks through.
+    ///
+    /// DESIGN.md: *"The complaint feed is both the diagnostic layer and the
+    /// emotional hook."* A hook the player has to find on a menu is not a hook,
+    /// and the first-run nudge (`onboarding::nudge`) pushes the game's opening
+    /// line straight into this feed — into a closed panel, where nobody read it.
+    /// So **Town Talk, and only Town Talk, is up from the first frame**.
+    ///
+    /// It opens through [`Self::open`] rather than by setting the flag, so it
+    /// joins the stacking order like any other window: `Esc` closes it, the
+    /// close box closes it, and once closed it stays closed. Position is still
+    /// the resource's, so a player who moves it and closes it finds it where
+    /// they left it.
     pub fn new() -> Self {
-        Self {
+        let mut manager = Self {
             states: WindowId::ALL
                 .iter()
                 .map(|id| (*id, WindowState::default()))
                 .collect(),
             order: Vec::new(),
             drag: None,
-        }
+        };
+        manager.open(WindowId::TownTalk);
+        manager
     }
 
     fn slot(&self, id: WindowId) -> &WindowState {
@@ -666,9 +685,17 @@ fn _palette_parity() -> [Color; 4] {
 mod tests {
     use super::*;
 
+    /// A manager with nothing up, for the stacking tests that predate the
+    /// boot-open feed.
+    fn empty() -> WindowManager {
+        let mut m = WindowManager::new();
+        m.close(WindowId::TownTalk);
+        m
+    }
+
     #[test]
     fn opening_raises_and_closing_pops_the_stack() {
-        let mut m = WindowManager::new();
+        let mut m = empty();
         assert!(m.top().is_none());
         m.open(WindowId::Ledger);
         m.open(WindowId::TownTalk);
@@ -682,17 +709,34 @@ mod tests {
     }
 
     #[test]
-    fn town_talk_is_closed_until_the_player_opens_it() {
-        // The playtest note: Town Talk should not be on screen by default.
+    fn town_talk_is_the_one_window_that_starts_open() {
+        // DESIGN.md: the complaint feed is the diagnostic layer *and* the
+        // emotional hook, and the opening nudge is spoken into it. Everything
+        // else waits to be asked for.
         let m = WindowManager::new();
-        for id in WindowId::ALL {
+        assert!(m.is_open(WindowId::TownTalk));
+        assert_eq!(m.top(), Some(WindowId::TownTalk), "and it is reachable by Esc");
+        for id in WindowId::ALL.iter().filter(|id| **id != WindowId::TownTalk) {
             assert!(!m.is_open(*id), "{id:?} opens uninvited");
         }
     }
 
     #[test]
-    fn a_window_remembers_where_it_was_left() {
+    fn closing_the_boot_feed_keeps_it_closed() {
+        // Opened by the game, closed by the player, and it stays that way —
+        // including the position they left it at.
         let mut m = WindowManager::new();
+        m.place(WindowId::TownTalk, Vec2::new(64.0, 300.0));
+        m.close(WindowId::TownTalk);
+        assert!(!m.is_open(WindowId::TownTalk));
+        assert!(m.top().is_none());
+        m.open(WindowId::TownTalk);
+        assert_eq!(m.slot(WindowId::TownTalk).pos, Vec2::new(64.0, 300.0));
+    }
+
+    #[test]
+    fn a_window_remembers_where_it_was_left() {
+        let mut m = empty();
         m.open(WindowId::Ledger);
         m.place(WindowId::Ledger, Vec2::new(310.0, 96.0));
         m.close(WindowId::Ledger);
@@ -703,7 +747,7 @@ mod tests {
     #[test]
     fn positions_are_always_whole_texels() {
         // 03 §9 — a panel on a half texel resamples and stops looking like art.
-        let mut m = WindowManager::new();
+        let mut m = empty();
         m.place(WindowId::Alerts, Vec2::new(12.4, 33.6));
         let pos = m.slot(WindowId::Alerts).pos;
         assert_eq!(pos, Vec2::new(12.0, 34.0));
@@ -711,14 +755,14 @@ mod tests {
 
     #[test]
     fn raising_a_closed_window_does_nothing() {
-        let mut m = WindowManager::new();
+        let mut m = empty();
         m.raise(WindowId::Goals);
         assert!(m.top().is_none());
     }
 
     #[test]
     fn toggle_is_open_then_closed() {
-        let mut m = WindowManager::new();
+        let mut m = empty();
         m.toggle(WindowId::Neighbours);
         assert!(m.is_open(WindowId::Neighbours));
         m.toggle(WindowId::Neighbours);
@@ -740,7 +784,7 @@ mod tests {
 
     #[test]
     fn opening_and_closing_a_panel_each_sweep_once() {
-        let mut m = WindowManager::new();
+        let mut m = empty();
         let closed = panels(&m, false);
         m.open(WindowId::Ledger);
         let one_open = panels(&m, false);
@@ -753,7 +797,7 @@ mod tests {
     fn opening_a_second_panel_does_not_also_play_a_close() {
         // The brief's rule restated: B opening over A is one sweep, not
         // close-open-open. A chord where a click belongs is a startle.
-        let mut m = WindowManager::new();
+        let mut m = empty();
         m.open(WindowId::Ledger);
         let before = panels(&m, false);
         m.open(WindowId::TownTalk);
@@ -764,7 +808,7 @@ mod tests {
     fn a_panel_replacing_another_is_one_opening() {
         // Both flips land in the same frame; the player opened something, so
         // that is what they hear.
-        let mut m = WindowManager::new();
+        let mut m = empty();
         m.open(WindowId::Ledger);
         let before = panels(&m, false);
         m.close(WindowId::Ledger);
@@ -776,7 +820,7 @@ mod tests {
     fn raising_a_window_is_not_an_opening() {
         // Stacking order is not visibility. Clicking between two open windows
         // must be silent.
-        let mut m = WindowManager::new();
+        let mut m = empty();
         m.open(WindowId::Ledger);
         m.open(WindowId::TownTalk);
         let before = panels(&m, false);
@@ -787,7 +831,7 @@ mod tests {
     #[test]
     fn the_settings_overlay_sweeps_like_any_other_panel() {
         // It is the one panel the manager does not own, and it is still a panel.
-        let m = WindowManager::new();
+        let m = empty();
         let shut = panels(&m, false);
         let up = panels(&m, true);
         assert_eq!(cue_for(&shut, &up), Some(UiCue::PanelOpen));
@@ -796,12 +840,49 @@ mod tests {
 
     #[test]
     fn closing_the_last_of_several_still_closes() {
-        let mut m = WindowManager::new();
+        let mut m = empty();
         m.open(WindowId::Ledger);
         m.open(WindowId::Goals);
         let before = panels(&m, false);
         m.close(WindowId::Goals);
         assert_eq!(cue_for(&before, &panels(&m, false)), Some(UiCue::PanelClose));
+    }
+
+    /// Every cue written this frame, drained so the next frame starts clean.
+    fn drain_cues(app: &mut App) -> Vec<UiCue> {
+        app.world_mut()
+            .resource_mut::<Messages<UiCue>>()
+            .drain()
+            .collect()
+    }
+
+    #[test]
+    fn the_boot_open_feed_does_not_sweep() {
+        // `WindowManager::new` puts Town Talk up before the player has clicked
+        // anything, and 10 §1's first rule is never to startle. `panel_cues`
+        // seeds its baseline on its first run rather than announcing it, which
+        // is what makes the boot frame silent — asserted rather than assumed.
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins)
+            .insert_resource(WindowManager::new())
+            .init_resource::<PanelCueWatch>()
+            .add_message::<UiCue>()
+            .add_systems(Update, panel_cues);
+
+        for _ in 0..3 {
+            app.update();
+            assert!(
+                drain_cues(&mut app).is_empty(),
+                "the boot-open feed swept on its own"
+            );
+        }
+
+        // …and a panel the player really does open still sweeps.
+        app.world_mut()
+            .resource_mut::<WindowManager>()
+            .open(WindowId::Ledger);
+        app.update();
+        assert_eq!(drain_cues(&mut app), vec![UiCue::PanelOpen]);
     }
 
     #[test]

@@ -21,15 +21,16 @@
 use std::collections::VecDeque;
 
 use bevy::prelude::*;
-use rail_map::{MapGrid, tile_to_world};
+use rail_map::{tile_to_world, MapGrid, TILE_SIZE};
 use rail_sim::{StationRegistry, TileCoord, TrackEdit};
 
 use crate::lines::LineToolState;
+use crate::town::{BuildingLot, LotPhase};
 use crate::track::{BuildTool, TrackToolState};
 use crate::trains::{TrainPlaceKind, TrainToolState};
 
 use super::bank::SfxBank;
-use super::dsp::Rng;
+use super::dsp::{lerp, Rng};
 use super::mixer::{gain, play, AudioClock, AudioMix, Cue, Duck, SoundCategory, VoiceBudget};
 
 /// Interval between queued tiles at the shortest and longest runs.
@@ -45,6 +46,17 @@ const RUN_MAX: usize = 30;
 const INVALID_COOLDOWN: f32 = 0.28;
 /// Minimum spacing between tool clicks (a held hotkey must not machine-gun).
 const TOOL_COOLDOWN: f32 = 0.08;
+
+/// Gap between hammer ticks with one site working, and with a street of them.
+///
+/// The scaffold holds for eight seconds (brief 06 §3.1), so one site is roughly
+/// three or four taps across its whole life — *occasional*, which is the word
+/// the brief uses. A district all going up at once is busier, but never a
+/// rhythm: the gap is jittered hard, so it never resolves into a beat.
+const HAMMER_GAP_SLOW: f32 = 2.4;
+const HAMMER_GAP_FAST: f32 = 0.9;
+/// Sites in earshot at which the gap reaches [`HAMMER_GAP_FAST`].
+const HAMMER_SITES_RAMP: f32 = 6.0;
 
 /// What a queued tile sounds like.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +80,8 @@ pub struct BuildAudio {
     variant: usize,
     last_invalid: f64,
     last_tool: f64,
+    /// Clock time the next hammer tick is allowed.
+    next_hammer: f64,
     rng: Rng,
     /// Station ids seen last frame, for placement / removal detection.
     stations: Vec<u64>,
@@ -91,6 +105,7 @@ impl Default for BuildAudio {
             variant: 0,
             last_invalid: f64::NEG_INFINITY,
             last_tool: f64::NEG_INFINITY,
+            next_hammer: 0.0,
             rng: Rng::new(0x7261_696c),
             stations: Vec::new(),
             stations_world: None,
@@ -311,6 +326,84 @@ pub fn watch_stations(
     audio.stations_world = world;
 }
 
+/// A hammer on whatever is going up nearby (brief 06 §3.1).
+///
+/// **One voice, however many sites.** A district of scaffolds is not eight
+/// hammers — it is a busier version of the same street, so the nearest site
+/// carries the sound and the rest only make it more frequent. That keeps this
+/// inside the effects bus's voice budget however much the town is building, and
+/// keeps §1's promise that nothing startles.
+///
+/// Freezes with the sim: a paused world is a world where nobody is working.
+pub fn construction_ticks(
+    clock: Res<AudioClock>,
+    mix: Res<AudioMix>,
+    bank: Option<Res<SfxBank>>,
+    lots: Query<&BuildingLot>,
+    mut audio: ResMut<BuildAudio>,
+    mut budget: ResMut<VoiceBudget>,
+    mut commands: Commands,
+) {
+    let Some(bank) = bank else {
+        return;
+    };
+    if !clock.running {
+        return;
+    }
+    let now = clock.elapsed;
+    if now < audio.next_hammer {
+        return;
+    }
+
+    let radius = mix.radius.max(TILE_SIZE * 6.0);
+    let mut nearest: Option<(f32, Vec2)> = None;
+    let mut sites = 0.0f32;
+    for lot in lots.iter() {
+        if lot.phase != LotPhase::Scaffold {
+            continue;
+        }
+        let at = world_of(lot.tile);
+        let distance = (at - mix.listener).length();
+        if distance > radius {
+            continue;
+        }
+        sites += 1.0;
+        if nearest.is_none_or(|(best, _)| distance < best) {
+            nearest = Some((distance, at));
+        }
+    }
+    let Some((_, at)) = nearest else {
+        // Nothing in earshot. Re-arm from now, so panning onto a building site
+        // does not immediately spend a backlog of silence as one tick.
+        audio.next_hammer = now;
+        return;
+    };
+
+    let gap = lerp(
+        HAMMER_GAP_SLOW,
+        HAMMER_GAP_FAST,
+        (sites / HAMMER_SITES_RAMP).clamp(0.0, 1.0),
+    );
+    // Jittered hard, so a street of sites never resolves into a beat.
+    let jitter = audio.rng.range(0.65, 1.5);
+    audio.next_hammer = now + (gap * jitter) as f64;
+
+    let index = audio.rng.below(bank.hammer.variants());
+    let speed = audio.rng.range(0.90, 1.11);
+    play(
+        &mut commands,
+        &mut budget,
+        &mix,
+        Cue::world(
+            bank.hammer.pick(index, mix.brightness(at)),
+            SoundCategory::Build,
+            gain::HAMMER,
+            at,
+        )
+        .with_speed(speed),
+    );
+}
+
 /// A minimal click when the active tool changes.
 #[allow(clippy::too_many_arguments)]
 pub fn watch_tool_switch(
@@ -378,6 +471,41 @@ mod tests {
         // Immediate (no queue) but never more than about three a second.
         assert!(INVALID_COOLDOWN >= 0.2, "a drag over rock must not buzz");
         assert!(INVALID_COOLDOWN <= 0.5, "but the answer has to feel prompt");
+    }
+
+    #[test]
+    fn a_building_site_taps_occasionally_and_never_becomes_a_rhythm() {
+        // Brief 06 §3.1's word is *occasional*. A scaffold holds for eight
+        // seconds, so one site is a handful of taps across its whole life; a
+        // street of them is busier but still never a beat.
+        let gap_of = |sites: f32| {
+            lerp(
+                HAMMER_GAP_SLOW,
+                HAMMER_GAP_FAST,
+                (sites / HAMMER_SITES_RAMP).clamp(0.0, 1.0),
+            )
+        };
+        assert!((gap_of(1.0) - HAMMER_GAP_SLOW).abs() < HAMMER_GAP_SLOW);
+        assert!(gap_of(1.0) > gap_of(4.0), "more sites should be busier");
+        assert!(gap_of(40.0) >= HAMMER_GAP_FAST, "and never faster than the floor");
+        // One site: a few taps over an eight-second scaffold, not a stream.
+        assert!(crate::town::SCAFFOLD_SECS / gap_of(1.0) < 6.0);
+        // And the quietest positional family in the bank — §1's first rule is
+        // never to startle, and this one plays without the player asking.
+        let quietest_build = [
+            gain::CLACK,
+            gain::BRIDGE,
+            gain::STATION,
+            gain::DEMOLISH,
+            gain::INVALID,
+        ]
+        .into_iter()
+        .fold(f32::INFINITY, f32::min);
+        assert!(
+            gain::HAMMER <= quietest_build,
+            "the hammer at {} is louder than a sound the player asked for ({quietest_build})",
+            gain::HAMMER
+        );
     }
 
     #[test]

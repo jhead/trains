@@ -15,7 +15,7 @@ use crate::track::TrackTerrain;
 
 use super::budget::{PeepBudget, PeepDetail};
 use super::complaints::{ComplaintEntry, ComplaintFeed, TalkKind, COMPLAINT_WAIT_SECS};
-use super::household::{HouseholdRegistry, HOUSEHOLD_MAX};
+use super::household::{HouseholdRegistry, VacatedHomes, HOUSEHOLD_MAX};
 use super::journey::{Journey, JourneyStage, PeepPosition};
 use super::memory::JourneyMemory;
 use super::names::{full_name, hash64, portrait_variant, BodyType};
@@ -55,6 +55,13 @@ pub const HOME_MAX_RADIUS: i32 = 4;
 /// Service score at which an emptied district attracts new residents again —
 /// restoring service has to be able to bring people back (brief 06 §8.4).
 pub const REPOPULATE_SCORE: u8 = 60;
+
+/// Ticks between a capped district asking for a better station.
+///
+/// About a minute of real time at the fixed timestep, and staggered by station
+/// id so two full districts never ask on the same tick. 06 §6: these are
+/// invitations, and an invitation repeated is a nag.
+pub const DISTRICT_FULL_TALK_TICKS: u64 = 3_600;
 
 /// Cooldown (ticks) after a complaint before the same peep can complain again.
 const COMPLAINT_COOLDOWN_TICKS: u32 = 90;
@@ -210,6 +217,7 @@ impl WaitingAtStation {
 /// household at a time. A district that has emptied out repopulates only once
 /// service recovers, so a player who fixes a neglected line sees people move
 /// back in (brief 06 §8.4).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_peep_households(
     mut commands: Commands,
     stations: Res<StationRegistry>,
@@ -219,6 +227,7 @@ pub fn spawn_peep_households(
     mut households: ResMut<HouseholdRegistry>,
     mut state: ResMut<PeepSpawnState>,
     mut budget: ResMut<PeepBudget>,
+    mut feed: ResMut<ComplaintFeed>,
 ) {
     if stations.is_empty() || households.population() >= MAX_TOWN_POPULATION {
         return;
@@ -247,6 +256,11 @@ pub fn spawn_peep_households(
         } else {
             let supported = district_capacity(home_station, density.as_deref());
             if here >= supported {
+                // 06 §6 — "a district that has grown to its cap asks for a
+                // better station." Nobody was asking; the cap was simply where
+                // growth stopped, silently, which reads as the game running out
+                // rather than as the player having something to do next.
+                speak_district_full(&mut feed, home_station, here, tick);
                 continue;
             }
             // Move-ins are an event, not a ramp — one household at a time.
@@ -314,6 +328,55 @@ pub fn spawn_peep_households(
     }
 }
 
+/// The town asks for a better station, in its own plain voice.
+///
+/// Only when the **stop** is what is holding the district back. A district
+/// still filling in its streets is growing, not full, and telling the player to
+/// rebuild their station would be a lie — 06 §6's invitations are only worth
+/// anything while they are true. A stop already at the top of the ladder says
+/// nothing either: an invitation the player cannot accept is noise.
+fn speak_district_full(feed: &mut ComplaintFeed, station: &Station, here: usize, tick: u64) {
+    if station.tier.next_upgrade().is_none() || here < tier_headcount_cap(station) {
+        return;
+    }
+    // Staggered by id, so two full districts never speak on the same tick, and
+    // stateless, so it survives a save/load without a cooldown to serialise.
+    if tick % DISTRICT_FULL_TALK_TICKS != station.id.0 % DISTRICT_FULL_TALK_TICKS {
+        return;
+    }
+    if feed.town_spoke_recently(
+        TalkKind::Opportunity,
+        station.id,
+        tick,
+        DISTRICT_FULL_TALK_TICKS,
+    ) {
+        return;
+    }
+    feed.push(ComplaintEntry {
+        kind: TalkKind::Opportunity,
+        // Whole-sentence town line: no station name, so it reads as the place
+        // speaking rather than as a resident being quoted.
+        peep_name: format!("{} is full - a bigger station would grow it", station.name),
+        station_name: String::new(),
+        wait_minutes: 0,
+        sim_tick: tick,
+        peep_id: None,
+        station_id: Some(station.id),
+        tile: Some(station.tile),
+        count: 1,
+    });
+}
+
+/// Headcount ceiling this stop's **tier** alone imposes.
+///
+/// The same expression [`district_capacity`] clamps with, named once so that
+/// *"is the station the thing holding this district back?"* has a single answer.
+pub fn tier_headcount_cap(station: &Station) -> usize {
+    (station.tier.capacity() as usize)
+        .saturating_mul(2)
+        .max(PEEPS_PER_STATION)
+}
+
 /// Headcount a district supports, from its built density and its stop's tier.
 ///
 /// Tier is a hard ceiling, not a modifier: a halt cannot serve a block of flats
@@ -321,9 +384,9 @@ pub fn spawn_peep_households(
 /// *"a district that has grown to its cap asks for a better station"* (06 §6).
 pub fn district_capacity(station: &Station, density: Option<&TownDensity>) -> usize {
     let radius = station.tier.catchment().max(1);
-    let tier_cap = (station.tier.capacity() as usize).saturating_mul(2);
+    let tier_cap = tier_headcount_cap(station);
     let Some(density) = density else {
-        return PEEPS_PER_STATION.min(tier_cap.max(PEEPS_PER_STATION));
+        return PEEPS_PER_STATION.min(tier_cap);
     };
     let mut built = 0.0_f32;
     for dy in -radius..=radius {
@@ -336,7 +399,7 @@ pub fn district_capacity(station: &Station, density: Option<&TownDensity>) -> us
     }
     let supported = PEEPS_PER_STATION as f32 + built * PEEPS_PER_DENSITY;
     (supported.round() as usize)
-        .min(tier_cap.max(PEEPS_PER_STATION))
+        .min(tier_cap)
         .min(MAX_PEEPS_PER_STATION)
 }
 
@@ -487,6 +550,7 @@ pub fn mood_from_experience(wait_secs: u32, score: u8, memory: Option<&JourneyMe
 }
 
 /// Sustained frustration means they move away — as a household, on foot (§4.3).
+#[allow(clippy::too_many_arguments)]
 pub fn peeps_move_away(
     mut commands: Commands,
     stations: Res<StationRegistry>,
@@ -494,6 +558,7 @@ pub fn peeps_move_away(
     mut households: ResMut<HouseholdRegistry>,
     mut feed: ResMut<ComplaintFeed>,
     mut budget: ResMut<PeepBudget>,
+    mut vacated: Option<ResMut<VacatedHomes>>,
     mut peeps: Query<(Entity, &Peep, &mut Journey, &PeepPosition, &JourneyMemory)>,
 ) {
     let tick = service.tick;
@@ -592,7 +657,12 @@ pub fn peeps_move_away(
 
     for (household, peep) in departed {
         if households.remove_member(household, peep) {
-            households.remove(household);
+            // The last one out empties the house — and the town is told *which*
+            // house, so the boards go up on theirs rather than on whichever lot
+            // the density field happened to shed next (06 §3.2).
+            if let (Some(gone), Some(vacated)) = (households.remove(household), vacated.as_mut()) {
+                vacated.mark(gone.home);
+            }
         }
         budget.invalidate();
     }
@@ -876,6 +946,7 @@ mod tests {
             .init_resource::<StationService>()
             .init_resource::<PeepSpawnState>()
             .init_resource::<HouseholdRegistry>()
+            .init_resource::<ComplaintFeed>()
             .init_resource::<PeepBudget>();
         let station = {
             let mut stations = app.world_mut().resource_mut::<StationRegistry>();
@@ -907,6 +978,104 @@ mod tests {
         assert!(
             app.world().resource::<HouseholdRegistry>().population() > 0,
             "restoring service must bring people back"
+        );
+    }
+
+    /// A district filled to its stop's ceiling, with the stagger gate open.
+    fn a_full_district(tier: crate::stations::StationTier) -> App {
+        let mut app = App::new();
+        app.init_resource::<StationRegistry>()
+            .init_resource::<StationService>()
+            .init_resource::<PeepSpawnState>()
+            .init_resource::<HouseholdRegistry>()
+            .init_resource::<ComplaintFeed>()
+            .init_resource::<PeepBudget>();
+        let station = {
+            let mut stations = app.world_mut().resource_mut::<StationRegistry>();
+            stations.insert_tier("Eastgate", tile(10, 10), GROUND_LAYER, tier, 0)
+        };
+        let cap = {
+            let stations = app.world().resource::<StationRegistry>();
+            tier_headcount_cap(stations.get(station).expect("station"))
+        };
+        {
+            let mut households = app.world_mut().resource_mut::<HouseholdRegistry>();
+            let id = households.insert(tile(11, 11), station, 0);
+            for i in 0..cap {
+                households.add_member(id, PeepId(i as u64 + 1));
+            }
+        }
+        // The gate is `tick % N == id % N`; both are small, so this opens it.
+        app.world_mut().resource_mut::<StationService>().tick = station.0;
+        app.add_systems(bevy_app::Update, spawn_peep_households);
+        app
+    }
+
+    fn talk_lines(app: &App) -> Vec<String> {
+        app.world()
+            .resource::<ComplaintFeed>()
+            .iter()
+            .map(|e| e.display_line())
+            .collect()
+    }
+
+    /// 06 §6 — *"a district that has grown to its cap asks for a better
+    /// station."* It used to just stop growing, silently.
+    #[test]
+    fn a_district_at_its_stations_ceiling_asks_for_a_bigger_one() {
+        use crate::stations::StationTier;
+
+        let mut app = a_full_district(StationTier::Halt);
+        app.update();
+        let talk = talk_lines(&app);
+        assert!(
+            talk.iter()
+                .any(|l| l == "Eastgate is full - a bigger station would grow it"),
+            "the town never asked: {talk:?}"
+        );
+        assert!(talk.iter().all(|l| l.is_ascii()), "{talk:?}");
+
+        // And it asks once, not every tick.
+        for _ in 0..4 {
+            app.update();
+        }
+        let asks = talk_lines(&app)
+            .iter()
+            .filter(|l| l.contains("is full"))
+            .count();
+        assert_eq!(asks, 1, "the invitation must not become a nag: {asks} lines");
+    }
+
+    #[test]
+    fn a_stop_at_the_top_of_the_ladder_says_nothing() {
+        use crate::stations::StationTier;
+
+        // There is no bigger station to ask for, and an invitation the player
+        // cannot accept is noise.
+        let mut app = a_full_district(StationTier::Interchange);
+        app.update();
+        assert!(
+            !talk_lines(&app).iter().any(|l| l.contains("is full")),
+            "an interchange asked to be upgraded to nothing"
+        );
+    }
+
+    #[test]
+    fn a_growing_district_is_not_told_its_station_is_too_small() {
+        use crate::stations::StationTier;
+
+        // Room left under the tier ceiling means the streets are what is
+        // filling in, not the platform that is short.
+        let mut app = a_full_district(StationTier::Station);
+        {
+            let mut households = app.world_mut().resource_mut::<HouseholdRegistry>();
+            let id = households.iter().map(|h| h.id).next().expect("household");
+            households.remove_member(id, PeepId(1));
+        }
+        app.update();
+        assert!(
+            !talk_lines(&app).iter().any(|l| l.contains("is full")),
+            "a district under its ceiling must not be told to rebuild the stop"
         );
     }
 
@@ -956,6 +1125,7 @@ mod tests {
             ));
         }
 
+        app.init_resource::<VacatedHomes>();
         app.add_systems(bevy_app::Update, peeps_move_away);
         app.update();
 
@@ -985,6 +1155,15 @@ mod tests {
             "the whole family should have gone, not just one of them"
         );
         assert_eq!(app.world().resource::<HouseholdRegistry>().len(), 0);
+
+        // …and the town is told which house it was, so the boards go up on
+        // theirs rather than on whichever lot the density field sheds next.
+        let vacated = app.world_mut().resource_mut::<VacatedHomes>().drain();
+        assert_eq!(
+            vacated,
+            vec![tile(6, 6)],
+            "a named departure must name its own home tile"
+        );
     }
 
     #[test]

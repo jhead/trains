@@ -10,8 +10,9 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use rail_sim::{
-    commands::TrainKind, IndustryRegistry, LineRegistry, Mood, Peep, StationRegistry, StationService,
-    TileOccupancy, TrackNetwork, Train, TrainCargo, TrainLocation, WaitingAtStation,
+    commands::TrainKind, HouseholdRegistry, IndustryRegistry, Journey, JourneyMemory, LineRegistry,
+    Mood, Peep, Routine, StationRegistry, StationService, TileOccupancy, TrackNetwork, Train,
+    TrainCargo, TrainLocation, WaitingAtStation,
 };
 
 use crate::palette::{BALLAST_D, OK};
@@ -199,6 +200,25 @@ pub fn setup_inspector_panel(mut commands: Commands) {
         });
 }
 
+/// Everything the Peep card needs, in one read.
+///
+/// Brief 06 §4.2 gives a peep a routine, a journey and a memory, and 05 §3.3
+/// spends all three on this panel. They are `Option` because a peep restored
+/// from an old save may arrive without one (`rail_sim::save::snapshot` stores
+/// them individually) — a missing component drops its line rather than the card.
+type PeepQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Peep,
+        &'static WaitingAtStation,
+        Option<&'static Routine>,
+        Option<&'static Journey>,
+        Option<&'static JourneyMemory>,
+    ),
+>;
+
+#[allow(clippy::too_many_arguments)]
 pub fn update_inspector_panel(
     selection: Res<Selection>,
     stations: Res<StationRegistry>,
@@ -208,7 +228,8 @@ pub fn update_inspector_panel(
     network: Res<TrackNetwork>,
     occupancy: Res<TileOccupancy>,
     lines: Res<LineRegistry>,
-    peeps: Query<(&Peep, &WaitingAtStation)>,
+    households: Res<HouseholdRegistry>,
+    peeps: PeepQuery,
     trains: Query<(&Train, &TrainLocation, &TrainCargo)>,
     mut cache: ResMut<InspectorCache>,
     mut ui: InspectorUi,
@@ -232,6 +253,7 @@ pub fn update_inspector_panel(
         &network,
         &occupancy,
         &lines,
+        &households,
         &peeps,
         &trains,
     );
@@ -288,6 +310,7 @@ struct InspectorView {
     body: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_view(
     sel: Selectable,
     stations: &StationRegistry,
@@ -297,7 +320,8 @@ fn build_view(
     network: &TrackNetwork,
     occupancy: &TileOccupancy,
     lines: &LineRegistry,
-    peeps: &Query<(&Peep, &WaitingAtStation)>,
+    households: &HouseholdRegistry,
+    peeps: &PeepQuery,
     trains: &Query<(&Train, &TrainLocation, &TrainCargo)>,
 ) -> InspectorView {
     match sel {
@@ -312,9 +336,12 @@ fn build_view(
             let long_wait_secs = LONG_WAIT_MINUTES * 60;
             let long_wait_count = peeps
                 .iter()
-                .filter(|(p, w)| {
-                    let _ = p;
-                    w.station == id && w.wait_secs >= long_wait_secs
+                .filter(|(_, w, _, journey, _)| {
+                    // Only a peep actually on the platform is waiting; the
+                    // component is on everybody (see [`PeepQuery`]).
+                    journey.map_or(true, |j| j.stage.is_waiting())
+                        && w.station == id
+                        && w.wait_secs >= long_wait_secs
                 })
                 .count() as u32;
             let cause = station_cause_line(StationCauseInput {
@@ -427,7 +454,9 @@ fn build_view(
             }
         }
         Selectable::Peep(id) => {
-            let Some((peep, waiting)) = peeps.iter().find(|(p, _)| p.id == id) else {
+            let Some((peep, waiting, routine, journey, memory)) =
+                peeps.iter().find(|(p, ..)| p.id == id)
+            else {
                 return missing("Peep", format!("Peep {}", id.0));
             };
             let station_name = stations
@@ -445,10 +474,21 @@ fn build_view(
                 Mood::Uneasy => CauseTone::Accent,
                 Mood::Content => CauseTone::Ok,
             };
+            let home_place = routine
+                .and_then(|r| stations.get(r.home_station))
+                .map(|s| s.name.as_str())
+                .unwrap_or(station_name.as_str());
             InspectorView {
                 fingerprint: format!(
-                    "pp:{}:{}:{}:{}",
-                    id.0, mood_label, waiting.wait_secs, station_name
+                    "pp:{}:{}:{}:{}:{}:{}",
+                    id.0,
+                    mood_label,
+                    waiting.wait_secs,
+                    station_name,
+                    journey.map(|j| format!("{:?}/{:?}", j.stage, j.leg)).unwrap_or_default(),
+                    memory
+                        .map(|m| format!("{}/{}", m.lifetime_journeys, m.bad_streak))
+                        .unwrap_or_default(),
                 ),
                 name: peep.name.clone(),
                 type_line: "Peep - Resident".into(),
@@ -456,11 +496,15 @@ fn build_view(
                 trend: String::new(),
                 cause: cause.clone(),
                 cause_tone: tone,
-                body: format!(
-                    "At station: {station_name}\nWait: {} min\nHome tile: {}, {}",
-                    waiting.wait_secs / 60,
-                    peep.home.x,
-                    peep.home.y
+                body: peep_body(
+                    peep,
+                    routine,
+                    journey,
+                    memory,
+                    households,
+                    stations,
+                    home_place,
+                    service.tick,
                 ),
             }
         }
@@ -521,6 +565,73 @@ fn build_view(
             }
         }
     }
+}
+
+/// How many remembered legs the Peep card lists.
+const RECENT_TRIPS_SHOWN: usize = 4;
+
+/// The Peep card's body — a person, not a stat block (brief 05 §3.3).
+///
+/// Every sentence here already existed in `rail_sim` and had no caller:
+/// [`Journey::describe`], [`Peep::tenure_line`], [`Routine::describe`],
+/// [`JourneyMemory::verdict_line`] and [`JourneyMemory::tolerance_line`]. The
+/// panel names the stations and puts the lines in order; the wording belongs to
+/// the slice that owns the state, so what the card says can never drift from
+/// what caused it. The old body — station, wait, home tile — was three numbers
+/// about somebody the design promises is *knowable*.
+#[allow(clippy::too_many_arguments)]
+fn peep_body(
+    peep: &Peep,
+    routine: Option<&Routine>,
+    journey: Option<&Journey>,
+    memory: Option<&JourneyMemory>,
+    households: &HouseholdRegistry,
+    stations: &StationRegistry,
+    home_place: &str,
+    tick: u64,
+) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(6);
+
+    // Where they are going right now.
+    if let Some(journey) = journey {
+        let from = station_name_of(stations, journey.from_station);
+        let to = station_name_of(stations, journey.to_station);
+        lines.push(journey.describe(&from, &to));
+    }
+
+    // The line that makes it land.
+    lines.push(peep.tenure_line(home_place, tick));
+
+    // Role, and the time they habitually travel.
+    if let Some(routine) = routine {
+        lines.push(routine.describe(home_place));
+    }
+
+    // Who they live with. The id is the authority; the home tile is the
+    // fallback, because a peep whose household went missing still lives
+    // somewhere and the family name is the point.
+    if let Some(household) = households
+        .get(peep.household)
+        .or_else(|| households.iter().find(|h| h.home == peep.home))
+    {
+        let size = household.members.len().max(1);
+        lines.push(format!("{} - a household of {size}.", household.plural()));
+    }
+
+    // What they remember, and what it has bought them.
+    if let Some(memory) = memory {
+        lines.push(memory.verdict_line(RECENT_TRIPS_SHOWN));
+        lines.push(memory.tolerance_line());
+    }
+
+    lines.join("\n")
+}
+
+fn station_name_of(stations: &StationRegistry, id: rail_sim::StationId) -> String {
+    stations
+        .get(id)
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| format!("Station {}", id.0))
 }
 
 fn missing(kind: &str, name: String) -> InspectorView {
@@ -595,6 +706,98 @@ mod tests {
         assert_eq!(world.query::<&InspectorCauseText>().iter(world).count(), 1);
         assert_eq!(world.query::<&InspectorBodyText>().iter(world).count(), 1);
         assert_eq!(world.query::<&InspectorBody>().iter(world).count(), 1);
+    }
+
+    use rail_sim::{
+        JourneyOutcome, JourneyRecord, JourneyStage, PeepId, StationId, TileCoord, GROUND_LAYER,
+        TICKS_PER_DAY,
+    };
+
+    /// A named resident with a home, a family, a routine and a history.
+    fn a_resident() -> (
+        Peep,
+        Routine,
+        Journey,
+        JourneyMemory,
+        HouseholdRegistry,
+        StationRegistry,
+    ) {
+        let mut stations = StationRegistry::new();
+        let east = stations.insert("Eastgate", TileCoord { x: 4, y: 4 }, GROUND_LAYER);
+        let mill = stations.insert("Millhaven", TileCoord { x: 20, y: 4 }, GROUND_LAYER);
+
+        let home = TileCoord { x: 5, y: 5 };
+        let mut households = HouseholdRegistry::new();
+        let household = households.insert(home, east, 0);
+        households.add_member(household, PeepId(1));
+        households.add_member(household, PeepId(2));
+
+        let peep = Peep::new(PeepId(1), "Mara Aldertone", home, household, 0);
+        let routine = Routine::from_seed(3, home, east, TileCoord { x: 21, y: 5 }, mill);
+        let mut journey = Journey::new(&routine);
+        journey.set_stage(JourneyStage::WaitingOnPlatform);
+        let mut memory = JourneyMemory::default();
+        memory.record(JourneyRecord {
+            from: east,
+            to: mill,
+            wait_secs: 60,
+            total_secs: 240,
+            outcome: JourneyOutcome::Good,
+            ended_tick: 0,
+        });
+        (peep, routine, journey, memory, households, stations)
+    }
+
+    /// Brief 05 §3.3 — the panel that earns the design's emotional hook. The
+    /// card used to be station / wait / home tile, with `Journey::describe`,
+    /// `Peep::tenure_line` and the whole memory slice sitting unread.
+    #[test]
+    fn the_peep_card_reads_as_a_person() {
+        let (peep, routine, journey, memory, households, stations) = a_resident();
+        let body = peep_body(
+            &peep,
+            Some(&routine),
+            Some(&journey),
+            Some(&memory),
+            &households,
+            &stations,
+            "Eastgate",
+            TICKS_PER_DAY * 14,
+        );
+        assert!(body.is_ascii(), "the bitmap font has no other glyphs: {body}");
+        for expected in [
+            "Waiting at Eastgate for the Millhaven train.",
+            "Mara has lived in Eastgate for 14 days.",
+            "leaves Eastgate about",
+            "a household of 2.",
+            "Recent trips: good.",
+        ] {
+            assert!(body.contains(expected), "card is missing {expected:?}:\n{body}");
+        }
+    }
+
+    /// A peep restored from an older save can arrive with only the components
+    /// that snapshot stored. The card degrades a line at a time, never vanishes.
+    #[test]
+    fn a_peep_missing_its_routine_still_gets_a_card() {
+        let (peep, _, _, _, _, stations) = a_resident();
+        let body = peep_body(
+            &peep,
+            None,
+            None,
+            None,
+            &HouseholdRegistry::new(),
+            &stations,
+            "Eastgate",
+            0,
+        );
+        assert_eq!(body, "Mara has just moved to Eastgate.");
+    }
+
+    #[test]
+    fn a_station_name_falls_back_rather_than_going_blank() {
+        let stations = StationRegistry::new();
+        assert_eq!(station_name_of(&stations, StationId(7)), "Station 7");
     }
 
     #[test]

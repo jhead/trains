@@ -24,25 +24,29 @@
 pub mod building_art;
 #[path = "districts.rs"]
 pub mod districts;
+#[path = "dust.rs"]
+pub mod dust;
 #[path = "lots.rs"]
 pub mod lots;
 
 use std::collections::HashMap;
 
+use bevy::ecs::system::SystemParam;
 use bevy::image::TextureAtlasLayout;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 use rail_map::MapGrid;
 use rail_sim::{
-    IndustryRegistry, SimClock, StationRegistry, TileCoord, TownDensity, TrackNetwork,
-    GROUND_LAYER,
+    ComplaintEntry, ComplaintFeed, IndustryRegistry, SimClock, StationRegistry, StationService,
+    TalkKind, TileCoord, TownDensity, TrackNetwork, VacatedHomes, GROUND_LAYER,
 };
 
 use building_art::{
     bake_atlas, world_hash, BuildingAtlas, BuildingKind, Decay, FRAME_RURAL, FRAME_SCAFFOLD,
     FRAME_SCAR, FRAME_STAKE,
 };
-use districts::{classify, nearest_good, District};
+use districts::{classify, nearest_good, nearest_station, District};
+use dust::{spawn_dust, DUST_SALT_SCAFFOLD, DUST_SALT_SETTLE};
 use lots::{
     fill_order, lot_base, lot_flip, lots_wanted, plan_kind, rural_farmstead, rural_prop,
     rural_slot, LOTS_PER_TILE, TILE_TEXELS,
@@ -69,6 +73,31 @@ pub const CLEARED_AFTER_SECS: f32 = 15.0;
 pub const RECOVERY_STEP_SECS: f32 = 2.5;
 /// Pause on a cleared lot before rebuilding starts.
 pub const REBUILD_DELAY_SECS: f32 = 1.0;
+
+/// How long a house stays un-wanted after its family walked out.
+///
+/// Long enough to carry the lot past `Dimmed` and into `Boarded`, so a named
+/// departure is followed by *that* building visibly emptying rather than by a
+/// number moving. Short enough that a district whose service recovers reclaims
+/// the lot instead of losing it — decline is recoverable at every stage (06
+/// §3.2), and this must not be the one exception.
+pub const VACATED_HOLD_SECS: f32 = DECLINE_ONSET_SECS + DECLINE_STEP_SECS * 2.0;
+
+/// Sim ticks of quiet after a district's last construction line.
+///
+/// About nine real seconds at the fixed timestep — roughly one scaffold cycle,
+/// so a growing street reports as *a street growing* rather than as a stream of
+/// receipts. 05 §4: a wall of near-identical lines is noise, and noise gets
+/// ignored.
+pub const CONSTRUCTION_TALK_TICKS: u64 = 600;
+
+/// Lowest [`BuildingKind::tier`] worth saying out loud.
+///
+/// Tiers are zero-based here and one-based in the brief, so this is 06 §2.1's
+/// **tier 2, the townhouse**. A cottage is what any served district does by
+/// default; a townhouse or better is the district *growing*, which is the thing
+/// the player caused and the thing worth a line.
+pub const TALKABLE_TIER: u8 = 1;
 
 // ─ Depth band ──────────────────────────────────────────
 //
@@ -207,6 +236,9 @@ pub struct TownState {
     /// Which world the standing lots, props and plans belong to.
     world: Option<(u32, u32, u64)>,
     plans: HashMap<(i32, i32), BlockPlan>,
+    /// Home tiles whose family has left, and the seconds their lot stays
+    /// un-wanted. Drained from [`VacatedHomes`]; see [`VACATED_HOLD_SECS`].
+    vacated: HashMap<(i32, i32), f32>,
 }
 
 /// Identity of the world on screen: its size and its seed.
@@ -236,16 +268,38 @@ fn on_map(bounds: Option<(u32, u32)>, tile: TileCoord) -> bool {
 
 // ─ The system ──────────────────────────────────────────
 
+/// The sim state the town draws from, and the one channel it writes back on.
+///
+/// Bundled because this feature reads most of the world: seven resources as
+/// seven parameters is most of Bevy's parameter budget spent on plumbing, and
+/// the next thing the town needs to know would not have fit at all.
+///
+/// [`ComplaintFeed`] is the write. Presentation putting a line into Town Talk is
+/// not a layering violation — `onboarding::nudge` already does it, and the feed
+/// is the game's ambient voice (05 §4), not sim state. It is also the only place
+/// that knows a *building finished going up*, because the phase machine that
+/// finished it lives here.
+#[derive(SystemParam)]
+pub struct TownSim<'w> {
+    density: Res<'w, TownDensity>,
+    stations: Res<'w, StationRegistry>,
+    industries: Res<'w, IndustryRegistry>,
+    network: Res<'w, TrackNetwork>,
+    /// Read for its sim tick, which is what a Town Talk line is stamped with.
+    service: Res<'w, StationService>,
+    talk: ResMut<'w, ComplaintFeed>,
+    /// Homes whose family has just left. Optional so a headless presentation
+    /// test does not have to stand up the peep slice to draw a building.
+    vacated: Option<ResMut<'w, VacatedHomes>>,
+}
+
 /// Bake on data change, advance the watchable phases, draw nothing per tile.
 #[allow(clippy::too_many_arguments)]
 pub fn sync_building_sprites(
     mut commands: Commands,
     time: Res<Time<Virtual>>,
     clock: Res<SimClock>,
-    density: Res<TownDensity>,
-    stations: Res<StationRegistry>,
-    industries: Res<IndustryRegistry>,
-    network: Res<TrackNetwork>,
+    mut sim: TownSim,
     map: Option<Res<MapGrid>>,
     atlas: Option<Res<BuildingAtlas>>,
     mut images: ResMut<Assets<Image>>,
@@ -284,6 +338,7 @@ pub fn sync_building_sprites(
                     commands.entity(entity).despawn();
                 }
                 state.plans.clear();
+                state.vacated.clear();
                 state.rural_seeded = false;
                 state.boot_frames = 1;
                 // The despawns above are queued, so this frame's queries would
@@ -295,7 +350,14 @@ pub fn sync_building_sprites(
 
     if !state.rural_seeded && state.boot_frames >= 3 {
         if let Some(map) = map.as_ref() {
-            seed_rural(&mut commands, &atlas, map, &stations, &industries, &network);
+            seed_rural(
+                &mut commands,
+                &atlas,
+                map,
+                &sim.stations,
+                &sim.industries,
+                &sim.network,
+            );
             state.rural_seeded = true;
         }
     }
@@ -306,12 +368,16 @@ pub fn sync_building_sprites(
         0.0
     };
 
+    // Which houses just emptied. Read before the replan, so a family who walked
+    // out this tick has their own lot dropped in the same pass.
+    take_vacated_homes(sim.vacated.as_deref_mut(), dt, &mut state);
+
     let seeded = state.rural_seeded;
     let changed = replan_blocks(
-        &density,
-        &stations,
-        &industries,
-        &network,
+        &sim.density,
+        &sim.stations,
+        &sim.industries,
+        &sim.network,
         bounds,
         &mut state,
     );
@@ -327,7 +393,37 @@ pub fn sync_building_sprites(
         );
     }
 
-    advance_phases(&mut commands, &atlas, dt, bounds, &mut lots);
+    advance_phases(
+        &mut commands,
+        &atlas,
+        dt,
+        bounds,
+        &sim.stations,
+        &mut sim.talk,
+        sim.service.tick,
+        &mut lots,
+    );
+}
+
+/// Drain the sim's departure channel and age the holds it left behind.
+///
+/// The channel is only touched when it has something in it: `ResMut` marks the
+/// resource changed on the first deref, and a system that dirties a sim resource
+/// every frame is a system every change detector downstream has to re-run for.
+fn take_vacated_homes(vacated: Option<&mut VacatedHomes>, dt: f32, state: &mut TownState) {
+    if let Some(vacated) = vacated {
+        if !vacated.is_empty() {
+            for tile in vacated.drain() {
+                state.vacated.insert((tile.x, tile.y), VACATED_HOLD_SECS);
+            }
+        }
+    }
+    if dt > 0.0 && !state.vacated.is_empty() {
+        state.vacated.retain(|_, left| {
+            *left -= dt;
+            *left > 0.0
+        });
+    }
 }
 
 /// Recompute each dirty block's plan. Returns only the blocks that changed.
@@ -386,7 +482,14 @@ fn replan_one(
         .get(&(tile.x, tile.y))
         .map(|p| p.lots)
         .unwrap_or(0);
-    let wanted = lots_wanted(d, district, held);
+    let mut wanted = lots_wanted(d, district, held);
+    // A named family walked out of *this* building. Their lot goes first, ahead
+    // of whatever the density field would have shed — the sequence in 06 §3.2
+    // is *occupants leave, then the house empties*, and until now those were two
+    // unrelated buildings.
+    if state.vacated.contains_key(&(tile.x, tile.y)) {
+        wanted = wanted.saturating_sub(1);
+    }
     let good = if district == District::Industrial {
         nearest_good(tile, industries)
     } else {
@@ -694,11 +797,69 @@ fn enter(lot: &mut BuildingLot, phase: LotPhase) -> bool {
     true
 }
 
+/// True when this step is the moment a building finished going up.
+///
+/// The settle is the last frame of construction, so `Settle → Standing` is the
+/// only transition that means *this lot now has a new building on it*. A lot
+/// stepping back up out of decline passes through `Standing(_) → Standing(_)`
+/// and is a recovery, not a build.
+fn just_completed(before: LotPhase, after: LotPhase) -> bool {
+    matches!(
+        (before, after),
+        (LotPhase::Settle, LotPhase::Standing(Decay::Healthy))
+    )
+}
+
+/// *"New shopfront opened near Eastgate."*
+///
+/// Brief 06 §3.1 asks for exactly this line and the town never said it: a
+/// district could grow from cottages to blocks in complete silence, which makes
+/// growth read as a background process rather than as something the player
+/// caused. Deduped per district through the feed's own quiet window, because
+/// four lots in one block finish within a few seconds of each other.
+fn speak_new_building(
+    talk: &mut ComplaintFeed,
+    stations: &StationRegistry,
+    tick: u64,
+    lot: &BuildingLot,
+) {
+    if lot.kind.tier < TALKABLE_TIER {
+        return;
+    }
+    let Some(station) = nearest_station(lot.tile, stations) else {
+        return;
+    };
+    if talk.town_spoke_recently(TalkKind::Praise, station.id, tick, CONSTRUCTION_TALK_TICKS) {
+        return;
+    }
+    talk.push(ComplaintEntry {
+        kind: TalkKind::Praise,
+        // A whole-sentence town line: the place speaking, not a resident.
+        peep_name: format!(
+            "New {} opened near {}",
+            lot.kind.label().to_lowercase(),
+            station.name
+        ),
+        station_name: String::new(),
+        wait_minutes: 0,
+        sim_tick: tick,
+        peep_id: None,
+        station_id: Some(station.id),
+        // Click-to-locate lands on the building, not on the station.
+        tile: Some(lot.tile),
+        count: 1,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn advance_phases(
     commands: &mut Commands,
     atlas: &BuildingAtlas,
     dt: f32,
     bounds: Option<(u32, u32)>,
+    stations: &StationRegistry,
+    talk: &mut ComplaintFeed,
+    tick: u64,
     lots: &mut Query<(Entity, &mut BuildingLot, &mut Sprite, &mut BuildingWindows)>,
 ) {
     for (entity, mut lot, mut sprite, mut windows) in lots.iter_mut() {
@@ -710,7 +871,28 @@ fn advance_phases(
             continue;
         }
         if dt > 0.0 {
-            step_phase(&mut lot, dt);
+            let before = lot.phase;
+            if step_phase(&mut lot, dt) {
+                if just_completed(before, lot.phase) {
+                    speak_new_building(talk, stations, tick, &lot);
+                }
+                // The two moments something physically happens on a lot: the
+                // scaffold going up, and the building dropping onto it.
+                let salt = match lot.phase {
+                    LotPhase::Scaffold => Some(DUST_SALT_SCAFFOLD),
+                    LotPhase::Settle => Some(DUST_SALT_SETTLE),
+                    _ => None,
+                };
+                if let Some(salt) = salt {
+                    let (bx, by) = lot_base(lot.tile, lot.slot);
+                    spawn_dust(
+                        commands,
+                        lot.tile,
+                        Vec2::new(bx as f32, by as f32),
+                        salt,
+                    );
+                }
+            }
         }
         if lot.target.is_none() && lot.phase.is_preconstruction() {
             commands.entity(entity).despawn();
@@ -926,6 +1108,63 @@ mod tests {
         assert_eq!(sorted.len(), frames.len(), "phases share a frame: {frames:?}");
     }
 
+    /// Brief 06 §3.1: *"Town Talk may mention it: New shop opened on Mill Row."*
+    /// The town used to grow in complete silence.
+    #[test]
+    fn finishing_a_building_is_worth_a_line_and_only_one() {
+        let mut stations = StationRegistry::new();
+        stations.insert("Eastgate", TileCoord { x: 4, y: 4 }, GROUND_LAYER);
+        let mut talk = ComplaintFeed::default();
+
+        let mut shop = lot(LotPhase::Settle, Some(kind(2)));
+        shop.kind = kind(2);
+        assert!(step_phase(&mut shop, SETTLE_SECS + 0.1));
+        speak_new_building(&mut talk, &stations, 10, &shop);
+        assert_eq!(
+            talk.latest_line().as_deref(),
+            Some("New shopfront opened near Eastgate")
+        );
+
+        // Four lots in one block finish within seconds of each other, and that
+        // is one street growing, not four announcements.
+        speak_new_building(&mut talk, &stations, 12, &shop);
+        assert_eq!(talk.len(), 1, "the block reported itself twice");
+        speak_new_building(&mut talk, &stations, 10 + CONSTRUCTION_TALK_TICKS + 1, &shop);
+        assert_eq!(talk.len(), 2, "the quiet window has to expire");
+    }
+
+    #[test]
+    fn a_cottage_is_not_news() {
+        // Tier 1 is what any served district does by default; saying so of
+        // every one of them is the wall of near-identical lines 05 §4 rules out.
+        let mut stations = StationRegistry::new();
+        stations.insert("Eastgate", TileCoord { x: 4, y: 4 }, GROUND_LAYER);
+        let mut talk = ComplaintFeed::default();
+        let mut cottage = lot(LotPhase::Standing(Decay::Healthy), Some(kind(0)));
+        cottage.kind = kind(0);
+        speak_new_building(&mut talk, &stations, 10, &cottage);
+        assert!(talk.is_empty());
+    }
+
+    #[test]
+    fn only_the_settle_counts_as_a_finished_building() {
+        // Recovery walks back up through `Standing(_)`; that is boards coming
+        // off, not a building going up, and it must not be announced as one.
+        assert!(just_completed(
+            LotPhase::Settle,
+            LotPhase::Standing(Decay::Healthy)
+        ));
+        assert!(!just_completed(
+            LotPhase::Standing(Decay::Boarded),
+            LotPhase::Standing(Decay::Dimmed)
+        ));
+        assert!(!just_completed(LotPhase::Stake, LotPhase::Scaffold));
+        assert!(!just_completed(
+            LotPhase::Cleared,
+            LotPhase::Stake
+        ));
+    }
+
     #[test]
     fn a_paused_sim_does_not_advance_construction() {
         let mut l = lot(LotPhase::Scaffold, Some(kind(0)));
@@ -965,6 +1204,9 @@ mod app_tests {
         app.init_resource::<TownDensity>();
         app.init_resource::<IndustryRegistry>();
         app.init_resource::<TrackNetwork>();
+        app.init_resource::<VacatedHomes>();
+        app.init_resource::<StationService>();
+        app.init_resource::<ComplaintFeed>();
 
         let mut stations = StationRegistry::new();
         stations.insert("Westbrook", TileCoord { x: 8, y: 8 }, GROUND_LAYER);
@@ -1190,6 +1432,54 @@ mod app_tests {
                 "a farmstead from the old map is standing at {tile:?}"
             );
         }
+    }
+
+    /// Lots on `tile` the planner still wants standing.
+    fn wanted_at(app: &mut App, tile: TileCoord) -> usize {
+        let mut query = app.world_mut().query::<&BuildingLot>();
+        query
+            .iter(app.world())
+            .filter(|l| l.tile == tile && l.target.is_some())
+            .count()
+    }
+
+    /// The reported bug: a named household leaves and some *other* house boards
+    /// up, because density is a field and the lot planner picks from the hash.
+    #[test]
+    fn a_departing_household_empties_its_own_house_first() {
+        let home = TileCoord { x: 8, y: 8 };
+        let neighbour = TileCoord { x: 10, y: 9 };
+
+        let mut app = test_app();
+        settle(&mut app, 4);
+        {
+            let mut density = app.world_mut().resource_mut::<TownDensity>();
+            density.set(home, 0.9);
+            density.set(neighbour, 0.9);
+        }
+        settle(&mut app, 2);
+        let home_before = wanted_at(&mut app, home);
+        let neighbour_before = wanted_at(&mut app, neighbour);
+        assert!(home_before > 0 && neighbour_before > 0, "both blocks must build");
+
+        // The Aldertons walk out of the house on `home`.
+        app.world_mut().resource_mut::<VacatedHomes>().mark(home);
+        settle(&mut app, 2);
+
+        assert_eq!(
+            wanted_at(&mut app, home),
+            home_before - 1,
+            "the house the family left must be the one that starts emptying"
+        );
+        assert_eq!(
+            wanted_at(&mut app, neighbour),
+            neighbour_before,
+            "an unrelated block must not start declining instead"
+        );
+        assert!(
+            app.world().resource::<VacatedHomes>().is_empty(),
+            "the channel is drained, not replayed every frame"
+        );
     }
 
     #[test]

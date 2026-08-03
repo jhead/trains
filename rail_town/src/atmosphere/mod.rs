@@ -192,6 +192,9 @@ mod tests {
         app.insert_resource(stations);
         app.init_resource::<IndustryRegistry>();
         app.init_resource::<TrackNetwork>();
+        // The town slice stamps its Town Talk lines with the sim tick.
+        app.init_resource::<rail_sim::StationService>();
+        app.init_resource::<rail_sim::ComplaintFeed>();
 
         app.add_plugins(crate::town::TownBuildingsPlugin);
         app.add_plugins(AtmospherePlugin);

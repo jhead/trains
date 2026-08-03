@@ -1,9 +1,14 @@
 //! The ambience bed (brief §2) — a continuous landscape composed from whatever
 //! the camera is looking at.
 //!
-//! Six layers cross-fade against each other every frame from a coarse sample of
-//! the terrain, the town and the clock, so panning from coast to mountain to
+//! Seven layers cross-fade against each other every frame from a coarse sample
+//! of the terrain, the town and the clock, so panning from coast to mountain to
 //! town is an audible journey rather than a set of switches.
+//!
+//! Six of them are the landscape. The seventh, the platform murmur, is the one
+//! layer driven by *people* rather than by ground: brief 10 §3.3 asks for crowd
+//! noise that scales with how many are waiting, and a bed that only knew
+//! [`TownDensity`] made a stranded platform sound exactly like an empty one.
 //!
 //! **The town layer is the emotional one.** It does not merely get quieter as a
 //! district declines — its activity rate collapses, its upper formant
@@ -18,7 +23,7 @@
 use bevy::audio::{AudioSink, SpatialAudioSink};
 use bevy::prelude::*;
 use rail_map::{MapGrid, TerrainKind, TILE_SIZE};
-use rail_sim::{IndustryRegistry, TileCoord, TownDensity};
+use rail_sim::{DistrictFlow, IndustryRegistry, StationRegistry, TileCoord, TownDensity};
 
 use crate::atmosphere::TimeOfDay;
 
@@ -38,6 +43,29 @@ const BED_FADE_SECS: f32 = 2.2;
 /// The town layer fades slower still — growth and decline are not events.
 const TOWN_FADE_SECS: f32 = 4.0;
 
+/// The murmur fades faster than the landscape: a platform fills and empties
+/// with the timetable, and a crowd that took four seconds to arrive would still
+/// be talking after the train had gone.
+const MURMUR_FADE_SECS: f32 = 1.6;
+
+/// Waiting peeps in earshot at which the murmur reaches full strength.
+///
+/// A platform holding this many is a crowded one — `StationTier::Station` starts
+/// grading itself down at 14 — so the layer tops out where the player would
+/// already be able to *see* that something is wrong.
+const MURMUR_FULL_CROWD: f32 = 12.0;
+
+/// How much wider than the visible radius a platform still counts from.
+const MURMUR_REACH: f32 = 1.1;
+
+/// The murmur's share of the bed at a packed platform.
+///
+/// Deliberately under the wind's floor (`0.42`): §1's first rule is never to
+/// startle, and this layer is a *diagnostic the player overhears*, not an
+/// announcement. If a crowd could out-shout the landscape it would stop being
+/// texture and start being an alarm.
+const MURMUR_MAX_SHARE: f32 = 0.32;
+
 /// The bed voices and their last computed weights.
 #[derive(Resource, Debug, Default)]
 pub struct AmbienceBeds {
@@ -46,6 +74,8 @@ pub struct AmbienceBeds {
     pub town_density: f32,
     /// Mean wild-land fraction in view, kept for diagnostics and tests.
     pub wild: f32,
+    /// Waiting peeps in earshot, normalised — see [`crowd_near`].
+    pub crowd: f32,
 }
 
 impl AmbienceBeds {
@@ -134,6 +164,36 @@ fn tile_center(tile: TileCoord) -> Vec2 {
     Vec2::new(x, y)
 }
 
+/// Peeps waiting on platforms the camera can hear, weighted by how near.
+///
+/// Brief 10 §3.3 asks for crowd murmur that scales with **how many are
+/// waiting**, and the bed only ever knew [`TownDensity`] — so a platform with
+/// fourteen people stranded on it sounded exactly like an empty one. The count
+/// is `DistrictFlow`'s, which is the sim's own answer for both the simulated
+/// peeps and the abstracted majority.
+///
+/// Counted rather than sampled, like industry: stations are few and single-tile,
+/// and a sampling grid would miss them.
+fn crowd_near(
+    stations: &StationRegistry,
+    flow: &DistrictFlow,
+    center: Vec2,
+    radius: f32,
+) -> f32 {
+    let reach = radius * MURMUR_REACH;
+    let mut waiting = 0.0f32;
+    for station in stations.iter() {
+        let distance = (tile_center(station.tile) - center).length();
+        if distance > reach {
+            continue;
+        }
+        // A platform at the edge of the frame is quieter than one underfoot.
+        let near = 1.0 - (distance / reach.max(1.0)).clamp(0.0, 1.0);
+        waiting += flow.get(station.id).waiting as f32 * near;
+    }
+    (waiting / MURMUR_FULL_CROWD).clamp(0.0, 1.0)
+}
+
 /// Dawn chorus, morning, thinning through the afternoon, gone by night.
 ///
 /// Authored as keyframes on the same cycle position the tint pass uses, and
@@ -162,12 +222,26 @@ fn birdsong_at(fraction: f32) -> f32 {
     BIRD_STOPS[BIRD_STOPS.len() - 1].1
 }
 
+/// Cross-fade time constant for a layer.
+///
+/// The landscape moves at the pace of the camera; the town at the pace of
+/// growth; the platform at the pace of a timetable.
+fn fade_secs(kind: VoiceKind) -> f32 {
+    match kind {
+        VoiceKind::Town => TOWN_FADE_SECS,
+        VoiceKind::Murmur => MURMUR_FADE_SECS,
+        _ => BED_FADE_SECS,
+    }
+}
+
 /// Compose and cross-fade the bed.
 #[allow(clippy::too_many_arguments)]
 pub fn drive_ambience(
     map: Res<MapGrid>,
     density: Res<TownDensity>,
     industries: Res<IndustryRegistry>,
+    stations: Res<StationRegistry>,
+    flow: Res<DistrictFlow>,
     tod: Res<TimeOfDay>,
     clock: Res<AudioClock>,
     mix: Res<AudioMix>,
@@ -188,6 +262,8 @@ pub fn drive_ambience(
     );
     beds.town_density = scene.town;
     beds.wild = scene.wild;
+    let crowd = crowd_near(&stations, &flow, mix.listener, mix.radius.max(TILE_SIZE * 6.0));
+    beds.crowd = crowd;
 
     let dark = tod.window_lit.clamp(0.0, 1.0);
     let birds = birdsong_at(tod.fraction);
@@ -201,6 +277,9 @@ pub fn drive_ambience(
     // A town sleeps but never quite stops; a thriving one is audible at night.
     let w_town = smoothstep(0.015, 0.45, scene.town) * (1.0 - 0.55 * dark);
     let w_industry = scene.industry * (1.0 - 0.7 * dark) * smoothstep(0.0, 0.25, scene.town + 0.15);
+    // Texture, not alarm: even a packed platform is a fraction of the bed, and
+    // an empty one is genuinely absent rather than merely quiet.
+    let w_murmur = smoothstep(0.02, 0.9, crowd) * MURMUR_MAX_SHARE;
 
     let weights = [
         (VoiceKind::Wind, w_wind),
@@ -209,6 +288,7 @@ pub fn drive_ambience(
         (VoiceKind::Night, w_night),
         (VoiceKind::Town, w_town),
         (VoiceKind::Industry, w_industry),
+        (VoiceKind::Murmur, w_murmur),
     ];
     // Share out one bed's worth of level. When only wind is present the bed is
     // genuinely quieter — silence is a texture, not a gap to fill (§1).
@@ -247,6 +327,12 @@ pub fn drive_ambience(
         v.params.set_depth(life);
         v.params.set_color(dark);
     }
+    if let Some(v) = beds.voice(VoiceKind::Murmur) {
+        // How many are waiting sets the level *and* the rate of a voice
+        // carrying; how close the camera is sets the colour.
+        v.params.set_density(crowd);
+        v.params.set_tone(0.35 + 0.5 * mix.detail);
+    }
     if let Some(v) = beds.voice(VoiceKind::Industry) {
         // "Only while working": the work rate follows the serviced town around
         // it, so a cut-off industry falls quiet within a minute.
@@ -257,11 +343,7 @@ pub fn drive_ambience(
 
     // -- levels -----------------------------------------------------------
     for (kind, weight) in weights {
-        let tau = if kind == VoiceKind::Town {
-            TOWN_FADE_SECS
-        } else {
-            BED_FADE_SECS
-        };
+        let tau = fade_secs(kind);
         let target = bed * (weight / total);
         if let Some(voice) = beds.voice(kind) {
             voice.apply(target, bus, dt, tau, &mut sinks, &mut spatial);
@@ -329,6 +411,53 @@ mod tests {
         assert!((0.0..=1.0).contains(&over_town.water));
         assert!((0.0..=1.0).contains(&over_town.wild));
         assert!((0.0..=1.0).contains(&over_town.altitude));
+    }
+
+    /// Brief 10 §3.3 — the murmur has to hear the *number waiting*, which is
+    /// the one thing `TownDensity` cannot tell it.
+    #[test]
+    fn the_murmur_hears_the_platform_and_not_the_town() {
+        use rail_sim::{DistrictFlow, StationRegistry, GROUND_LAYER};
+
+        let mut stations = StationRegistry::new();
+        let east = stations.insert("Eastgate", TileCoord { x: 14, y: 14 }, GROUND_LAYER);
+        let at = tile_center(TileCoord { x: 14, y: 14 });
+        let radius = TILE_SIZE * 12.0;
+
+        let quiet = DistrictFlow::default();
+        assert_eq!(
+            crowd_near(&stations, &quiet, at, radius),
+            0.0,
+            "an empty platform must be silent, not merely quiet"
+        );
+
+        let mut busy = DistrictFlow::default();
+        busy.entry(east).waiting = MURMUR_FULL_CROWD as u32;
+        let here = crowd_near(&stations, &busy, at, radius);
+        assert!(here > 0.5, "a full platform underfoot should be loud: {here}");
+        assert!(here <= 1.0, "the layer must stay normalised: {here}");
+
+        // Further away is quieter, and out of earshot is nothing.
+        let across = crowd_near(&stations, &busy, at + Vec2::new(radius * 0.9, 0.0), radius);
+        assert!(across < here, "distance must thin the crowd: {across} !< {here}");
+        let gone = crowd_near(&stations, &busy, at + Vec2::new(radius * 4.0, 0.0), radius);
+        assert_eq!(gone, 0.0, "a platform off screen is not audible");
+    }
+
+    #[test]
+    fn the_murmur_stays_texture_rather_than_alarm() {
+        // A packed platform must never dominate the bed: this is the layer that
+        // tells a player something without telling them off.
+        let full = smoothstep(0.02, 0.9, 1.0) * MURMUR_MAX_SHARE;
+        // The wind's floor, from the weight expression itself.
+        let empty = Scene::default();
+        let wind = 0.42 + 0.30 * empty.altitude + 0.12 * (1.0 - empty.town);
+        assert!(full < wind, "the crowd out-shouted the wind: {full} vs {wind}");
+        assert!(full > 0.1, "and it has to be audible at all: {full}");
+        assert!(
+            fade_secs(VoiceKind::Murmur) < fade_secs(VoiceKind::Town),
+            "a platform empties faster than a district does"
+        );
     }
 
     #[test]

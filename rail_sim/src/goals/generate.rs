@@ -8,11 +8,21 @@
 //!
 //! # Determinism
 //!
-//! Generation is a pure function of `(seed, anchors)`. Every registry read is
-//! sorted by id first — [`StationRegistry::iter`] walks a `HashMap` and its
-//! order is not stable — and every target is integer arithmetic. The same seed
-//! on the same map therefore produces the same set, which is what makes a
-//! shared seed code mean the same *game* and not merely the same terrain.
+//! Generation is a pure function of `(seed, generation, from_tick, anchors)`.
+//! Every registry read is sorted by id first — [`StationRegistry::iter`] walks a
+//! `HashMap` and its order is not stable — and every target is integer
+//! arithmetic. The same seed on the same map therefore produces the same set,
+//! which is what makes a shared seed code mean the same *game* and not merely
+//! the same terrain. `generation` is the index of the set (0 for a world's
+//! first), so the replacement board a resolved one earns is as reproducible as
+//! the original.
+//!
+//! # The set is not the end of the game
+//!
+//! Design 08 §1: the economy never ends the game, and §8 makes goals *a lens on
+//! the sandbox* — so a resolved board is a milestone, not a finish. When every
+//! goal is met or missed, [`super::progress::regenerate_resolved_goals`] asks
+//! for the next set, harder and dated from the day it was issued.
 
 use crate::ids::{StationId, TileCoord};
 use crate::peeps::TICKS_PER_DAY;
@@ -24,18 +34,64 @@ use super::goal::{Goal, GoalId, GoalKind};
 /// them; never more.
 pub const GOALS_PER_SET: usize = 6;
 
-/// Deadline for each goal in the set, in sim days, before jitter.
+/// Deadline for each goal in the set, in sim days after the set was issued,
+/// before jitter.
 ///
-/// The shape matters more than the numbers: an opening objective that lands
-/// inside the first few minutes (design 08 §7 — first payout by minute three),
-/// then a widening ladder, then one long haul that is still open at the hour
-/// mark. A sim day is [`TICKS_PER_DAY`] ticks.
-const DEADLINE_DAYS: [u64; GOALS_PER_SET] = [2, 4, 7, 10, 12, 16];
+/// A sim day is [`TICKS_PER_DAY`] = 8,640 ticks, which at 64 Hz is **2¼ real
+/// minutes** — the number that matters, and the one the old ladder was written
+/// without. `[2, 4, 7, 10, 12, 16]` put the last goal at real minute 36, so a
+/// goals session was over before design 08 §7's "1 hr+" row began and every
+/// deadline after the first landed while the player was still laying their
+/// first branch.
+///
+/// | Goal | Days | Real minutes |
+/// | --- | --- | --- |
+/// | Connect to the nearest stop | 3 | 6¾ |
+/// | Complete N paid runs | 8 | 18 |
+/// | Keep a stop served | 16 | 36 |
+/// | Grow the town | 24 | 54 |
+/// | Build up a district | 33 | 74 |
+/// | Reach the far stop by rail | 47 | 106 |
+///
+/// The shape is the point: an opening objective inside the first ten minutes
+/// (design 08 §7 — first payout by minute three), a widening ladder, and one
+/// long haul still open past the ninetieth minute.
+const DEADLINE_DAYS: [u64; GOALS_PER_SET] = [3, 8, 16, 24, 33, 47];
+
+/// Paid runs one transit train completes in a sim-day, measured.
+///
+/// `rail_sim/tests/economy_arc.rs` runs a first line — two stops fifteen tiles
+/// apart, one transit train, jobs flowing — and records **128 paid runs in
+/// three real minutes**, about 43 a real minute. A sim day is 2¼ real minutes,
+/// so one train clears roughly 96 runs a day. Everything below is derived from
+/// this number; re-measure before changing it.
+const RUNS_PER_TRAIN_PER_DAY: u64 = 96;
+
+/// How much of the delivery goal's window one train should have to spend
+/// clearing it, in percent.
+///
+/// Under 50 and the deadline cannot bite — a goal already met when it is read
+/// is not an objective. Near 100 and it is a wall for anyone who has not
+/// already bought a second train. Seventy leaves the player a real decision
+/// about rolling stock, which is the decision the goal exists to provoke.
+const DELIVERIES_WINDOW_SHARE_PERCENT: u64 = 70;
 
 /// Paid runs asked for, before per-map scaling.
-const DELIVERIES_BASE: u64 = 60;
-/// Extra runs asked for per anchor the world started with.
-const DELIVERIES_PER_ANCHOR: u64 = 20;
+///
+/// Derived rather than authored: the goal's window is `DEADLINE_DAYS[1]` days,
+/// one train clears [`RUNS_PER_TRAIN_PER_DAY`], and it should take
+/// [`DELIVERIES_WINDOW_SHARE_PERCENT`] of that window — 537 runs.
+///
+/// The old figure was `60 + 20` an anchor, or 160 runs on a seeded map: under
+/// four real minutes of one train's work against a deadline eighteen real
+/// minutes out. The goal was a formality, and design 08 §8's *"deadlines make
+/// the pacing bite"* had nothing to bite with.
+const DELIVERIES_BASE: u64 =
+    RUNS_PER_TRAIN_PER_DAY * DEADLINE_DAYS[1] * DELIVERIES_WINDOW_SHARE_PERCENT / 100;
+
+/// Extra runs asked for per anchor the world started with — a busier map is a
+/// bigger railway and should be asked for more.
+const DELIVERIES_PER_ANCHOR: u64 = 40;
 
 /// Residents asked for, before per-map scaling.
 const POPULATION_BASE: u64 = 6;
@@ -46,15 +102,38 @@ const POPULATION_PER_ANCHOR: u64 = 14;
 /// Service score a stop must hold to bank time toward a "keep it served" goal.
 const SERVE_MIN_SCORE: u8 = 55;
 
+/// Sim-days of good service a "keep it served" goal banks, against a sixteen
+/// day deadline.
+///
+/// One day was under three real minutes of a thirty-six minute window — met by
+/// accident. Three is a stretch of *running a railway well* rather than a
+/// moment of it, and being cumulative (see [`GoalKind::Serve`]) a bad afternoon
+/// still only slows it down.
+const SERVE_DAYS: u64 = 3;
+
 /// Share of a catchment's theoretical fill a "build up" goal asks for, percent.
 const GROW_QUALITY_PERCENT: u64 = 40;
 
 /// How far a target may drift from its nominal value, percent either way.
 const TARGET_JITTER_PERCENT: u64 = 20;
 
-/// Build this world's goal set. Empty when the map has no anchors to talk about.
+/// How much more each successive set asks for, in percent.
+///
+/// A player who cleared a board did it with a railway that has grown; the next
+/// board is set against that railway, not the one they started with.
+const GENERATION_DIFFICULTY_PERCENT: u64 = 60;
+
+/// Build a goal set. Empty when the map has no anchors to talk about.
+///
+/// - `generation` — 0 for a world's first set, 1 for the harder one that
+///   replaces it, and so on. Targets scale by
+///   [`GENERATION_DIFFICULTY_PERCENT`] a generation.
+/// - `from_tick` — the sim tick the set is issued on. Deadlines are relative to
+///   it, so a set earned at the ninetieth minute is not born overdue.
 pub fn generate_goal_set(
     seed: u64,
+    generation: u32,
+    from_tick: u64,
     stations: &StationRegistry,
     industries: &IndustryRegistry,
 ) -> Vec<Goal> {
@@ -63,11 +142,19 @@ pub fn generate_goal_set(
     };
     // Anchors the generator laid down — the size of the problem this map poses.
     let world_anchors = (stations.len() + industries.len()) as u64;
+    let harder = |target: u64| {
+        target
+            .saturating_mul(100 + GENERATION_DIFFICULTY_PERCENT * u64::from(generation))
+            / 100
+    };
+    // Salt every draw with the generation so a second set is a different set,
+    // and still the same different set on every machine.
+    let seed = mix64(seed ^ (u64::from(generation).wrapping_mul(0x51_7c_c1_b7)));
 
     let mut out: Vec<Goal> = Vec::new();
     let mut next = |kind: GoalKind, title: String, target: u64, index: usize| {
         let id = GoalId(index as u32);
-        let deadline = deadline_tick(seed, index);
+        let deadline = from_tick.saturating_add(deadline_tick(seed, index));
         out.push(Goal::new(id, kind, title, target, deadline));
     };
 
@@ -91,7 +178,7 @@ pub fn generate_goal_set(
     let runs = jitter(
         seed,
         1,
-        DELIVERIES_BASE + world_anchors.saturating_mul(DELIVERIES_PER_ANCHOR),
+        harder(DELIVERIES_BASE + world_anchors.saturating_mul(DELIVERIES_PER_ANCHOR)),
     );
     next(
         GoalKind::Deliveries,
@@ -108,7 +195,7 @@ pub fn generate_goal_set(
             min_score: SERVE_MIN_SCORE,
         },
         format!("Keep {} served", name_of(stations, served)),
-        TICKS_PER_DAY,
+        harder(SERVE_DAYS.saturating_mul(TICKS_PER_DAY)),
         2,
     );
 
@@ -116,7 +203,7 @@ pub fn generate_goal_set(
     let residents = jitter(
         seed,
         2,
-        POPULATION_BASE + world_anchors.saturating_mul(POPULATION_PER_ANCHOR),
+        harder(POPULATION_BASE + world_anchors.saturating_mul(POPULATION_PER_ANCHOR)),
     );
     next(
         GoalKind::Population,
@@ -134,7 +221,7 @@ pub fn generate_goal_set(
     next(
         GoalKind::Grow { station: grown },
         format!("Build up {}", name_of(stations, grown)),
-        grow_target_tenths(radius),
+        harder(grow_target_tenths(radius)),
         4,
     );
 
@@ -299,7 +386,7 @@ mod tests {
     #[test]
     fn a_seeded_world_gets_a_full_set() {
         let (stations, industries) = seeded_world();
-        let goals = generate_goal_set(84_213, &stations, &industries);
+        let goals = generate_goal_set(84_213, 0, 0, &stations, &industries);
         assert_eq!(goals.len(), GOALS_PER_SET);
         assert!(goals.iter().all(|g| !g.title.is_empty()));
         assert!(goals.iter().all(|g| g.target >= 1));
@@ -309,16 +396,16 @@ mod tests {
     #[test]
     fn the_same_seed_and_map_produce_the_same_set() {
         let (stations, industries) = seeded_world();
-        let a = generate_goal_set(84_213, &stations, &industries);
-        let b = generate_goal_set(84_213, &stations, &industries);
+        let a = generate_goal_set(84_213, 0, 0, &stations, &industries);
+        let b = generate_goal_set(84_213, 0, 0, &stations, &industries);
         assert_eq!(a, b, "a shared seed must mean the same game, not just terrain");
     }
 
     #[test]
     fn a_different_seed_poses_a_different_problem() {
         let (stations, industries) = seeded_world();
-        let a = generate_goal_set(1, &stations, &industries);
-        let b = generate_goal_set(2, &stations, &industries);
+        let a = generate_goal_set(1, 0, 0, &stations, &industries);
+        let b = generate_goal_set(2, 0, 0, &stations, &industries);
         assert_ne!(a, b);
     }
 
@@ -329,7 +416,7 @@ mod tests {
         let home = stations.insert("Home", TileCoord { x: 20, y: 20 }, GROUND_LAYER);
         let near = stations.insert("Near", TileCoord { x: 28, y: 20 }, GROUND_LAYER);
         let far = stations.insert("Far", TileCoord { x: 20, y: 44 }, GROUND_LAYER);
-        let goals = generate_goal_set(7, &stations, &IndustryRegistry::new());
+        let goals = generate_goal_set(7, 0, 0, &stations, &IndustryRegistry::new());
 
         let first = goals.first().expect("a set exists");
         assert_eq!(first.kind, GoalKind::Connect { from: home, to: near });
@@ -347,7 +434,7 @@ mod tests {
     fn deadlines_never_go_backwards_on_any_seed() {
         let (stations, industries) = seeded_world();
         for seed in 0..64u64 {
-            let goals = generate_goal_set(seed, &stations, &industries);
+            let goals = generate_goal_set(seed, 0, 0, &stations, &industries);
             let mut previous = 0;
             for goal in &goals {
                 assert!(
@@ -366,7 +453,7 @@ mod tests {
         let mut stations = StationRegistry::new();
         stations.insert("Home", TileCoord { x: 10, y: 10 }, GROUND_LAYER);
         stations.insert("Other", TileCoord { x: 18, y: 10 }, GROUND_LAYER);
-        let goals = generate_goal_set(3, &stations, &IndustryRegistry::new());
+        let goals = generate_goal_set(3, 0, 0, &stations, &IndustryRegistry::new());
 
         let connects = goals
             .iter()
@@ -378,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_world_with_no_anchors_gets_no_goals_rather_than_nonsense() {
-        let goals = generate_goal_set(1, &StationRegistry::new(), &IndustryRegistry::new());
+        let goals = generate_goal_set(1, 0, 0, &StationRegistry::new(), &IndustryRegistry::new());
         assert!(goals.is_empty());
     }
 
@@ -386,7 +473,7 @@ mod tests {
     fn a_single_stop_world_still_gets_something_to_do() {
         let mut stations = StationRegistry::new();
         stations.insert("Alone", TileCoord { x: 10, y: 10 }, GROUND_LAYER);
-        let goals = generate_goal_set(5, &stations, &IndustryRegistry::new());
+        let goals = generate_goal_set(5, 0, 0, &stations, &IndustryRegistry::new());
         assert!(!goals.is_empty());
         assert!(
             goals
@@ -410,7 +497,7 @@ mod tests {
             );
         }
         let runs = |reg: &StationRegistry| {
-            generate_goal_set(11, reg, &IndustryRegistry::new())
+            generate_goal_set(11, 0, 0, reg, &IndustryRegistry::new())
                 .into_iter()
                 .find(|g| g.kind == GoalKind::Deliveries)
                 .map(|g| g.target)
@@ -434,6 +521,123 @@ mod tests {
         // The default Station catchment is 5; that number is load-bearing for
         // the readout in the panel.
         assert_eq!(grow_target_tenths(5), 190);
+    }
+
+    /// Ticks in a real minute at 64 Hz — the units the pacing claim is made in.
+    const TICKS_PER_REAL_MINUTE: u64 = 3_840;
+
+    fn real_minutes(ticks: u64) -> f64 {
+        ticks as f64 / TICKS_PER_REAL_MINUTE as f64
+    }
+
+    /// **The pacing claim.** Design 08 §7 runs to "1 hr+"; the old ladder had
+    /// its last deadline at real minute 36, which is not a session.
+    #[test]
+    fn the_six_deadlines_spread_across_an_hour_and_a_half_of_play() {
+        let (stations, industries) = seeded_world();
+        for seed in 0..32u64 {
+            let goals = generate_goal_set(seed, 0, 0, &stations, &industries);
+            let first = real_minutes(goals.first().unwrap().deadline_tick);
+            let last = real_minutes(goals.last().unwrap().deadline_tick);
+            assert!(
+                (3.0..=12.0).contains(&first),
+                "seed {seed}: the opening goal is due at {first:.0} real minutes"
+            );
+            assert!(
+                (90.0..=120.0).contains(&last),
+                "seed {seed}: the last goal is due at {last:.0} real minutes, \
+                 and design 08 §7 wants a session that reaches an hour and past it"
+            );
+        }
+    }
+
+    /// **The quota claim.** Design 08 §8: deadlines are what make the pacing
+    /// bite, and a quota one train clears in a third of its window does not.
+    ///
+    /// Stated in *trains*, because that is the decision the number is meant to
+    /// provoke — "do I have enough stock for this?" — and because the measured
+    /// [`RUNS_PER_TRAIN_PER_DAY`] is what turns a quota into an answer. The old
+    /// numbers needed 0.2 of a train: nothing to decide.
+    #[test]
+    fn a_delivery_quota_cannot_be_cleared_in_half_its_window_by_one_train() {
+        let (stations, industries) = seeded_world();
+        for generation in 0..3u32 {
+            for seed in 0..32u64 {
+                let goals = generate_goal_set(seed, generation, 0, &stations, &industries);
+                let goal = goals
+                    .iter()
+                    .find(|g| g.kind == GoalKind::Deliveries)
+                    .expect("every set asks for throughput");
+                let window_days = goal.deadline_tick as f64 / TICKS_PER_DAY as f64;
+                let days_of_one_train = goal.target as f64 / RUNS_PER_TRAIN_PER_DAY as f64;
+                let trains_needed = days_of_one_train / window_days;
+
+                assert!(
+                    days_of_one_train > window_days / 2.0,
+                    "gen {generation} seed {seed}: {} runs is {days_of_one_train:.1} \
+                     days of one train against a {window_days:.1} day window — the \
+                     deadline cannot bite",
+                    goal.target
+                );
+                // …and still within reach of a railway that has grown as much as
+                // the board has: one more train's worth of slack per generation.
+                let affordable = 2.0 + f64::from(generation);
+                assert!(
+                    trains_needed <= affordable,
+                    "gen {generation} seed {seed}: {} runs wants \
+                     {trains_needed:.1} trains running flat out for the whole \
+                     window — that is not a deadline, it is a wall",
+                    goal.target
+                );
+            }
+        }
+    }
+
+    /// A resolved board earns a harder one, and the same world always earns the
+    /// same harder one.
+    #[test]
+    fn each_generation_asks_for_more_and_asks_for_it_reproducibly() {
+        let (stations, industries) = seeded_world();
+        let target = |generation: u32, kind: GoalKind| {
+            generate_goal_set(84_213, generation, 0, &stations, &industries)
+                .into_iter()
+                .find(|g| g.kind == kind)
+                .map(|g| g.target)
+                .expect("goal present")
+        };
+
+        for kind in [GoalKind::Deliveries, GoalKind::Population] {
+            let first = target(0, kind);
+            let second = target(1, kind);
+            let third = target(2, kind);
+            assert!(
+                second > first && third > second,
+                "{kind:?}: {first} -> {second} -> {third} does not get harder"
+            );
+        }
+
+        let a = generate_goal_set(84_213, 2, 5_000, &stations, &industries);
+        let b = generate_goal_set(84_213, 2, 5_000, &stations, &industries);
+        assert_eq!(a, b, "the successor set must be as reproducible as the first");
+        let other = generate_goal_set(84_213, 3, 5_000, &stations, &industries);
+        assert_ne!(a, other, "a later generation is a different set");
+    }
+
+    /// A set issued at the ninetieth minute is not born overdue.
+    #[test]
+    fn a_set_is_dated_from_the_day_it_was_issued() {
+        let (stations, industries) = seeded_world();
+        let issued_at = 40 * TICKS_PER_DAY;
+        let goals = generate_goal_set(84_213, 1, issued_at, &stations, &industries);
+        assert!(
+            goals.iter().all(|g| g.deadline_tick > issued_at),
+            "every deadline must be in the future of the set that carries it"
+        );
+        let first = goals.first().unwrap();
+        assert!(
+            real_minutes(first.deadline_tick - issued_at) < 12.0,
+            "the opening beat of a later set is still an opening beat"
+        );
     }
 
     #[test]

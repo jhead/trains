@@ -95,8 +95,23 @@ fn format_ledger_body(ledger: &MoneyLedger) -> String {
         money_signed_exact(net),
         money_rate(ledger.net_rate_cents_per_min())
     ));
-    lines.push(format!("Trend {}", sparkline(ledger)));
+    lines.push(format!("{} {}", trend_label(ledger), sparkline(ledger)));
     lines.join("\n")
+}
+
+/// "Trend (last 7 min)" — the window the sparkline actually covers.
+///
+/// One sample is one real minute (`rail_sim::LEDGER_SAMPLE_SIM_SECS`), so the
+/// count of completed samples *is* the number of minutes drawn. Stating it is
+/// not decoration: design 08 §6 wants "a history graph long enough to show a
+/// trend across a session", and a player cannot tell whether they are looking
+/// at a session or a second without being told which.
+fn trend_label(ledger: &MoneyLedger) -> String {
+    match ledger.history_len() {
+        0 => "Trend".to_string(),
+        1 => "Trend (last min)".to_string(),
+        n => format!("Trend (last {n} min)"),
+    }
 }
 
 /// Height ramp for the trend line, low to high.
@@ -209,6 +224,31 @@ mod tests {
     #[test]
     fn an_empty_history_says_so() {
         assert_eq!(sparkline(&MoneyLedger::default()), "-");
+    }
+
+    /// The trend has to say how much time it covers, and be right about it.
+    ///
+    /// It used to cover 24 samples of 30 *sim*-seconds — three ticks each, so
+    /// 1.1 real seconds in total — while sitting under a panel that talks about
+    /// a session. A sample is now a real minute.
+    #[test]
+    fn the_trend_states_the_window_it_actually_covers() {
+        let mut ledger = MoneyLedger::default();
+        assert_eq!(trend_label(&ledger), "Trend");
+
+        ledger.on_sim_secs(LEDGER_SAMPLE_SIM_SECS);
+        assert_eq!(trend_label(&ledger), "Trend (last min)");
+
+        for _ in 0..6 {
+            ledger.on_sim_secs(LEDGER_SAMPLE_SIM_SECS);
+        }
+        assert_eq!(trend_label(&ledger), "Trend (last 7 min)");
+
+        // And a sample really is a real minute of ticks.
+        assert_eq!(
+            LEDGER_SAMPLE_SIM_SECS / rail_sim::SIM_SECONDS_PER_TICK,
+            3_840
+        );
     }
 
     #[test]

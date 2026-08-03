@@ -14,7 +14,7 @@ use crate::track::{TrackNetwork, GROUND_LAYER};
 use crate::trains::find_path_for_kind;
 use crate::trains::{track_for_station, Train, TrainCargo, TrainLocation, TrainOnLine};
 
-use super::payout::{GOODS_DELIVERY_CENTS, PASSENGER_FARE_CENTS};
+use super::payout::{goods_delivery_cents, haul_tiles, passenger_fare_cents};
 
 /// Pending demand the player can fulfill with trains.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,7 +33,29 @@ pub enum JobKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub kind: JobKind,
+    /// What this run is worth — the same distance-scaled figure
+    /// [`super::payout`] will pay on arrival, so the board never advertises a
+    /// price the delivery does not honour.
     pub reward_cents: i64,
+}
+
+/// Fare a passenger job between two stops is worth, or the shortest fare when
+/// one of them has been demolished since the job was posted.
+fn passenger_reward(stations: &StationRegistry, from: StationId, to: StationId) -> i64 {
+    let tiles = match (stations.get(from), stations.get(to)) {
+        (Some(a), Some(b)) => haul_tiles(a.tile, b.tile),
+        _ => 1,
+    };
+    passenger_fare_cents(tiles)
+}
+
+/// Payout a goods job between two industries is worth.
+fn goods_reward(industries: &IndustryRegistry, from: IndustryId, to: IndustryId) -> i64 {
+    let tiles = match (industries.get(from), industries.get(to)) {
+        (Some(a), Some(b)) => haul_tiles(a.tile, b.tile),
+        _ => 1,
+    };
+    goods_delivery_cents(tiles)
 }
 
 /// Open jobs waiting for a train.
@@ -62,7 +84,12 @@ pub fn spawn_demand_jobs(
     }
     board.spawn_cooldown = 0;
 
-    let station_ids: Vec<StationId> = stations.iter().map(|s| s.id).collect();
+    // Sorted, because [`StationRegistry::iter`] walks a `HashMap` and the pair
+    // this picks is indexed by tick. Left unsorted, two runs of the same seed
+    // send different people between different towns — and now that a fare
+    // scales with the distance travelled, they earn different money for it.
+    let mut station_ids: Vec<StationId> = stations.iter().map(|s| s.id).collect();
+    station_ids.sort_unstable_by_key(|id| id.0);
     if station_ids.len() >= 2 {
         let passenger_count = board
             .jobs
@@ -83,7 +110,7 @@ pub fn spawn_demand_jobs(
             {
                 board.jobs.push(Job {
                     kind: JobKind::Passenger { from, to },
-                    reward_cents: PASSENGER_FARE_CENTS,
+                    reward_cents: passenger_reward(&stations, from, to),
                 });
             }
         }
@@ -119,7 +146,7 @@ pub fn spawn_demand_jobs(
                         from: producer.id,
                         to: consumer.id,
                     },
-                    reward_cents: GOODS_DELIVERY_CENTS,
+                    reward_cents: goods_reward(&industries, producer.id, consumer.id),
                 });
             }
         }
@@ -148,7 +175,11 @@ pub fn sync_peep_platform_pressure(
 /// people travel, and this drains those intents onto the board so trains
 /// actually serve them. Without it a morning peak is visible in the town and
 /// invisible to the railway.
-pub fn drain_peep_demand(mut board: ResMut<JobBoard>, mut flow: ResMut<DistrictFlow>) {
+pub fn drain_peep_demand(
+    mut board: ResMut<JobBoard>,
+    mut flow: ResMut<DistrictFlow>,
+    stations: Res<StationRegistry>,
+) {
     for (from, to) in flow.take_pending() {
         if from == to {
             continue;
@@ -165,9 +196,10 @@ pub fn drain_peep_demand(mut board: ResMut<JobBoard>, mut flow: ResMut<DistrictF
         if already {
             continue;
         }
+        let reward_cents = passenger_reward(&stations, from, to);
         board.jobs.push(Job {
             kind: JobKind::Passenger { from, to },
-            reward_cents: PASSENGER_FARE_CENTS,
+            reward_cents,
         });
     }
 }

@@ -43,22 +43,28 @@ pub use commands::{
 };
 pub use history::{CommandHistory, HistoryEntry, HistoryMode, HISTORY_DEPTH};
 pub use demand::{
-    service_influence_at, spawn_new_demand, DemandOpportunity, DemandOpportunityKind,
-    DemandSpawner, DEMAND_FIRST_DELAY_SIM_MINUTES, DEMAND_INTERVAL_SIM_MINUTES,
-    DEMAND_MAX_NEW_PER_SESSION, DEMAND_MIN_ANCHOR_SPACING, DEMAND_SERVICE_INFLUENCE_MAX,
+    min_anchor_distance, service_influence_at, spawn_new_demand, DemandOpportunity,
+    DemandOpportunityKind, DemandSpawner, DEMAND_FIRST_DELAY_SIM_MINUTES,
+    DEMAND_INTERVAL_GROWTH_PERCENT, DEMAND_INTERVAL_MAX_PERCENT,
+    DEMAND_INTERVAL_SIM_MINUTES, DEMAND_MAX_PENDING, DEMAND_MIN_ANCHOR_SPACING,
+    DEMAND_MIN_SPACING_MAX, DEMAND_SERVICE_INFLUENCE_MAX, DEMAND_SPACING_GROWTH,
 };
 pub use economy::{
-    apply_track_maintenance, apply_train_opex, assign_jobs, drain_peep_demand, refresh_alerts,
-    resolve_deliveries, spawn_demand_jobs, sync_peep_platform_pressure, tick_money_ledger,
-    track_maintenance_total, Alert, AlertBoard, AlertFocus, AlertKind, AlertKey, Job, JobBoard,
-    JobKind, MaintenanceAccrual, MoneyCategory, MoneyLedger, ALERT_CASH_LOW_MINUTES,
-    ALERT_SERVICE_LOW_SCORE, ALERT_WAITING_OVERWHELMED, GOODS_DELIVERY_CENTS, LEDGER_HISTORY_LEN,
-    LEDGER_SAMPLE_SIM_SECS, PASSENGER_FARE_CENTS, TRAIN_OPEX_CENTS,
+    apply_track_maintenance, apply_train_opex, assign_jobs, drain_peep_demand,
+    goods_delivery_cents, haul_tiles, passenger_fare_cents, refresh_alerts, resolve_deliveries,
+    spawn_demand_jobs, sync_peep_platform_pressure, tick_money_ledger, track_maintenance_total,
+    train_opex_total_cents_per_real_min, Alert, AlertBoard, AlertFocus, AlertKind, AlertKey, Job,
+    JobBoard, JobKind, MaintenanceAccrual, MoneyCategory, MoneyLedger, ALERT_CASH_LOW_MINUTES,
+    ALERT_SERVICE_LOW_SCORE, ALERT_WAITING_OVERWHELMED, GOODS_DELIVERY_CENTS,
+    GOODS_DELIVERY_CENTS_PER_TILE, GOODS_DELIVERY_DISTANCE_DIVISOR, LEDGER_HISTORY_LEN,
+    LEDGER_RATE_SAMPLES, LEDGER_SAMPLE_SIM_SECS, MAINT_CENTS_PER_WEIGHT_PER_REAL_MIN,
+    PASSENGER_FARE_CENTS, PASSENGER_FARE_CENTS_PER_TILE, PASSENGER_FARE_DISTANCE_DIVISOR,
+    TICKS_PER_REAL_MINUTE, TICKS_PER_SIM_MINUTE, TRAIN_OPEX_CENTS,
 };
 pub use event_director::EventDirector;
 pub use goals::{
-    evaluate_goals, generate_goal_set, generate_goals_once, Goal, GoalBoard, GoalId, GoalKind,
-    GoalMode, GoalStatus, GoalsPlugin, GOALS_PER_SET,
+    evaluate_goals, generate_goal_set, generate_goals_once, regenerate_resolved_goals, Goal,
+    GoalBoard, GoalId, GoalKind, GoalMode, GoalStatus, GoalsPlugin, GOALS_PER_SET,
 };
 pub use ids::{EntityId, LineId, StationId, TileCoord, TrackId, TrainId};
 pub use lines::{
@@ -95,10 +101,10 @@ pub use stations::{
 pub use town::{TownDensity, TownPlugin, GROWTH_RADIUS, MAX_DENSITY};
 pub use track::{
     apply_track_commands, bridge_cost_for_span, local_slope, path_bridge_spans_ok, path_grades_ok,
-    piece_maintenance_cents, straight_line, tile_build_cost, tile_cost, validate_tile_empty,
+    piece_maintenance_weight, straight_line, tile_build_cost, tile_cost, validate_tile_empty,
     PlacementError, TrackEdit, TrackNetwork, TrackPiece, TrackTerrain, BRIDGE_COST_CENTS,
-    BRIDGE_MAINT_CENTS, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_CURVE, MAX_GRADE, MOUNTAIN_HEIGHT_MIN,
-    TRACK_COST_CENTS, TRACK_MAINT_CENTS,
+    BRIDGE_MAINT_WEIGHT, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_CURVE, MAX_GRADE, MOUNTAIN_HEIGHT_MIN,
+    TRACK_COST_CENTS, TRACK_MAINT_WEIGHT,
 };
 pub use trains::{
     advance_trains, apply_train_commands, blocked_chain_head, blocker_for, buy_cost, find_path,

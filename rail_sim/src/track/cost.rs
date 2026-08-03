@@ -32,11 +32,17 @@ pub const MOUNTAIN_HEIGHT_MIN: i8 = 14;
 /// Ground-layer index used by MVP placement commands (`PlaceTrack.layer`).
 pub const GROUND_LAYER: u8 = 0;
 
-/// Maintenance per ground track tile per Advance tick: $0.01.
-pub const TRACK_MAINT_CENTS: i64 = 1;
+/// Maintenance **weight** of one ground track tile.
+///
+/// Not money. [`MAINT_CENTS_PER_WEIGHT_PER_REAL_MIN`](crate::economy::opex::MAINT_CENTS_PER_WEIGHT_PER_REAL_MIN)
+/// prices a weight; this says how many units a piece is worth. It was called
+/// `TRACK_MAINT_CENTS` and read like a per-tick charge, which is two wrong units
+/// in one name.
+pub const TRACK_MAINT_WEIGHT: i64 = 1;
 
-/// Maintenance per bridge tile per Advance tick: $0.04 (4× ground).
-pub const BRIDGE_MAINT_CENTS: i64 = 4;
+/// Maintenance weight of one bridge tile — 4× ground, per [02] §3.1's
+/// "bridges and tunnels cost several times more".
+pub const BRIDGE_MAINT_WEIGHT: i64 = 4;
 
 /// Optional soft curve refuse — turns sharper than 90° (`curve > 64`).
 /// Autofill is straight so this mainly bites at junctions; curves still slow below.
@@ -131,13 +137,13 @@ pub fn tile_cost(is_bridge: bool) -> i64 {
     }
 }
 
-/// Per-tick maintenance for one laid piece.
+/// Maintenance weight of one laid piece (not money — see [`TRACK_MAINT_WEIGHT`]).
 #[inline]
-pub fn piece_maintenance_cents(is_bridge: bool) -> i64 {
+pub fn piece_maintenance_weight(is_bridge: bool) -> i64 {
     if is_bridge {
-        BRIDGE_MAINT_CENTS
+        BRIDGE_MAINT_WEIGHT
     } else {
-        TRACK_MAINT_CENTS
+        TRACK_MAINT_WEIGHT
     }
 }
 

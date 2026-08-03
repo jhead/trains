@@ -32,6 +32,11 @@ impl GoalMode {
 /// The set is generated from the map seed once the world's anchors exist — see
 /// [`generate_goal_set`](super::generate_goal_set) — so it suits the terrain the
 /// player is actually looking at rather than being a fixed campaign.
+///
+/// A board that has resolved every goal earns a new, harder one rather than
+/// standing as a finished scoreboard: design 08 §5.3 names stagnation as the
+/// only failure, and a goals world whose board has stopped asking for anything
+/// is exactly that.
 #[derive(Debug, Clone, Default, PartialEq, Resource, Serialize, Deserialize)]
 pub struct GoalBoard {
     pub mode: GoalMode,
@@ -40,6 +45,11 @@ pub struct GoalBoard {
     goals: Vec<Goal>,
     /// `true` once generation has run for this world, successfully or not.
     generated: bool,
+    /// Which set this is: `0` for the world's first, `1` for the harder one
+    /// that replaced it, and so on. Feeds
+    /// [`generate_goal_set`](super::generate_goal_set), so regeneration stays a
+    /// pure function of the world rather than of when it happened to be asked.
+    generation: u32,
 }
 
 impl GoalBoard {
@@ -50,6 +60,7 @@ impl GoalBoard {
         self.seed = seed;
         self.goals.clear();
         self.generated = false;
+        self.generation = 0;
     }
 
     /// `true` when this world is playing to goals.
@@ -67,6 +78,26 @@ impl GoalBoard {
     pub fn install(&mut self, goals: Vec<Goal>) {
         self.goals = goals;
         self.generated = true;
+    }
+
+    /// Which set this is — `0` for the world's first.
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Replace a resolved board with its successor and count the generation.
+    pub fn install_next_generation(&mut self, goals: Vec<Goal>) {
+        self.generation = self.generation.saturating_add(1);
+        self.install(goals);
+    }
+
+    /// `true` when every goal on a non-empty board has been met or missed.
+    ///
+    /// The trigger for the next set. An empty board is *not* resolved: a world
+    /// with no usable anchors never generated one, and asking again every tick
+    /// would be a spin, not a milestone.
+    pub fn all_resolved(&self) -> bool {
+        !self.goals.is_empty() && self.goals.iter().all(|g| !g.is_active())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Goal> {

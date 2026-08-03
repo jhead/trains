@@ -3,7 +3,8 @@
 mod alerts;
 mod jobs;
 mod ledger;
-mod opex;
+/// Running costs, and the two minutes this crate keeps.
+pub mod opex;
 mod payout;
 
 pub use alerts::{
@@ -15,12 +16,17 @@ pub use jobs::{
     JobKind,
 };
 pub use ledger::{
-    tick_money_ledger, MoneyCategory, MoneyLedger, LEDGER_HISTORY_LEN, LEDGER_SAMPLE_SIM_SECS,
+    tick_money_ledger, MoneyCategory, MoneyLedger, LEDGER_HISTORY_LEN, LEDGER_RATE_SAMPLES,
+    LEDGER_SAMPLE_SIM_SECS,
 };
 pub use opex::{
-    apply_track_maintenance, apply_train_opex, track_maintenance_total, MaintenanceAccrual,
-    MAINT_CENTS_PER_WEIGHT_PER_MINUTE, TICKS_PER_MINUTE, TRAIN_OPEX_CENTS,
+    apply_track_maintenance, apply_train_opex, track_maintenance_total,
+    train_opex_total_cents_per_real_min, MaintenanceAccrual,
+    MAINT_CENTS_PER_WEIGHT_PER_REAL_MIN, TICKS_PER_REAL_MINUTE, TICKS_PER_SIM_MINUTE,
+    TRAIN_OPEX_CENTS,
 };
 pub use payout::{
-    resolve_deliveries, GOODS_DELIVERY_CENTS, PASSENGER_FARE_CENTS,
+    goods_delivery_cents, haul_tiles, passenger_fare_cents, resolve_deliveries,
+    GOODS_DELIVERY_CENTS, GOODS_DELIVERY_CENTS_PER_TILE, GOODS_DELIVERY_DISTANCE_DIVISOR,
+    PASSENGER_FARE_CENTS, PASSENGER_FARE_CENTS_PER_TILE, PASSENGER_FARE_DISTANCE_DIVISOR,
 };

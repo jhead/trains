@@ -11,9 +11,9 @@ mod terrain;
 
 pub use apply::{apply_track_commands, TrackEdit};
 pub use cost::{
-    bridge_cost_for_span, local_slope, piece_maintenance_cents, tile_build_cost, tile_cost,
-    BRIDGE_COST_CENTS, BRIDGE_MAINT_CENTS, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_CURVE, MAX_GRADE,
-    MOUNTAIN_HEIGHT_MIN, TRACK_COST_CENTS, TRACK_MAINT_CENTS,
+    bridge_cost_for_span, local_slope, piece_maintenance_weight, tile_build_cost, tile_cost,
+    BRIDGE_COST_CENTS, BRIDGE_MAINT_WEIGHT, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_CURVE, MAX_GRADE,
+    MOUNTAIN_HEIGHT_MIN, TRACK_COST_CENTS, TRACK_MAINT_WEIGHT,
 };
 pub use dir::{
     bearing_deg, bearing_separation_deg, clock_index, clock_separation, dir_from_clock, dir_index,

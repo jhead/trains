@@ -1,10 +1,13 @@
 //! Evaluating goals on the fixed tick, and saying so in Town Talk.
 //!
-//! Two systems, both cheap and both no-ops in sandbox:
+//! Three systems, all cheap and all no-ops in sandbox:
 //!
 //! - [`generate_goals_once`] waits for the world's anchors and derives the set.
 //! - [`evaluate_goals`] recomputes every open goal's progress each Advance tick,
 //!   completes what is met and lapses what is past its deadline.
+//! - [`regenerate_resolved_goals`] replaces a board on which everything has
+//!   resolved with a harder one, so a goals world never runs out of things to
+//!   ask for.
 //!
 //! # Where progress comes from
 //!
@@ -16,7 +19,7 @@
 //! | --- | --- |
 //! | Connect | [`TrackNetwork`] + [`find_path`] between the two stops |
 //! | Population | [`HouseholdRegistry::population`] |
-//! | Deliveries | [`MoneyLedger`] fare and delivery totals ÷ their unit price |
+//! | Deliveries | [`MoneyLedger::paid_runs`], counted as they are credited |
 //! | Serve | [`StationService`] score, banked one tick at a time |
 //! | Grow | [`TownDensity`] summed over the stop's catchment |
 //!
@@ -30,7 +33,7 @@
 
 use bevy_ecs::prelude::*;
 
-use crate::economy::{MoneyCategory, MoneyLedger, GOODS_DELIVERY_CENTS, PASSENGER_FARE_CENTS};
+use crate::economy::MoneyLedger;
 use crate::ids::{StationId, TileCoord};
 use crate::peeps::{ComplaintEntry, ComplaintFeed, HouseholdRegistry, TalkKind};
 use crate::stations::{IndustryRegistry, StationRegistry, StationService};
@@ -58,7 +61,13 @@ pub fn generate_goals_once(
     if !board.needs_generation() || stations.is_empty() {
         return;
     }
-    let goals = generate_goal_set(board.seed, &stations, &industries);
+    let goals = generate_goal_set(
+        board.seed,
+        board.generation(),
+        service.tick,
+        &stations,
+        &industries,
+    );
     let count = goals.len();
     let first = goals.first().map(|g| g.title.clone());
     board.install(goals);
@@ -168,6 +177,64 @@ pub fn evaluate_goals(
     }
 }
 
+/// Issue the next, harder set once every goal on the board has resolved.
+///
+/// Design 08 §8 makes goals "a lens on the sandbox", and §5.3 names stagnation
+/// as the only failure — so a board with nothing left to ask is the one state a
+/// goals world must never sit in. The old board stopped at six objectives, the
+/// last of which was due at real minute thirty-six; after that a goals session
+/// was a sandbox with a scoreboard.
+///
+/// The successor is dated from *now*, so it is not born overdue, and its targets
+/// are scaled for the railway that cleared the last one. It stays deterministic:
+/// see [`generate_goal_set`]'s generation index.
+pub fn regenerate_resolved_goals(
+    mut board: ResMut<GoalBoard>,
+    stations: Res<StationRegistry>,
+    industries: Res<IndustryRegistry>,
+    service: Res<StationService>,
+    mut talk: ResMut<ComplaintFeed>,
+) {
+    if !board.is_active() || !board.all_resolved() {
+        return;
+    }
+    let met = board.count(GoalStatus::Complete);
+    let of = board.len();
+    let goals = generate_goal_set(
+        board.seed,
+        board.generation().saturating_add(1),
+        service.tick,
+        &stations,
+        &industries,
+    );
+    if goals.is_empty() {
+        // Nothing to ask for — the anchors are gone. Leave the board as it is
+        // rather than wiping it, and try again when the world has stops.
+        return;
+    }
+    let first = goals.first().map(|g| g.title.clone());
+    board.install_next_generation(goals);
+
+    announce(
+        &mut talk,
+        TalkKind::Opportunity,
+        format!("That board is done - {met} of {of} met. The town has asked for more."),
+        None,
+        None,
+        service.tick,
+    );
+    if let Some(title) = first {
+        announce(
+            &mut talk,
+            TalkKind::Opportunity,
+            format!("Next up: {title}"),
+            None,
+            None,
+            service.tick,
+        );
+    }
+}
+
 /// Progress for one goal, read from live sim state.
 fn measure(
     goal: &Goal,
@@ -241,13 +308,13 @@ fn built_tenths(stations: &StationRegistry, density: &TownDensity, station: Stat
 
 /// Paid runs completed this session — fares plus goods deliveries.
 ///
-/// Read back out of the ledger rather than counted separately, because the
-/// ledger is already the authority on what the railway has earned (and is
-/// already in the save).
+/// Read off the ledger, which counts them as they are credited. It used to
+/// divide the fare total by the fare price, which was exact only while every
+/// run paid the same; once a payout scales with distance (design 08 §2) a
+/// single long haul reads as a dozen short ones and a delivery quota clears
+/// itself on arithmetic rather than on service.
 fn paid_runs(ledger: &MoneyLedger) -> u64 {
-    let fares = ledger.total(MoneyCategory::Fares).max(0) / PASSENGER_FARE_CENTS.max(1);
-    let goods = ledger.total(MoneyCategory::Deliveries).max(0) / GOODS_DELIVERY_CENTS.max(1);
-    (fares + goods) as u64
+    ledger.paid_runs()
 }
 
 fn tile_of(stations: &StationRegistry, station: Option<StationId>) -> Option<TileCoord> {
@@ -300,6 +367,7 @@ mod tests {
         board.install(goals);
         app.insert_resource(board)
             .insert_resource(stations)
+            .init_resource::<IndustryRegistry>()
             .init_resource::<StationService>()
             .init_resource::<TownDensity>()
             .init_resource::<MoneyLedger>()
@@ -307,6 +375,15 @@ mod tests {
             .init_resource::<HouseholdRegistry>()
             .init_resource::<ComplaintFeed>()
             .add_systems(Update, evaluate_goals);
+        app
+    }
+
+    /// The same world with the successor-board system wired in, as the plugin
+    /// wires it. Kept separate so the evaluation tests below can watch a single
+    /// goal resolve without the board being replaced underneath them.
+    fn regenerating_app_with(goals: Vec<Goal>, stations: StationRegistry) -> App {
+        let mut app = app_with(goals, stations);
+        app.add_systems(Update, regenerate_resolved_goals.after(evaluate_goals));
         app
     }
 
@@ -318,6 +395,21 @@ mod tests {
         app.world().resource::<GoalBoard>()
     }
 
+    /// Bank `count` completed deliveries the way [`crate::economy::payout`]
+    /// does — as *runs*, at whatever distance-scaled price they fetched.
+    fn credit_runs(app: &mut App, count: usize) {
+        let mut money = Money::new(0);
+        let mut ledger = app.world_mut().resource_mut::<MoneyLedger>();
+        for i in 0..count {
+            let (category, cents) = if i % 3 == 2 {
+                (crate::economy::MoneyCategory::Deliveries, 41_600)
+            } else {
+                (crate::economy::MoneyCategory::Fares, 660 + i as i64 * 900)
+            };
+            ledger.credit_paid_run(&mut money, category, cents);
+        }
+    }
+
     #[test]
     fn a_sandbox_world_never_evaluates_anything() {
         let mut app = app_with(
@@ -325,9 +417,7 @@ mod tests {
             StationRegistry::new(),
         );
         app.world_mut().resource_mut::<GoalBoard>().mode = GoalMode::Sandbox;
-        app.world_mut()
-            .resource_mut::<MoneyLedger>()
-            .record(MoneyCategory::Fares, PASSENGER_FARE_CENTS * 4);
+        credit_runs(&mut app, 4);
         step(&mut app);
         assert!(
             board_of(&app).iter().all(|g| g.is_active() && g.current == 0),
@@ -341,11 +431,7 @@ mod tests {
             vec![goal(GoalKind::Deliveries, 3, TICKS_PER_DAY)],
             StationRegistry::new(),
         );
-        {
-            let mut ledger = app.world_mut().resource_mut::<MoneyLedger>();
-            ledger.record(MoneyCategory::Fares, PASSENGER_FARE_CENTS * 2);
-            ledger.record(MoneyCategory::Deliveries, GOODS_DELIVERY_CENTS);
-        }
+        credit_runs(&mut app, 3);
         step(&mut app);
         let goal = board_of(&app).iter().next().unwrap();
         assert_eq!(goal.current, 3, "two fares and one delivery are three runs");
@@ -492,6 +578,69 @@ mod tests {
             step(&mut app);
             assert_eq!(board_of(&app).iter().next().unwrap().current, first);
         }
+    }
+
+    /// Design 08 §5.3 — a board with nothing left to ask *is* stagnation, and
+    /// stagnation is the one failure this game has.
+    #[test]
+    fn a_resolved_board_earns_a_harder_one_rather_than_a_finished_scoreboard() {
+        let mut stations = StationRegistry::new();
+        stations.insert("Ashford", TileCoord { x: 8, y: 8 }, GROUND_LAYER);
+        stations.insert("Brackwell", TileCoord { x: 20, y: 8 }, GROUND_LAYER);
+        stations.insert("Cawdon", TileCoord { x: 40, y: 30 }, GROUND_LAYER);
+
+        // One goal, already out of time — the whole board resolves this tick.
+        let mut app = regenerating_app_with(
+            vec![goal(GoalKind::Deliveries, 1_000_000, 1)],
+            stations,
+        );
+        app.world_mut().resource_mut::<StationService>().tick = 9;
+        assert_eq!(app.world().resource::<GoalBoard>().generation(), 0);
+
+        step(&mut app);
+
+        let board = board_of(&app);
+        assert_eq!(board.generation(), 1, "a resolved board earns its successor");
+        assert!(
+            board.iter().all(|g| g.is_active()),
+            "and the successor is open, not pre-resolved"
+        );
+        assert!(
+            board.iter().all(|g| g.deadline_tick > 9),
+            "dated from the day it was issued, so nothing is born overdue"
+        );
+        assert!(
+            app.world()
+                .resource::<ComplaintFeed>()
+                .iter()
+                .any(|e| e.display_line().starts_with("Next up:")),
+            "the new board introduces itself in Town Talk"
+        );
+
+        // And it does not keep regenerating while the new set is open.
+        step(&mut app);
+        assert_eq!(board_of(&app).generation(), 1);
+    }
+
+    /// A sandbox board, and a world with nothing to talk about, both stay put.
+    #[test]
+    fn regeneration_never_fires_without_a_world_to_set_goals_in() {
+        let mut app = regenerating_app_with(
+            vec![goal(GoalKind::Deliveries, 1_000_000, 1)],
+            StationRegistry::new(),
+        );
+        app.world_mut().resource_mut::<StationService>().tick = 9;
+        step(&mut app);
+        assert_eq!(
+            board_of(&app).generation(),
+            0,
+            "no anchors, nothing to ask for — leave the board alone"
+        );
+
+        let mut sandbox = regenerating_app_with(Vec::new(), StationRegistry::new());
+        sandbox.world_mut().resource_mut::<GoalBoard>().mode = GoalMode::Sandbox;
+        step(&mut sandbox);
+        assert_eq!(board_of(&sandbox).generation(), 0);
     }
 
     #[test]

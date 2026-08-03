@@ -33,6 +33,13 @@
 //! failure the game has, and a lens on the sandbox does not get to invent
 //! another one.
 //!
+//! # And no end either
+//!
+//! A board on which everything has resolved is replaced by a harder one, dated
+//! from the day it was issued ([`progress::regenerate_resolved_goals`]). A
+//! finished scoreboard would be exactly the stagnation §5.3 forbids, and the
+//! session is meant to be hours long.
+//!
 //! # Turning it on
 //!
 //! Sandbox is the default and every system here returns immediately in it. The
@@ -47,7 +54,7 @@ mod progress;
 pub use board::{GoalBoard, GoalMode};
 pub use generate::{generate_goal_set, GOALS_PER_SET};
 pub use goal::{Goal, GoalId, GoalKind, GoalStatus};
-pub use progress::{evaluate_goals, generate_goals_once};
+pub use progress::{evaluate_goals, generate_goals_once, regenerate_resolved_goals};
 
 use bevy_app::{App, FixedUpdate, Plugin, Update};
 use bevy_ecs::schedule::IntoScheduleConfigs;
@@ -68,8 +75,14 @@ impl Plugin for GoalsPlugin {
             .add_systems(Update, generate_goals_once)
             .add_systems(
                 FixedUpdate,
-                evaluate_goals
-                    .after(crate::economy::tick_money_ledger)
+                (
+                    evaluate_goals.after(crate::economy::tick_money_ledger),
+                    // Strictly after evaluation, so the set that replaces a
+                    // resolved board is not itself evaluated on the same tick
+                    // it was issued — a fresh goal with a met condition would
+                    // otherwise complete before the player saw it.
+                    regenerate_resolved_goals.after(evaluate_goals),
+                )
                     .in_set(SimSet::Advance)
                     .run_if(sim_is_running),
             );

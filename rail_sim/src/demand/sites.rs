@@ -121,10 +121,53 @@ fn sample_line(a: TileCoord, b: TileCoord) -> Vec<TileCoord> {
     out
 }
 
+/// Weight on the distance term of a site's score, per tile out to `prefer_far`.
+///
+/// This used to be `3`, against a routing-interest term worth up to `80` a
+/// point — so distance contributed about 5% of a site's score and was clamped
+/// besides. Brief 08 §4.3 asks the opposite: *"new demand should appear at
+/// increasing distance as the network grows… the terrain that was impossible at
+/// minute five is the interesting problem at minute fifty."* Reaching outward
+/// is the difficulty curve, so it has to outweigh a slightly more photogenic
+/// hillside nearby.
+const DISTANCE_WEIGHT: i64 = 60;
+
+/// Weight on the routing-question term (water crossings, ridges on the way).
+///
+/// Still substantial: an awkward site *is* more interesting than an open plain,
+/// and design 08 §4.1 wants new industries "often deliberately awkward — up a
+/// valley, across a river, past a ridge". At a maximum interest of 34 it is
+/// worth about a thousand points, which decides between sites at similar range
+/// and cannot drag one back across the map — awkward-but-far beats
+/// awkward-and-near, which is the ordering the brief asks for.
+const INTEREST_WEIGHT: i64 = 30;
+
+/// Penalty per tile *beyond* the preferred distance.
+///
+/// Design 08 §4.2 wants an opportunity "far enough to require a real decision,
+/// close enough to be tempting", so distance has a sweet spot rather than a
+/// direction. Without this the far corner of the map always wins, the whole
+/// curve collapses into its endpoint, and `prefer_far` stops meaning anything.
+/// Softer than the reward, so overshooting is second best rather than refused.
+const OVERSHOOT_WEIGHT: i64 = 25;
+
+/// Score one candidate site. Higher is better.
+///
+/// In the order design 08 §4 asks for: outside service coverage first (an
+/// opportunity the player already serves is not an opportunity), then how far
+/// out it reaches, then whether getting there poses a question.
+fn site_score(influence: f32, dist: i32, prefer_far: i32, interest: i32) -> i64 {
+    let outside = ((1.0 - influence) * 10_000.0) as i64;
+    let reach = (dist.min(prefer_far) as i64) * DISTANCE_WEIGHT;
+    let overshoot = ((dist - prefer_far).max(0) as i64) * OVERSHOOT_WEIGHT;
+    outside + reach - overshoot + (interest as i64) * INTEREST_WEIGHT
+}
+
 /// Pick the best land tile for a new demand anchor.
 ///
-/// Prefers low service influence, then routing interest, then distance from
-/// existing anchors (at least `min_spacing`, preferring farther as `prefer_far`).
+/// Prefers low service influence, then distance from existing anchors (at least
+/// `min_spacing`, rewarded up to `prefer_far` and gently beyond), then the
+/// routing question getting there poses.
 pub fn pick_demand_site(
     terrain: &TrackTerrain,
     stations: &StationRegistry,
@@ -170,10 +213,7 @@ pub fn pick_demand_site(
                 continue;
             }
             let interest = routing_interest(tile, stations, terrain);
-            // Score: outside coverage first, then routing question, then reach.
-            let score = ((1.0 - influence) * 10_000.0) as i64
-                + (interest as i64) * 80
-                + (dist.min(prefer_far + 20) as i64) * 3;
+            let score = site_score(influence, dist, prefer_far, interest);
             match best {
                 Some((_, s)) if s >= score => {}
                 _ => best = Some((tile, score)),
@@ -209,9 +249,7 @@ pub fn pick_demand_site(
                     continue;
                 }
                 let interest = routing_interest(tile, stations, terrain);
-                let score = ((1.0 - influence) * 10_000.0) as i64
-                    + (interest as i64) * 80
-                    + (dist as i64);
+                let score = site_score(influence, dist, prefer_far, interest);
                 match best {
                     Some((_, s)) if s >= score => {}
                     _ => best = Some((tile, score)),
@@ -262,5 +300,71 @@ mod tests {
         );
         let site = site.expect("should find a site");
         assert!((site.x - 16).abs() + (site.y - 16).abs() >= 8);
+    }
+
+    /// Brief 08 §4.3 — later opportunities have to be genuinely further out.
+    ///
+    /// The failure this pins: the distance term was worth ~5% of a site's score
+    /// and clamped besides, so raising the preferred distance moved the chosen
+    /// tile hardly at all and the twelfth new town could land beside the first.
+    #[test]
+    fn raising_the_preferred_distance_actually_moves_the_site_outward() {
+        let terrain = flat_land(64, 64);
+        let mut stations = StationRegistry::new();
+        let industries = IndustryRegistry::new();
+        let mut service = StationService::default();
+        let id = stations.insert("Hub", TileCoord { x: 32, y: 32 }, GROUND_LAYER);
+        service.ensure(id);
+
+        let at = |min_spacing: i32, prefer_far: i32| {
+            let site = pick_demand_site(
+                &terrain,
+                &stations,
+                &industries,
+                &service,
+                min_spacing,
+                prefer_far,
+                0.05,
+            )
+            .expect("a 64² map always has somewhere");
+            min_anchor_distance(site, &stations, &industries)
+        };
+
+        let early = at(8, 16);
+        let late = at(28, 56);
+        assert!(
+            late > early * 2,
+            "the late opportunity landed {late} tiles out against the early \
+             one's {early} — the world is not getting harder"
+        );
+    }
+
+    /// Distance outranks a photogenic hillside, but interest still breaks ties.
+    #[test]
+    fn distance_outweighs_routing_interest_without_erasing_it() {
+        let near_and_awkward = site_score(0.0, 10, 40, 20);
+        let far_and_dull = site_score(0.0, 40, 40, 0);
+        assert!(
+            far_and_dull > near_and_awkward,
+            "awkward-and-near ({near_and_awkward}) must not beat far ({far_and_dull})"
+        );
+
+        let far_and_awkward = site_score(0.0, 40, 40, 12);
+        assert!(
+            far_and_awkward > far_and_dull,
+            "among equally distant sites, the one that poses a routing question wins"
+        );
+
+        // …and further than asked is second best, not first: design 08 §4.2
+        // wants "far enough to require a real decision, close enough to be
+        // tempting", so the map's far corner does not win by default.
+        assert!(
+            site_score(0.0, 60, 40, 0) < far_and_dull,
+            "overshooting the preferred distance should cost a little"
+        );
+
+        // Coverage still dominates everything: an opportunity the player already
+        // serves is not an opportunity.
+        assert!(site_score(0.0, 4, 40, 0) > site_score(0.9, 60, 40, 30));
     }
 }

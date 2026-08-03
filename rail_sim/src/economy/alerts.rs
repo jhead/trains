@@ -238,15 +238,19 @@ pub fn refresh_alerts(
         );
     }
 
-    let opex_per_min: i64 = trains
+    // Per *real* minute, which is what [`ALERT_CASH_LOW_MINUTES`] counts and
+    // what the player is measuring their patience in. This used to multiply a
+    // per-minute rate by six — the ticks in a sim-minute — which was neither
+    // unit and put the warning six times too late.
+    let opex_per_real_min: i64 = trains
         .iter()
         .filter(|(_, loc)| !loc.parked)
-        .map(|(train, _)| TrainProfile::for_kind(train.kind).opex_cents.saturating_mul(6))
+        .map(|(train, _)| TrainProfile::for_kind(train.kind).opex_cents_per_real_min)
         .sum();
     // Keep TRAIN_OPEX_CENTS referenced for API stability / docs.
     let _ = TRAIN_OPEX_CENTS;
-    if opex_per_min > 0 {
-        let reserve = opex_per_min.saturating_mul(ALERT_CASH_LOW_MINUTES);
+    if opex_per_real_min > 0 {
+        let reserve = opex_per_real_min.saturating_mul(ALERT_CASH_LOW_MINUTES);
         if money.cents() < reserve {
             let key = AlertKey::CashLow;
             active.push(key);

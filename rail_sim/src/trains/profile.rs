@@ -17,9 +17,16 @@ pub struct TrainProfile {
     pub curve_div: u16,
     /// Absolute grade above this is refused (pathfinding + advance).
     pub max_grade: u8,
-    /// Operating cost in cents per **sim-minute**, spread smoothly across ticks
-    /// by [`crate::economy::apply_train_opex`].
-    pub opex_cents: i64,
+    /// Operating cost in cents per **real minute**, spread smoothly across
+    /// ticks by [`crate::economy::apply_train_opex`]. See
+    /// [`crate::economy::opex`] for which minute this is — the crate has two,
+    /// 640 apart, and naming the wrong one made every running cost inert.
+    ///
+    /// Sized against what a train earns rather than what it cost: a transit
+    /// working a good line grosses around `$1,300` a minute, so `$140` of that
+    /// is the crew and the coal. Rolling stock that sits idle on a siding is
+    /// therefore a slow leak, which is the point (design 08 §3.3).
+    pub opex_cents_per_real_min: i64,
     /// Ticks to wait at a stop after arrival before taking new work.
     pub dwell_ticks: u16,
 }
@@ -30,7 +37,7 @@ pub const TRANSIT_PROFILE: TrainProfile = TrainProfile {
     grade_tick_cost: 1,
     curve_div: 32,
     max_grade: 4, // matches track [`MAX_GRADE`](crate::track::MAX_GRADE)
-    opex_cents: 800,
+    opex_cents_per_real_min: 14_000,
     dwell_ticks: 2,
 };
 
@@ -40,7 +47,7 @@ pub const TRANSPORT_PROFILE: TrainProfile = TrainProfile {
     grade_tick_cost: 2,
     curve_div: 16,
     max_grade: 1,
-    opex_cents: 1_600,
+    opex_cents_per_real_min: 24_000,
     dwell_ticks: 6,
 };
 
@@ -185,7 +192,7 @@ mod tests {
 
     #[test]
     fn opex_and_dwell_differ() {
-        assert!(TRANSPORT_PROFILE.opex_cents > TRANSIT_PROFILE.opex_cents);
+        assert!(TRANSPORT_PROFILE.opex_cents_per_real_min > TRANSIT_PROFILE.opex_cents_per_real_min);
         assert!(TRANSPORT_PROFILE.dwell_ticks > TRANSIT_PROFILE.dwell_ticks);
     }
 }

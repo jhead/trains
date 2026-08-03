@@ -63,9 +63,15 @@ pub struct StationTierSpec {
     pub capacity: u32,
     /// Construction cost in cents.
     pub build_cents: i64,
-    /// Maintenance in cents per **sim-minute**, spread smoothly across ticks by
-    /// [`crate::economy::apply_track_maintenance`].
-    pub maint_cents: i64,
+    /// Operating cost in cents per **real minute**, spread smoothly across
+    /// ticks by [`crate::economy::apply_track_maintenance`]. See
+    /// [`crate::economy::opex`] on which minute this is and why it matters.
+    ///
+    /// Design 08 §3.3: *"an interchange nobody uses is a genuine liability"*.
+    /// About a quarter of build cost a minute, rising with tier — an
+    /// interchange on a branch nobody rides costs `$80` a minute to keep the
+    /// lights on, which is a fifth of what it cost to build, every minute.
+    pub maint_cents_per_real_min: i64,
     /// Score added per arrival (bigger stops turn service into reputation faster).
     pub arrival_gain: u8,
     /// `false` for stub ends — a terminus cannot be run through.
@@ -79,7 +85,7 @@ pub const HALT_SPEC: StationTierSpec = StationTierSpec {
     dwell_percent: 150,
     capacity: 6,
     build_cents: HALT_COST_CENTS,
-    maint_cents: 100,
+    maint_cents_per_real_min: 1_000,
     arrival_gain: 6,
     through_running: true,
 };
@@ -91,7 +97,7 @@ pub const STATION_SPEC: StationTierSpec = StationTierSpec {
     dwell_percent: 100,
     capacity: 14,
     build_cents: STATION_COST_CENTS,
-    maint_cents: 300,
+    maint_cents_per_real_min: 3_000,
     arrival_gain: 8,
     through_running: true,
 };
@@ -103,7 +109,7 @@ pub const INTERCHANGE_SPEC: StationTierSpec = StationTierSpec {
     dwell_percent: 60,
     capacity: 32,
     build_cents: INTERCHANGE_COST_CENTS,
-    maint_cents: 800,
+    maint_cents_per_real_min: 8_000,
     arrival_gain: 12,
     through_running: true,
 };
@@ -115,7 +121,7 @@ pub const TERMINUS_SPEC: StationTierSpec = StationTierSpec {
     dwell_percent: 90,
     capacity: 24,
     build_cents: TERMINUS_COST_CENTS,
-    maint_cents: 600,
+    maint_cents_per_real_min: 5_500,
     arrival_gain: 10,
     through_running: false,
 };
@@ -210,8 +216,8 @@ impl StationTier {
     }
 
     #[inline]
-    pub fn maint_cents(self) -> i64 {
-        self.spec().maint_cents
+    pub fn maint_cents_per_real_min(self) -> i64 {
+        self.spec().maint_cents_per_real_min
     }
 
     #[inline]
@@ -299,7 +305,7 @@ pub fn max_catchment(stations: &StationRegistry) -> i32 {
 pub fn station_maintenance_total(stations: &StationRegistry) -> i64 {
     stations
         .iter()
-        .map(|s| s.tier.maint_cents())
+        .map(|s| s.tier.maint_cents_per_real_min())
         .sum()
 }
 
@@ -462,7 +468,7 @@ mod tests {
             StationTier::Halt,
             HALT_COST_CENTS,
         );
-        assert_eq!(station_maintenance_total(&reg), HALT_SPEC.maint_cents);
+        assert_eq!(station_maintenance_total(&reg), HALT_SPEC.maint_cents_per_real_min);
         assert_eq!(max_catchment(&reg), HALT_SPEC.catchment);
 
         reg.insert_tier(
@@ -474,7 +480,7 @@ mod tests {
         );
         assert_eq!(
             station_maintenance_total(&reg),
-            HALT_SPEC.maint_cents + INTERCHANGE_SPEC.maint_cents
+            HALT_SPEC.maint_cents_per_real_min + INTERCHANGE_SPEC.maint_cents_per_real_min
         );
         assert_eq!(max_catchment(&reg), INTERCHANGE_SPEC.catchment);
     }

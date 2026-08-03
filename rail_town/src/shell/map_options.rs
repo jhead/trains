@@ -18,10 +18,6 @@ use rail_sim::{
     StationService, TrackTerrain, MAX_GRADE, MOUNTAIN_HEIGHT_MIN, STARTING_CASH_CENTS,
 };
 
-use crate::palette::{
-    GRASS_D, GRASS_M, HILL_L, HILL_M, ROCK_L, ROCK_M, SAND_D, SNOW, WATER_D, WATER_L, WATER_M,
-};
-
 /// Preview box edge in UI px. Every map size scales into it by a whole number
 /// (48→6×, 64→4×, 96→3×, 128→2×), so the schematic never resamples.
 pub const PREVIEW_BOX: f32 = 288.0;
@@ -709,34 +705,12 @@ pub fn schematic_rgba(map: &MapGrid) -> Vec<u8> {
     out
 }
 
+/// The world's own kind+height -> colour contract, so the preview a player
+/// commits to is the ground they then stand on. This used to keep a private
+/// copy, which drifted the moment the band ladder was re-keyed — snowy peaks
+/// and the old water depths in the preview, neither of them on the map.
 fn schematic_color(kind: TerrainKind, height: i8) -> Color {
-    match kind {
-        TerrainKind::Water => match height {
-            ..=-6 => WATER_D,
-            -5..=-3 => WATER_M,
-            _ => WATER_L,
-        },
-        TerrainKind::Beach => SAND_D,
-        TerrainKind::Plains => {
-            if height <= 3 {
-                GRASS_D
-            } else {
-                GRASS_M
-            }
-        }
-        TerrainKind::Hills => {
-            if height <= 8 {
-                HILL_M
-            } else {
-                HILL_L
-            }
-        }
-        TerrainKind::Mountain => match height {
-            ..=13 => ROCK_M,
-            14..=15 => ROCK_L,
-            _ => SNOW,
-        },
-    }
+    crate::map::terrain_color(kind, height)
 }
 
 fn srgb_bytes(color: Color) -> [u8; 3] {

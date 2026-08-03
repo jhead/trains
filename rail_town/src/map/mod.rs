@@ -25,6 +25,10 @@ use terrain::{rebuild_dirty_terrain, setup_terrain, TerrainDirty};
 pub use camera::{CameraFocusRequest, MapCamera};
 pub use map_view::MapViewState;
 pub use schematic::SCHEMATIC_OVERLAY_Z;
+// The one kind+height -> colour contract, for every schematic read of the
+// world — the Map View plate and the New Map preview must not disagree with
+// the ground they predict.
+pub use terrain::material::terrain_color;
 
 /// Inserts a generated [`MapGrid`] and registers spawn / camera systems.
 pub struct MapPlugin {

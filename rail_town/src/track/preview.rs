@@ -111,30 +111,6 @@ fn preview_build_proposed(
     proposed: ProposedPath,
 ) -> BuildPreview {
     let balance = money.cents();
-    if proposed.not_straight {
-        return BuildPreview {
-            tiles: proposed
-                .tiles
-                .iter()
-                .map(|&tile| GhostTile {
-                    tile,
-                    kind: TileGhostKind::Invalid,
-                    valid: false,
-                })
-                .collect(),
-            new_tile_count: 0,
-            bridge_count: 0,
-            total_cost_cents: 0,
-            balance_after_cents: balance,
-            can_commit: false,
-            reject: Some(RejectInfo {
-                message: "Need a run along one of the 16 directions".into(),
-                tiles: vec![proposed.endpoint],
-            }),
-            endpoint: proposed.endpoint,
-        };
-    }
-
     let mut reject: Option<RejectInfo> = None;
     if let Err(err) = path_bridge_spans_ok(terrain, &proposed.tiles) {
         reject = Some(RejectInfo {

@@ -431,7 +431,7 @@ fn commit_build(
             }
             state.anchor = Some(to);
         }
-        PathMode::Autofill | PathMode::ExactStraight => {
+        PathMode::Autofill => {
             if from == to {
                 if network.id_at(to, GROUND_LAYER).is_none() {
                     buffer.push(CommandKind::PlaceTrack(PlaceTrack {

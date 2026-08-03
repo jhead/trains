@@ -92,7 +92,6 @@ pub fn propose_smart(
         return Some(ProposedPath {
             tiles: vec![from],
             endpoint: to,
-            not_straight: false,
         });
     }
     // A destination that can neither be built on nor already carries track is
@@ -244,7 +243,6 @@ pub fn propose_smart(
     Some(ProposedPath {
         tiles,
         endpoint: to,
-        not_straight: false,
     })
 }
 

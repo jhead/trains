@@ -49,8 +49,6 @@ pub enum PathMode {
     /// Snap the endpoint onto the nearest of the sixteen rays (Shift) —
     /// brief 04 §2.2's "Straight": one direction, terrain be damned.
     Autofill,
-    /// Require the drag to land exactly on one of the sixteen.
-    ExactStraight,
     /// Exactly the cursor tile (Ctrl).
     SingleTile,
 }
@@ -68,8 +66,6 @@ pub struct ProposedPath {
     pub tiles: Vec<TileCoord>,
     /// Endpoint after snapping (equals `to` when no snap applied).
     pub endpoint: TileCoord,
-    /// True when [`PathMode::ExactStraight`] and the drag is off every ray.
-    pub not_straight: bool,
 }
 
 /// Propose tiles from `from` toward `to` under `mode`.
@@ -82,28 +78,11 @@ pub fn propose_path(from: TileCoord, to: TileCoord, mode: PathMode) -> ProposedP
         PathMode::SingleTile => ProposedPath {
             tiles: vec![to],
             endpoint: to,
-            not_straight: false,
-        },
-        PathMode::ExactStraight => match straight_line(from, to) {
-            Some(tiles) => ProposedPath {
-                endpoint: to,
-                tiles,
-                not_straight: false,
-            },
-            None => ProposedPath {
-                tiles: vec![from],
-                endpoint: to,
-                not_straight: true,
-            },
         },
         PathMode::Autofill | PathMode::Smart | PathMode::ContourLock => {
             let endpoint = snap_to_direction(from, to);
             let tiles = straight_line(from, endpoint).unwrap_or_else(|| vec![from]);
-            ProposedPath {
-                tiles,
-                endpoint,
-                not_straight: false,
-            }
+            ProposedPath { tiles, endpoint }
         }
     }
 }
@@ -197,7 +176,6 @@ mod tests {
         assert_eq!(snap_to_direction(from, to), to);
         let p = propose_path(from, to, PathMode::Autofill);
         assert_eq!(p.tiles.len(), 4);
-        assert!(!p.not_straight);
     }
 
     #[test]
@@ -238,19 +216,6 @@ mod tests {
             vec![tile(0, 0), tile(2, 1), tile(4, 2), tile(6, 3)],
             "a half-step run is sparse - the crossed tiles stay bare"
         );
-    }
-
-    #[test]
-    fn exact_straight_accepts_a_half_step_and_still_rejects_the_rest() {
-        let from = tile(0, 0);
-        let p = propose_path(from, tile(2, 1), PathMode::ExactStraight);
-        assert!(!p.not_straight, "a knight's move is now a direction");
-        assert_eq!(p.tiles, vec![tile(0, 0), tile(2, 1)]);
-
-        // (3, 1) lies along none of the sixteen.
-        let q = propose_path(from, tile(3, 1), PathMode::ExactStraight);
-        assert!(q.not_straight);
-        assert_eq!(q.tiles, vec![from]);
     }
 
     #[test]

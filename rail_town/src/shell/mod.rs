@@ -82,9 +82,9 @@ use bevy::prelude::*;
 use rail_sim::{
     AlertBoard, BorderRegistry, CommandBuffer, CommandHistory, ComplaintFeed, DemandSpawner,
     DistrictFlow, EventDirector, GoalBoard, HouseholdRegistry, IndustryRegistry, JobBoard,
-    LineRegistry, MaintenanceAccrual, Money, MoneyLedger, Peep, PeepBudget, PeepFocus,
-    StationRegistry, StationService, TileOccupancy, TownDensity, TrackNetwork, Train, TrainYard,
-    WorldAnchorsSeeded,
+    LineRegistry, MaintenanceAccrual, MapDescriptor, Money, MoneyLedger, Peep, PeepBudget,
+    PeepFocus, PeepSpawnState, StationRegistry, StationService, TileOccupancy, TownDensity,
+    TrackNetwork, Train, TrainYard, WorldAnchorsSeeded,
 };
 
 use crate::inspect::Selection;
@@ -333,8 +333,25 @@ fn shell_menu_visible(state: Res<State<ShellState>>, panel: Res<SettingsPanel>) 
 
 /// Replace the boot map with the shell's, before anything draws it.
 fn install_boot_world(mut commands: Commands, pending: Res<PendingWorld>) {
-    commands.insert_resource(pending.options.generate());
+    let map = pending.options.generate();
+    commands.insert_resource(map_descriptor_for(&pending.options, &map));
+    commands.insert_resource(map);
     commands.insert_resource(goal_board_for(&pending.options));
+}
+
+/// How this world was made, for the sim to record in a save.
+///
+/// A save stores the terrain it plays on, but the *map* — the grid the art and
+/// the generator's feature notes come from — is rebuilt on load from the seed
+/// and these knobs rather than stored twice. Design 02 §5 promises a seed
+/// reproduces a world; this is that promise being spent. The knobs travel packed
+/// because `rail_sim` cannot see `rail_map`.
+///
+/// Sized from the grid that was actually generated, not from
+/// [`MapOptions::size`], so the two can never disagree.
+fn map_descriptor_for(options: &MapOptions, map: &rail_map::MapGrid) -> MapDescriptor {
+    MapDescriptor::new(options.seed, map.width, map.height)
+        .with_knobs(options.gen_options().pack())
 }
 
 /// The goal board a world with these options starts from.
@@ -514,10 +531,15 @@ fn dispatch_menu_actions(
 /// - **[`BorderRegistry`].** Trains mid-crossing live in here as plain data, and
 ///   they come home on a due tick regardless of which world is on screen. A
 ///   crossing begun in the old world would land rolling stock on the new one.
-/// - **[`rail_sim::peeps::PeepSpawnState`].** It remembers which station ids it
-///   has already populated. A fresh [`StationRegistry`] hands out the same ids
-///   from one again, so every new station read as "already served, nobody is
-///   moving back in" and the new map got no residents at all.
+/// - **[`PeepSpawnState`].** It remembers which station ids it has already
+///   populated. A fresh [`StationRegistry`] hands out the same ids from one
+///   again, so every new station read as "already served, nobody is moving back
+///   in" and the new map got no residents at all.
+///
+/// The rest of the peep slice — [`HouseholdRegistry`], [`DistrictFlow`],
+/// [`PeepBudget`], [`PeepFocus`], [`ComplaintFeed`] — goes with it, because a
+/// family, a district's flow or a line of Town Talk all name stations by an id
+/// the new world will hand out again to somewhere else entirely.
 #[allow(clippy::too_many_arguments)]
 fn apply_pending_world(
     mut commands: Commands,
@@ -544,6 +566,7 @@ fn apply_pending_world(
         commands.entity(entity).despawn();
     }
 
+    commands.insert_resource(map_descriptor_for(&options, &map));
     commands.insert_resource(map_options::track_terrain_from(&map));
     commands.insert_resource(Money::new(options.cash.cents()));
     commands.insert_resource(CommandBuffer::default());
@@ -564,7 +587,7 @@ fn apply_pending_world(
     commands.insert_resource(TownDensity::default());
     commands.insert_resource(BorderRegistry::default());
     // The town's people, what they remember, and what they said about it.
-    commands.insert_resource(rail_sim::peeps::PeepSpawnState::default());
+    commands.insert_resource(PeepSpawnState::default());
     commands.insert_resource(HouseholdRegistry::default());
     commands.insert_resource(DistrictFlow::default());
     commands.insert_resource(PeepBudget::default());
@@ -743,6 +766,34 @@ mod tests {
         query.iter(app.world()).count()
     }
 
+    /// Configure and Begin, then let the state transition install the world.
+    fn begin(app: &mut App, options: MapOptions) {
+        go_to(app, ShellState::NewMap);
+        app.world_mut().resource_mut::<DraftMapOptions>().0 = options;
+        app.world_mut()
+            .write_message(MenuActivated(MenuAction::Begin));
+        app.update();
+        app.update();
+    }
+
+    /// A setup no default would land on: every knob off its stock value, and a
+    /// Small map so the generator is cheap to run twice.
+    fn distinctive(seed: u64) -> MapOptions {
+        MapOptions {
+            seed,
+            size: MapSize::Small,
+            terrain: TerrainStyle::Rugged,
+            water: WaterStyle::Riverlands,
+            resources: ResourceSpread::Clustered,
+            ..MapOptions::default()
+        }
+    }
+
+    /// The map's identity: seed, size, and every tile.
+    fn fingerprint(map: &rail_map::MapGrid) -> (u64, u32, u32, Vec<rail_map::Tile>) {
+        (map.seed, map.width, map.height, map.tiles().to_vec())
+    }
+
     #[test]
     fn the_plugin_boots_into_a_title_screen_over_a_generated_world() {
         let mut app = test_app();
@@ -841,6 +892,10 @@ mod tests {
     /// world holding a `TrackId` the new (empty) network had never heard of:
     /// unable to move, unable to be routed, and — there being no sell command —
     /// unable to be got rid of.
+    ///
+    /// The peep slice is checked here in full for the same reason. Every one of
+    /// those resources keys off a station id, and a new world hands the same ids
+    /// out again to entirely different places.
     #[test]
     fn a_new_map_leaves_nothing_of_the_old_world_behind() {
         let mut app = test_app();
@@ -864,16 +919,40 @@ mod tests {
             0,
         ));
         app.world_mut().insert_resource(BorderRegistry::new(1234));
-        let mut spawn_state = rail_sim::peeps::PeepSpawnState::default();
+        let mut spawn_state = PeepSpawnState {
+            next_id: 42,
+            ..PeepSpawnState::default()
+        };
         spawn_state.spawned_for.insert(rail_sim::StationId(1));
         app.world_mut().insert_resource(spawn_state);
 
-        go_to(&mut app, ShellState::NewMap);
-        app.world_mut().resource_mut::<DraftMapOptions>().0.seed = 555;
-        app.world_mut()
-            .write_message(MenuActivated(MenuAction::Begin));
-        app.update();
-        app.update();
+        // The rest of the town: a family at home, a district moving people, a
+        // level-of-detail budget, and the camera the budget was biased toward.
+        let mut households = HouseholdRegistry::new();
+        households.insert(
+            rail_sim::TileCoord { x: 4, y: 5 },
+            rail_sim::StationId(1),
+            0,
+        );
+        app.world_mut().insert_resource(households);
+        let mut flow = DistrictFlow::default();
+        flow.entry(rail_sim::StationId(1)).residents = 30;
+        flow.request_trip(rail_sim::StationId(1), rail_sim::StationId(2));
+        app.world_mut().insert_resource(flow);
+        let mut budget = PeepBudget::default();
+        budget.max_detailed = 9;
+        app.world_mut().insert_resource(budget);
+        let mut focus = PeepFocus::default();
+        focus.look_at(rail_sim::TileCoord { x: 4, y: 4 }, 3);
+        app.world_mut().insert_resource(focus);
+
+        begin(
+            &mut app,
+            MapOptions {
+                seed: 555,
+                ..MapOptions::default()
+            },
+        );
 
         assert_eq!(app.world().resource::<rail_map::MapGrid>().seed, 555);
         assert_eq!(
@@ -891,16 +970,106 @@ mod tests {
             BorderRegistry::default(),
             "a crossing begun in the old world must not land stock in this one"
         );
+        let spawn_state = app.world().resource::<PeepSpawnState>();
         assert!(
-            app.world()
-                .resource::<rail_sim::peeps::PeepSpawnState>()
-                .spawned_for
-                .is_empty(),
+            spawn_state.spawned_for.is_empty(),
             "station ids start again from one: a stale spawn record leaves the \
              new map with no residents at all"
         );
+        assert_eq!(spawn_state.next_id, 0, "peep ids start again with the town");
+        assert_eq!(
+            app.world().resource::<HouseholdRegistry>().len(),
+            0,
+            "a family cannot still live at a station the new world has never built"
+        );
+        let flow = app.world().resource::<DistrictFlow>();
+        assert_eq!(flow.iter().count(), 0);
+        assert!(
+            flow.pending_trips().is_empty(),
+            "trips requested in the old world would be drained into this one's \
+             job board"
+        );
+        assert_eq!(*app.world().resource::<PeepBudget>(), PeepBudget::default());
+        assert_eq!(*app.world().resource::<PeepFocus>(), PeepFocus::default());
         assert!(app.world().resource::<TownDensity>().is_empty());
         assert!(app.world().resource::<ComplaintFeed>().is_empty());
+    }
+
+    /// Seed sharing (design 02 §5) only reproduces a world if the *settings*
+    /// travel with the seed — the options steer the generator now, so the same
+    /// number with different knobs is a different map. Beginning a world
+    /// therefore records how it was made, right next to the world.
+    #[test]
+    fn beginning_a_map_records_the_settings_that_made_it() {
+        let mut app = test_app();
+        app.update();
+        begin(&mut app, distinctive(31_337));
+
+        let descriptor = *app.world().resource::<MapDescriptor>();
+        let map = app.world().resource::<rail_map::MapGrid>();
+        assert_eq!(descriptor.seed, 31_337);
+        assert_eq!(
+            (descriptor.width, descriptor.height),
+            (map.width, map.height),
+            "the descriptor is sized from the grid, so the two cannot disagree"
+        );
+
+        let knobs = descriptor.gen.knobs.expect("the world says how it was made");
+        let options = rail_map::MapGenOptions::unpack(knobs).expect("knobs unpack");
+        assert_eq!(options.size, rail_map::MapSize::Small);
+        assert_eq!(options.terrain, rail_map::TerrainStyle::Rugged);
+        assert_eq!(options.water, rail_map::WaterStyle::Riverlands);
+        assert_eq!(options.resources, rail_map::ResourceSpread::Clustered);
+    }
+
+    /// The map the save was played on, back tile for tile.
+    ///
+    /// A save carries the terrain but not the `MapGrid` — the seed and the
+    /// packed knobs stand in for it, and the load regenerates. This is the whole
+    /// reason the knobs are recorded, so it is worth proving against a world
+    /// that is genuinely on screen at the time and genuinely different.
+    #[test]
+    fn loading_a_save_brings_back_the_map_it_was_played_on() {
+        rail_sim::save::set_save_root(
+            std::env::temp_dir().join(format!("rail_town_shell_saves_{}", std::process::id())),
+        );
+        let slot = rail_sim::save::SaveSlot::named("shell map reload").expect("valid name");
+        let _ = rail_sim::save::delete_slot(&slot);
+
+        let mut app = test_app();
+        app.update();
+
+        begin(&mut app, distinctive(24_601));
+        let played = fingerprint(app.world().resource::<rail_map::MapGrid>());
+        rail_sim::save::save_to_slot(app.world(), &slot).expect("save");
+
+        // Somebody else's world, on screen, so nothing left over can pass for
+        // the saved one.
+        begin(
+            &mut app,
+            MapOptions {
+                seed: 11,
+                size: MapSize::Small,
+                ..MapOptions::default()
+            },
+        );
+        assert_ne!(
+            fingerprint(app.world().resource::<rail_map::MapGrid>()),
+            played
+        );
+
+        save::request_load(
+            &mut app.world_mut().resource_mut::<ShellSaveRequest>(),
+            slot.clone(),
+        );
+        app.update();
+
+        assert_eq!(
+            fingerprint(app.world().resource::<rail_map::MapGrid>()),
+            played,
+            "a load must give back the world that was saved, knobs and all"
+        );
+        let _ = rail_sim::save::delete_slot(&slot);
     }
 
     #[test]

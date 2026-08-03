@@ -18,12 +18,14 @@
 //! frame. Loading is synchronous by nature: there is nothing to keep running.
 //!
 //! Restoring replaces the world's contents but not its *art*: terrain chunks are
-//! composited from [`rail_map::MapGrid`], so a load has to mark them dirty. That
-//! hook lives outside this module — see [`super::PendingWorld`] and the
-//! `WorldRebuildSet` docs.
+//! composited from [`rail_map::MapGrid`], so a load has to put the right grid
+//! back and mark them dirty. The grid is rebuilt here by
+//! [`regenerate_map_from_save`]; the dirty flag is raised outside this module —
+//! see [`super::PendingWorld`] and the `WorldRebuildSet` docs.
 
 use bevy::prelude::*;
 use rail_sim::save::{self, SaveSlot, SlotInfo};
+use rail_sim::MapDescriptor;
 
 /// What the shell last heard back from the save layer. Drives the one-line
 /// confirmation under the pause menu, so a save is visibly acknowledged.
@@ -126,6 +128,7 @@ pub fn service_save_requests(world: &mut World) {
         message = Some(match save::load_from_slot(&slot) {
             Ok(snapshot) => {
                 let report = snapshot.restore(world);
+                regenerate_map_from_save(world);
                 loaded = true;
                 describe_restore(&slot, &report)
             }
@@ -142,6 +145,43 @@ pub fn service_save_requests(world: &mut World) {
             None => status.clear(),
         }
     }
+}
+
+/// Put the loaded world's map back, generated from the seed and knobs it saved.
+///
+/// A save stores the terrain the sim plays on but not the [`rail_map::MapGrid`]
+/// it came from — that would be the same tiles twice, and the grid carries the
+/// generator's own notes (sites, river crossings, ridge passes) besides. It
+/// stores the seed and the packed generator options instead, which is enough to
+/// make the same map again. That is design 02 §5's promise — a seed and its
+/// settings reproduce a world — being spent rather than merely stated.
+///
+/// The restored `TrackTerrain` is left exactly as the save wrote it. The grid is
+/// art and generator notes; the terrain is what the player built on, and if the
+/// generator ever moves under a save the world must still be the one that was
+/// saved. Only the look would drift, which is what `GENERATOR_VERSION` records.
+fn regenerate_map_from_save(world: &mut World) {
+    let Some(descriptor) = world.get_resource::<MapDescriptor>().copied() else {
+        return;
+    };
+    // No knobs means the save never recorded how its world was made. Guessing a
+    // setup would hand the player a different map than the one they saved, so
+    // the grid already on screen stays.
+    let Some(options) = descriptor.gen.knobs.and_then(rail_map::MapGenOptions::unpack) else {
+        return;
+    };
+    if descriptor.width < 2 || descriptor.height < 2 {
+        return;
+    }
+    // Sized from the descriptor rather than from the packed `size`, so a world
+    // that was never square — a test map, a neighbour's chunk — comes back at
+    // its own dimensions instead of being squared off.
+    world.insert_resource(rail_map::generate_map_with(
+        descriptor.width,
+        descriptor.height,
+        descriptor.seed,
+        options,
+    ));
 }
 
 /// Quick and named slots are explicit writes; the autosave slot rotates itself.

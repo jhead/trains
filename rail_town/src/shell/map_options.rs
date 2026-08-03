@@ -2,14 +2,13 @@
 //!
 //! Option list follows [`docs/design/02-world-and-terrain.md`](../../../docs/design/02-world-and-terrain.md) §5.
 //!
-//! **Generator gap:** [`rail_map::generate_map`] currently takes `(width, height,
-//! seed)` only — it has no terrain / water / resource knobs. Rather than draw a
-//! control that does nothing, [`MapOptions::effective_seed`] folds every non-size
-//! choice into the generator seed, so changing *any* option genuinely produces a
-//! different world. The readouts beside the preview are then **measured from the
-//! map that was actually generated**, never predicted from the labels. When the
-//! generator grows real parameters, swap [`MapOptions::generate`] over to them and
-//! the rest of the screen is unchanged.
+//! Every row here steers [`rail_map::generate`] for real — see
+//! [`MapOptions::gen_options`]. [`MapOptions::effective_seed`] survives from
+//! when they did not, and now names the *world* for things that need one
+//! identifier for a whole setup: the share code and the goal set.
+//!
+//! The readouts beside the preview are **measured from the map that was actually
+//! generated**, never predicted from the labels.
 
 use bevy::prelude::Color;
 use rail_map::{MapGrid, TerrainKind};
@@ -288,7 +287,11 @@ impl MapOptions {
     }
 
     /// The generator knobs these options describe.
-    fn gen_options(&self) -> rail_map::MapGenOptions {
+    ///
+    /// Public because a save has to record them: `rail_sim` cannot see
+    /// `rail_map`, so [`rail_map::MapGenOptions::pack`] is how the setup travels
+    /// into [`rail_sim::MapDescriptor`] and back out again on a load.
+    pub fn gen_options(&self) -> rail_map::MapGenOptions {
         rail_map::MapGenOptions {
             size: rail_map::MapSize::from_index(self.size.index()).unwrap_or_default(),
             terrain: rail_map::TerrainStyle::from_index(self.terrain.index()).unwrap_or_default(),
@@ -405,12 +408,12 @@ impl OptionField {
     }
 
     /// `Some(note)` when the option is recorded but the generator ignores it.
+    ///
+    /// Nothing is, any more — every row steers the generator and every row is
+    /// carried in the save. The hook stays because the honest thing to do with a
+    /// control that does not work yet is to say so on the row.
     pub fn pending_note(self) -> Option<&'static str> {
-        match self {
-            // The generator has no shape parameters yet — the choice re-rolls the
-            // world through the seed instead of steering it. See the module docs.
-            _ => None,
-        }
+        None
     }
 }
 

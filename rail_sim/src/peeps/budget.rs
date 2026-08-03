@@ -95,7 +95,10 @@ pub struct PeepBudget {
     pub max_detailed: usize,
     /// Ticks between reshuffles.
     pub rebalance_every: u32,
-    ticks: u32,
+    /// Countdown to the next reshuffle. Not part of this type's API — it is
+    /// crate-visible only so [`crate::save::BudgetSnapshot`] can destructure
+    /// every field of this struct and fail to compile when one is added.
+    pub(crate) ticks: u32,
     /// How many peeps were full-detail after the last reshuffle (read-only).
     pub detailed: usize,
     /// How many peeps are abstracted into district flow (read-only).

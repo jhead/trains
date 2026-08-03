@@ -63,8 +63,13 @@
 //! | [`ClockSnapshot`] | `SimClock` | new clock fields |
 //! | [`BudgetSnapshot`] | `PeepBudget` | new level-of-detail tunables |
 //!
-//! Each restores with `..Default::default()`, so a new field on the sim type
-//! keeps compiling — it is simply not carried until it is added above.
+//! **The compiler is what enforces that.** Every one of them destructures the
+//! sim type field by field, in both directions, with no `..` rest pattern — so a
+//! new field on the sim type is a build error at the mirror until someone
+//! decides whether it belongs in the blob. Fields deliberately left out carry a
+//! comment saying why. They used to restore with `..Default::default()`, which
+//! is exactly how `StationServiceScore::peep_waiting` came to be dropped by
+//! every save without a word.
 //!
 //! Registries whose ids can have holes (stations after a demolition, households
 //! after a family leaves) are rebuilt by replaying inserts and stepping the

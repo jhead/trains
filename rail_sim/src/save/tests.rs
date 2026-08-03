@@ -18,8 +18,8 @@ use crate::lines::LineRegistry;
 use crate::money::Money;
 use crate::peeps::{
     BodyType, ComplaintEntry, ComplaintFeed, DistrictFlow, HouseholdRegistry, Journey,
-    JourneyMemory, JourneyOutcome, JourneyRecord, JourneyStage, Mood, Peep, PeepDetail, PeepId,
-    PeepPosition, PeepSpawnState, Routine, TalkKind, WaitingAtStation,
+    JourneyMemory, JourneyOutcome, JourneyRecord, JourneyStage, Mood, Peep, PeepBudget, PeepDetail,
+    PeepId, PeepPosition, PeepSpawnState, Routine, TalkKind, WaitingAtStation,
 };
 use crate::stations::{
     GoodKind, IndustryRegistry, StationRegistry, StationService, StationServiceScore, StationTier,
@@ -38,6 +38,11 @@ use super::storage::use_test_root;
 const MAP_W: u32 = 12;
 const MAP_H: u32 = 8;
 const MAP_SEED: u64 = 4_242;
+/// A packed `rail_map::MapGenOptions` — opaque here, because `rail_sim` cannot
+/// see `rail_map`. This pattern is Standard / Rugged / Riverlands / Scattered,
+/// and is deliberately not the stock setup: a save that only ever carried the
+/// default would not prove the knobs travel.
+const MAP_KNOBS: u8 = 0b0110_1001;
 /// Odd, so the job spawner picks two different stations from a two-stop world.
 const SIM_TICK: u64 = 4_311;
 
@@ -64,7 +69,7 @@ fn lived_in_world() -> World {
     let terrain = terrain();
 
     // --- map -------------------------------------------------------------
-    world.insert_resource(MapDescriptor::new(MAP_SEED, MAP_W, MAP_H));
+    world.insert_resource(MapDescriptor::new(MAP_SEED, MAP_W, MAP_H).with_knobs(MAP_KNOBS));
 
     // --- track -----------------------------------------------------------
     let mut network = TrackNetwork::new();
@@ -327,6 +332,14 @@ fn lived_in_world() -> World {
     }
     flow.request_trip(westbrook, eastgate);
 
+    // A level-of-detail budget the player's machine settled on, both tunables
+    // away from their defaults so a mirror that dropped one would show.
+    let budget = PeepBudget {
+        max_detailed: 12,
+        rebalance_every: 7,
+        ..PeepBudget::default()
+    };
+
     let mut feed = ComplaintFeed::default();
     feed.push(ComplaintEntry {
         kind: TalkKind::Complaint,
@@ -389,6 +402,7 @@ fn lived_in_world() -> World {
     world.insert_resource(spawn_state);
     world.insert_resource(households);
     world.insert_resource(flow);
+    world.insert_resource(budget);
     world.insert_resource(feed);
     world.insert_resource(jobs);
     world.insert_resource(ledger);
@@ -414,15 +428,19 @@ fn lived_in_world() -> World {
     {
         let mut service = world.resource_mut::<StationService>();
         service.tick = SIM_TICK;
+        // `peep_waiting` is the named residents standing on the platform, and it
+        // is deliberately different from `waiting_passengers` at both stops: the
+        // two have different writers, and a mirror that dropped one of them
+        // would still look right if they matched.
         service.scores.insert(
             eastgate,
             StationServiceScore {
                 deliveries: 27,
                 last_arrival_tick: 4_180,
                 waiting_passengers: 3,
+                peep_waiting: 6,
                 score: 74,
                 tier: StationTier::Interchange,
-                ..Default::default()
             },
         );
         service.scores.insert(
@@ -431,9 +449,9 @@ fn lived_in_world() -> World {
                 deliveries: 4,
                 last_arrival_tick: 3_002,
                 waiting_passengers: 9,
+                peep_waiting: 2,
                 score: 21,
                 tier: StationTier::Halt,
-                ..Default::default()
             },
         );
         // The demolished stop's score is still on the board — demolition does
@@ -624,6 +642,47 @@ fn trains_keep_position_cargo_and_assignment() {
     assert_eq!(query.iter(&fresh).count(), 2);
 }
 
+/// Seed sharing is only a promise if the *settings* travel with the seed.
+///
+/// The generator's knobs steer it for real, so a save that recorded only that a
+/// world had been generated recorded nothing anyone could regenerate from. They
+/// go through the whole pipe here — capture, encode, decode, restore — because
+/// the app on the other end unpacks them and makes the map again.
+#[test]
+fn the_generator_knobs_travel_with_the_seed() {
+    let world = lived_in_world();
+    let snapshot = WorldSnapshot::capture(&world);
+    assert_eq!(snapshot.map.gen.knobs, Some(MAP_KNOBS));
+
+    let bytes = encode_save(&SaveMeta::from_snapshot(&snapshot, "Knobs"), &snapshot)
+        .expect("encode");
+    let (_, loaded) = decode_save(&bytes).expect("decode");
+    assert_eq!(loaded.map.gen.knobs, Some(MAP_KNOBS));
+
+    let mut fresh = World::new();
+    loaded.restore(&mut fresh);
+    let descriptor = *fresh.resource::<MapDescriptor>();
+    assert_eq!(descriptor.seed, MAP_SEED);
+    assert_eq!(descriptor.width, MAP_W);
+    assert_eq!(descriptor.height, MAP_H);
+    assert_eq!(
+        descriptor.gen.knobs,
+        Some(MAP_KNOBS),
+        "a loaded world must know how it was generated, not merely that it was"
+    );
+}
+
+/// A world nobody described stays undescribed. Inventing a setup for it would
+/// have a loader regenerate a map the player never played.
+#[test]
+fn a_world_that_never_declared_its_knobs_does_not_acquire_any() {
+    let mut world = World::new();
+    world.insert_resource(MapDescriptor::new(7, MAP_W, MAP_H));
+    let snapshot = WorldSnapshot::capture(&world);
+    assert_eq!(snapshot.map.gen.knobs, None);
+    assert_eq!(snapshot.map.seed, 7);
+}
+
 #[test]
 fn map_terrain_and_seed_come_back() {
     let world = lived_in_world();
@@ -675,6 +734,74 @@ fn money_clock_and_economy_come_back() {
     );
     assert_eq!(fresh.resource::<StationService>().tick, SIM_TICK);
     assert_eq!(fresh.resource::<StationService>().score(StationId(1)).score, 74);
+}
+
+/// Every field of the three hand-written mirrors, through the whole pipe.
+///
+/// These are the sections that cannot embed their sim type directly, so each is
+/// a list someone has to remember to extend. `peep_waiting` is the field that
+/// proves the point: it was added to `StationServiceScore`, the mirror restored
+/// with `..Default::default()`, and every save since had quietly forgotten how
+/// many named residents were standing on each platform. Both halves now
+/// destructure the source type, so the next one is a build error instead.
+#[test]
+fn the_hand_written_mirrors_carry_every_field_they_should() {
+    let world = lived_in_world();
+    let snapshot = WorldSnapshot::capture(&world);
+
+    // Survive the bytes, not just the clone.
+    let bytes = encode_save(&SaveMeta::from_snapshot(&snapshot, "Mirrors"), &snapshot)
+        .expect("encode");
+    let (_, loaded) = decode_save(&bytes).expect("decode");
+
+    let eastgate = loaded
+        .stations
+        .service
+        .iter()
+        .find(|s| s.station == StationId(1))
+        .expect("Eastgate's score");
+    assert_eq!(eastgate.deliveries, 27);
+    assert_eq!(eastgate.last_arrival_tick, 4_180);
+    assert_eq!(eastgate.waiting_passengers, 3);
+    assert_eq!(eastgate.peep_waiting, 6);
+    assert_eq!(eastgate.score, 74);
+    assert_eq!(eastgate.tier, StationTier::Interchange);
+
+    assert!(loaded.clock.paused);
+    assert_eq!(loaded.clock.speed_multiplier, 3);
+    assert_eq!(loaded.peeps.budget.max_detailed, 12);
+    assert_eq!(loaded.peeps.budget.rebalance_every, 7);
+
+    let mut fresh = World::new();
+    loaded.restore(&mut fresh);
+
+    let restored = fresh.resource::<StationService>().score(StationId(1));
+    assert_eq!(
+        restored.peep_waiting, 6,
+        "the platform's named residents must come back, not default to nobody"
+    );
+    assert_eq!(
+        restored.total_waiting(),
+        9,
+        "the blended queue is what crowding is charged from"
+    );
+    assert_eq!(restored.waiting_passengers, 3);
+    assert_eq!(restored.deliveries, 27);
+    assert_eq!(restored.last_arrival_tick, 4_180);
+    assert_eq!(restored.score, 74);
+    assert_eq!(restored.tier, StationTier::Interchange);
+
+    let clock = *fresh.resource::<SimClock>();
+    assert!(clock.paused);
+    assert_eq!(clock.speed_multiplier, 3);
+
+    // The budget's tunables are restored; its readouts and its rebalance
+    // countdown deliberately are not, and start fresh.
+    let budget = *fresh.resource::<PeepBudget>();
+    assert_eq!(budget.max_detailed, 12);
+    assert_eq!(budget.rebalance_every, 7);
+    assert_eq!(budget.detailed, 0);
+    assert_eq!(budget.abstracted, 0);
 }
 
 #[test]

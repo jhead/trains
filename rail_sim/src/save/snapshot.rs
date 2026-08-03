@@ -58,7 +58,7 @@ use crate::WorldAnchorsSeeded;
 /// A save written by a different version is refused with
 /// [`SaveError::VersionMismatch`](super::SaveError::VersionMismatch); there is
 /// no silent partial read.
-pub const SCHEMA_VERSION: u16 = 2;
+pub const SCHEMA_VERSION: u16 = 3;
 
 /// Terrain generator revision recorded with the map.
 ///
@@ -89,17 +89,29 @@ pub struct MapSnapshot {
 
 /// Knobs that shaped the map, beyond seed and size.
 ///
-/// MVP generation takes only `(width, height, seed)`; this struct is where new
-/// generator options go so old saves keep loading with a version bump.
+/// The generator's options really steer it now — terrain style, water style,
+/// resource spread — so a save that recorded only *that* a world was generated
+/// could not reproduce it. Seed sharing is a design promise (02 §5), and it is
+/// only kept if the knobs travel with the seed.
+///
+/// `rail_sim` cannot see `rail_map` (that crate depends on this one), so they
+/// travel as the byte `rail_map::MapGenOptions::pack` produces and the app
+/// unpacks on the other side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MapGenOptions {
     pub generator_version: u16,
+    /// Packed `rail_map::MapGenOptions`, or `None` on a world whose app never
+    /// declared how it was made — a bare test world. A loader that finds `None`
+    /// must leave the map it already has alone rather than regenerate from a
+    /// setup it is guessing at.
+    pub knobs: Option<u8>,
 }
 
 impl Default for MapGenOptions {
     fn default() -> Self {
         Self {
             generator_version: GENERATOR_VERSION,
+            knobs: None,
         }
     }
 }
@@ -158,7 +170,7 @@ impl TerrainChunk {
 /// `MapGrid` so the sim can record which world this is.
 ///
 /// Without it a snapshot still stores the full terrain and loads exactly; only
-/// the seed shown in the UI (and cosmetic regeneration) would be unknown.
+/// the seed shown in the UI (and regeneration) would be unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Resource, Serialize, Deserialize)]
 pub struct MapDescriptor {
     pub seed: u64,
@@ -175,6 +187,16 @@ impl MapDescriptor {
             height,
             gen: MapGenOptions::default(),
         }
+    }
+
+    /// Record how the generator was steered — `rail_map::MapGenOptions::pack`.
+    ///
+    /// An app that calls this is promising that `(seed, width, height, knobs)`
+    /// reproduces the map exactly, which is what lets a load rebuild the world
+    /// rather than merely restore its tiles.
+    pub fn with_knobs(mut self, knobs: u8) -> Self {
+        self.gen.knobs = Some(knobs);
+        self
     }
 }
 
@@ -197,15 +219,20 @@ pub struct StationsSnapshot {
 
 /// One station's service readout.
 ///
-/// Mirrors [`StationServiceScore`], which cannot be serialised directly.
-/// Restoring uses `..Default::default()` so a new field on that struct compiles
-/// (and is simply not carried) until it is added here too.
+/// Mirrors [`StationServiceScore`], which cannot be serialised directly. Both
+/// halves of the mirror destructure the source type field by field with no
+/// `..` rest pattern, so a new field on it stops compiling here until someone
+/// decides whether it belongs in the blob. It used to restore with
+/// `..Default::default()`, and `peep_waiting` — the named residents standing on
+/// the platform — was quietly lost by every save that way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceScoreSnapshot {
     pub station: StationId,
     pub deliveries: u32,
     pub last_arrival_tick: u64,
     pub waiting_passengers: u32,
+    /// Named peeps on the platform, counted separately from the job-board queue.
+    pub peep_waiting: u32,
     pub score: u8,
     /// Cached platform grade of the stop being scored.
     pub tier: StationTier,
@@ -293,8 +320,15 @@ pub struct PeepSnapshot {
 
 /// Tunables of the bounded-simulation budget.
 ///
-/// Only the settings are saved. How many peeps were at full detail is a
-/// function of where the camera is, and is recomputed on the next rebalance.
+/// Mirrors [`PeepBudget`] by hand, and destructures it field by field with no
+/// `..` rest pattern so a new tunable is a compile error here rather than a
+/// silent omission. Two of its fields are deliberately **not** persisted:
+///
+/// - `detailed` / `abstracted` are readouts, not settings — how many peeps were
+///   at full detail is a function of where the camera is, and both are rewritten
+///   by the next rebalance.
+/// - `ticks` is the countdown to that rebalance. It is session state measured in
+///   sim ticks, and a load starts it fresh rather than resuming mid-count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetSnapshot {
     pub max_detailed: usize,
@@ -303,10 +337,36 @@ pub struct BudgetSnapshot {
 
 impl Default for BudgetSnapshot {
     fn default() -> Self {
-        let defaults = PeepBudget::default();
+        Self::from_budget(PeepBudget::default())
+    }
+}
+
+impl BudgetSnapshot {
+    fn from_budget(budget: PeepBudget) -> Self {
+        let PeepBudget {
+            max_detailed,
+            rebalance_every,
+            ticks: _,
+            detailed: _,
+            abstracted: _,
+        } = budget;
         Self {
-            max_detailed: defaults.max_detailed,
-            rebalance_every: defaults.rebalance_every,
+            max_detailed,
+            rebalance_every,
+        }
+    }
+
+    fn to_budget(self) -> PeepBudget {
+        let Self {
+            max_detailed,
+            rebalance_every,
+        } = self;
+        PeepBudget {
+            max_detailed,
+            rebalance_every,
+            ticks: 0,
+            detailed: 0,
+            abstracted: 0,
         }
     }
 }
@@ -406,6 +466,11 @@ pub struct EconomySnapshot {
 // ---------------------------------------------------------------------------
 
 /// Pause + speed at the moment of saving.
+///
+/// Mirrors [`SimClock`] by hand, destructured field by field with no `..` rest
+/// pattern in either direction: everything the clock knows is worth saving, and
+/// a new field must be an explicit decision rather than a default that quietly
+/// replaces what the player had.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClockSnapshot {
     pub paused: bool,
@@ -414,9 +479,30 @@ pub struct ClockSnapshot {
 
 impl Default for ClockSnapshot {
     fn default() -> Self {
+        Self::from_clock(SimClock::default())
+    }
+}
+
+impl ClockSnapshot {
+    fn from_clock(clock: SimClock) -> Self {
+        let SimClock {
+            paused,
+            speed_multiplier,
+        } = clock;
         Self {
-            paused: false,
-            speed_multiplier: 1,
+            paused,
+            speed_multiplier,
+        }
+    }
+
+    fn to_clock(self) -> SimClock {
+        let Self {
+            paused,
+            speed_multiplier,
+        } = self;
+        SimClock {
+            paused,
+            speed_multiplier,
         }
     }
 }
@@ -530,10 +616,8 @@ impl WorldSnapshot {
             borders: world.get_resource::<BorderRegistry>().cloned().unwrap_or_default(),
             clock: world
                 .get_resource::<SimClock>()
-                .map(|c| ClockSnapshot {
-                    paused: c.paused,
-                    speed_multiplier: c.speed_multiplier,
-                })
+                .copied()
+                .map(ClockSnapshot::from_clock)
                 .unwrap_or_default(),
             money_cents: world.get_resource::<Money>().map(|m| m.cents()).unwrap_or(0),
             anchors_seeded: world
@@ -580,12 +664,7 @@ impl WorldSnapshot {
         world.insert_resource(self.goals.clone());
         world.insert_resource(self.borders.clone());
 
-        let clock = SimClock {
-            paused: self.clock.paused,
-            speed_multiplier: self.clock.speed_multiplier,
-            ..Default::default()
-        };
-        world.insert_resource(clock);
+        world.insert_resource(self.clock.to_clock());
         world.insert_resource(Money::new(self.money_cents));
         world.insert_resource(WorldAnchorsSeeded(self.anchors_seeded));
 
@@ -638,18 +717,31 @@ fn capture_stations(world: &World, service_tick: u64) -> StationsSnapshot {
         .unwrap_or_default();
     industries.sort_by_key(|i| i.id.0);
 
+    // `StationService::scores` is a `HashMap`, so the sort below is what makes
+    // the blob deterministic rather than hash-order noise.
     let mut service: Vec<ServiceScoreSnapshot> = world
         .get_resource::<StationService>()
         .map(|s| {
             s.scores
                 .iter()
-                .map(|(id, score)| ServiceScoreSnapshot {
-                    station: *id,
-                    deliveries: score.deliveries,
-                    last_arrival_tick: score.last_arrival_tick,
-                    waiting_passengers: score.waiting_passengers,
-                    score: score.score,
-                    tier: score.tier,
+                .map(|(station, score)| {
+                    let StationServiceScore {
+                        deliveries,
+                        last_arrival_tick,
+                        waiting_passengers,
+                        peep_waiting,
+                        score,
+                        tier,
+                    } = *score;
+                    ServiceScoreSnapshot {
+                        station: *station,
+                        deliveries,
+                        last_arrival_tick,
+                        waiting_passengers,
+                        peep_waiting,
+                        score,
+                        tier,
+                    }
                 })
                 .collect()
         })
@@ -762,10 +854,8 @@ fn capture_peeps(world: &World) -> PeepsSnapshot {
 
     let budget = world
         .get_resource::<PeepBudget>()
-        .map(|b| BudgetSnapshot {
-            max_detailed: b.max_detailed,
-            rebalance_every: b.rebalance_every,
-        })
+        .copied()
+        .map(BudgetSnapshot::from_budget)
         .unwrap_or_default();
 
     PeepsSnapshot {
@@ -921,19 +1011,28 @@ fn restore_stations(snapshot: &WorldSnapshot, world: &mut World, report: &mut Re
     world.insert_resource(industries);
 
     let mut service = StationService {
+        scores: Default::default(),
         tick: snapshot.stations.service_tick,
-        ..Default::default()
     };
     for entry in &snapshot.stations.service {
+        let ServiceScoreSnapshot {
+            station,
+            deliveries,
+            last_arrival_tick,
+            waiting_passengers,
+            peep_waiting,
+            score,
+            tier,
+        } = *entry;
         service.scores.insert(
-            entry.station,
+            station,
             StationServiceScore {
-                deliveries: entry.deliveries,
-                last_arrival_tick: entry.last_arrival_tick,
-                waiting_passengers: entry.waiting_passengers,
-                score: entry.score,
-                tier: entry.tier,
-                ..Default::default()
+                deliveries,
+                last_arrival_tick,
+                waiting_passengers,
+                peep_waiting,
+                score,
+                tier,
             },
         );
     }
@@ -1051,10 +1150,7 @@ fn restore_peeps(snapshot: &WorldSnapshot, world: &mut World) {
     }
     world.insert_resource(flow);
 
-    // `PeepBudget` keeps a private rebalance counter, so start from the default
-    // and set only the tunables — the counts recompute on the next reshuffle.
-    let mut budget = PeepBudget::default();
-    budget.max_detailed = snapshot.peeps.budget.max_detailed;
-    budget.rebalance_every = snapshot.peeps.budget.rebalance_every;
-    world.insert_resource(budget);
+    // Only the tunables are carried; the rebalance counter and the two readouts
+    // start fresh and are rewritten by the next reshuffle. See [`BudgetSnapshot`].
+    world.insert_resource(snapshot.peeps.budget.to_budget());
 }

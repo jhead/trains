@@ -72,15 +72,16 @@ pub use peeps::{
     rebalance_peep_detail, spawn_peep_households, BodyType, ComplaintEntry, ComplaintFeed,
     DistrictFlow, DistrictFlowState, Facing, Household, HouseholdId, HouseholdRegistry, Journey,
     JourneyLeg, JourneyMemory, JourneyOutcome, JourneyRecord, JourneyStage, Mood, Peep, PeepBudget,
-    PeepDetail, PeepFocus, PeepId, PeepPosition, PeepRole, PeepsPlugin, Routine, TalkKind,
-    TownTalkEntry, TownTalkFeed, WaitingAtStation, BAD_JOURNEYS_TO_LEAVE, COMPLAINT_DEDUPE_TICKS,
-    COMPLAINT_WAIT_SECS, DAY_MINUTES, GAVE_UP_WAIT_FLAG, MAX_COMPLAINTS, MAX_DETAILED_PEEPS,
-    MAX_TOWN_TALK, MEMORY_DEPTH, PEEPS_PER_STATION, SIM_SECONDS_PER_TICK, TICKS_PER_DAY,
+    PeepDetail, PeepFocus, PeepId, PeepPosition, PeepRole, PeepSpawnState, PeepsPlugin, Routine,
+    TalkKind, TownTalkEntry, TownTalkFeed, WaitingAtStation, BAD_JOURNEYS_TO_LEAVE,
+    COMPLAINT_DEDUPE_TICKS, COMPLAINT_WAIT_SECS, DAY_MINUTES, GAVE_UP_WAIT_FLAG, MAX_COMPLAINTS,
+    MAX_DETAILED_PEEPS, MAX_TOWN_TALK, MEMORY_DEPTH, PEEPS_PER_STATION, SIM_SECONDS_PER_TICK,
+    TICKS_PER_DAY,
 };
 pub use save::{
     autosave, delete_slot, list_slots, load_from_slot, queue_autosave, queue_save, save_to_slot,
-    save_to_slot_async, SaveError, SaveJobs, SaveMeta, SavePlugin, SaveResult, SaveSlot, SlotInfo,
-    WorldSnapshot, AUTOSAVE_SLOTS, SCHEMA_VERSION,
+    save_to_slot_async, MapDescriptor, SaveError, SaveJobs, SaveMeta, SavePlugin, SaveResult,
+    SaveSlot, SlotInfo, WorldSnapshot, AUTOSAVE_SLOTS, SCHEMA_VERSION,
 };
 pub use stations::{
     apply_station_commands, catchment_influence, push_station_command,

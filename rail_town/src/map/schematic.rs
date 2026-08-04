@@ -53,7 +53,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageSampler};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use rail_map::{map_center_world, MapGrid, TerrainKind, TILE_SIZE};
+use rail_map::{top_down_map_center, MapGrid, TerrainKind, TILE_SIZE};
 use rail_sim::ids::TileCoord;
 use rail_sim::track::DIR16;
 use rail_sim::{
@@ -631,7 +631,10 @@ pub fn rebake_schematic(
         map.width as f32 * TILE_SIZE,
         map.height as f32 * TILE_SIZE,
     ));
-    let (cx, cy) = map_center_world(map.width, map.height);
+    // The plate's own extent, never the world's. `top_down_map_center` is a
+    // plan-view helper that answers the same in either projection, which is what
+    // keeps the plate a drawing rather than a picture of the camera's view.
+    let (cx, cy) = top_down_map_center(map.width, map.height);
     transform.translation.x = cx;
     transform.translation.y = cy;
 }
@@ -1150,30 +1153,38 @@ mod tests {
         assert_eq!(images.len(), 1, "a re-bake must reuse its texture");
     }
 
-    /// The plate is laid over the map's own world extent, which is what keeps
-    /// click-to-fly honest: the tile the pointer is over on the plate is the
-    /// tile [`super::super::map_view::map_view_click_fly`] resolves.
+    /// The plate is laid out in tile order at its own fixed scale, which is what
+    /// keeps click-to-fly honest: the tile the pointer is over on the plate is
+    /// the tile [`super::super::map_view::map_view_click_fly`] resolves.
+    ///
+    /// Checked in **both** projections, and the answer has to be the same one.
+    /// Brief 02 §6 says the plate is "a second, purpose-built rendering" rather
+    /// than a zoomed-out camera, so it was never a picture of the world and its
+    /// geometry must not move when the world's does.
     #[test]
     fn the_plate_covers_exactly_the_map() {
-        let mut app = bake_app();
-        app.world_mut().resource_mut::<MapViewState>().active = true;
-        app.update();
+        for projection in [rail_map::Projection::TopDown, rail_map::Projection::Iso] {
+            let _guard = crate::map::tests::ProjectionGuard::new(projection);
+            let mut app = bake_app();
+            app.world_mut().resource_mut::<MapViewState>().active = true;
+            app.update();
 
-        let (sprite, transform) = app
-            .world_mut()
-            .query_filtered::<(&Sprite, &Transform), With<SchematicPlate>>()
-            .single(app.world())
-            .map(|(s, t)| (s.clone(), *t))
-            .expect("plate");
-        assert_eq!(sprite.custom_size, Some(Vec2::splat(16.0 * TILE_SIZE)));
-        assert_eq!(
-            transform.translation.truncate(),
-            Vec2::splat(16.0 * TILE_SIZE * 0.5),
-            "the plate must be centred on the map, not on the camera"
-        );
-        // And it never carries a transform of its own beyond that placement.
-        assert_eq!(transform.rotation, Quat::IDENTITY);
-        assert_eq!(transform.scale, Vec3::ONE);
+            let (sprite, transform) = app
+                .world_mut()
+                .query_filtered::<(&Sprite, &Transform), With<SchematicPlate>>()
+                .single(app.world())
+                .map(|(s, t)| (s.clone(), *t))
+                .expect("plate");
+            assert_eq!(sprite.custom_size, Some(Vec2::splat(16.0 * TILE_SIZE)));
+            assert_eq!(
+                transform.translation.truncate(),
+                Vec2::splat(16.0 * TILE_SIZE * 0.5),
+                "the plate must be centred on the map, not on the camera"
+            );
+            // And it never carries a transform of its own beyond that placement.
+            assert_eq!(transform.rotation, Quat::IDENTITY);
+            assert_eq!(transform.scale, Vec3::ONE);
+        }
     }
 
     /// The view shows the plate and its `bg0` ground, and puts both away again.

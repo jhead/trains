@@ -41,6 +41,18 @@ const TOWN_DISTANCE: f32 = 10.0;
 /// How far past the boundary the sign stands.
 const SIGN_DISTANCE: f32 = 2.6;
 
+/// Where the yard root sits in isometric — see the spawn.
+const ISO_YARD_ROOT_Z: f32 = 60.0;
+
+/// Root z for a border yard in the live projection.
+#[inline]
+fn yard_root_z() -> f32 {
+    if rail_map::projection_is_iso() {
+        ISO_YARD_ROOT_Z
+    } else {
+        0.0
+    }
+}
 const YARD_TRACK_Z: f32 = 1.0;
 const YARD_TOWN_Z: f32 = 1.6;
 const YARD_WINDOW_Z: f32 = 1.7;
@@ -116,7 +128,21 @@ pub fn sync_border_yards(
                     link: link.link,
                     sequence,
                 },
-                Transform::from_xyz(origin.x, origin.y, 0.0),
+                // The yard has no sprite of its own, so `map::iso_sort` never
+                // adopts it and its children keep this root z. At 0 in
+                // isometric the whole yard sat under the depth band and was
+                // buried by terrain; it is drawn beyond the map's edge with
+                // nothing between it and the camera, so there it goes above
+                // the band. From above, 0 is the ordinary world root.
+                //
+                // Its *layout* is top-down either way — the track stubs, town
+                // silhouette and sign are laid out along world axes with
+                // axis-aligned rectangles, and they do not follow the diamond
+                // grid. It only appears with a neighbour link, which single
+                // player (`NeighborService::null()`) never has, so it is left
+                // as it is rather than redrawn for the isometric view. This is
+                // the one thing on screen that a flip does not answer for.
+                Transform::from_xyz(origin.x, origin.y, yard_root_z()),
                 Visibility::default(),
                 Name::new(format!("Border yard - {}", link.edge.label())),
             ))

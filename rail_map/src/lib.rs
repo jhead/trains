@@ -18,8 +18,15 @@
 //! - [`Tile::is_walkable_for_track`] — `true` when track can be laid without a bridge
 //!
 //! ## World ↔ tile
-//! - [`TILE_SIZE`] — world units per tile edge (32)
+//! - [`TILE_SIZE`] — ground-plane units per tile edge (32)
 //! - [`tile_to_world`] / [`world_to_tile`] / [`map_center_world`]
+//!
+//! Those three follow the live [`Projection`]: top-down squares by default, or
+//! 2:1 dimetric diamonds with an elevation lift once [`set_projection`] says so.
+//! See [`coords`] for the projection, the lift and [`set_iso_heights`], which
+//! installs the height field the lift reads. Use [`top_down_tile_to_world`] and
+//! friends where a drawing is *deliberately* a plan view whatever the world is
+//! doing — the Map View's schematic plate is the one such caller.
 //!
 //! ## Portals
 //! - [`MapGrid::portals`] — all edge [`Portal`] stubs (`open: false` in MVP)
@@ -61,7 +68,7 @@
 //! - [`measure::river_crossings`] / [`measure::ridge_passes`] — the decisions on offer
 //! - [`measure::largest_buildable_region`] — is the mainland one place?
 
-mod coords;
+pub mod coords;
 mod features;
 mod gen;
 mod grid;
@@ -71,7 +78,13 @@ mod tile;
 
 pub mod measure;
 
-pub use coords::{map_center_world, tile_to_world, world_to_tile, TILE_SIZE};
+pub use coords::{
+    clear_iso_heights, map_center_world, project, project_offset, projection, projection_is_iso,
+    set_iso_heights, set_projection, surface_height_of, tile_height, tile_lift, tile_to_world,
+    tile_to_world_flat, top_down_map_center, top_down_tile_to_world, top_down_world_to_tile,
+    unproject, unproject_offset, world_to_tile, Projection, ISO_LIFT, ISO_TILE_H, ISO_TILE_W,
+    TILE_SIZE,
+};
 pub use features::{MapFeatures, RiverCrossing, SiteHint, SiteKind, Surface};
 pub use gen::{generate, generate_map, generate_map_with};
 pub use grid::{MapGrid, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_SEED, DEFAULT_MAP_WIDTH};

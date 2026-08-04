@@ -35,7 +35,25 @@ pub const ZOOM_FACTORS: [u8; 3] = [1, 2, 3];
 pub const DEFAULT_ZOOM_FACTOR: u8 = 2;
 pub(crate) const PAN_SPEED: f32 = 400.0;
 /// Default index into [`ZOOM_FACTORS`] (2×).
-pub(crate) const DEFAULT_ZOOM_INDEX: usize = 1; // ZOOM_FACTORS[1] == 2
+pub(crate) const DEFAULT_ZOOM_INDEX: usize = 1;
+const _: () = assert!(ZOOM_FACTORS[DEFAULT_ZOOM_INDEX] == DEFAULT_ZOOM_FACTOR);
+
+/// Default zoom in the isometric view.
+///
+/// The projection makes a tile 64 × 32 screen texels instead of 32 × 32, so
+/// §2.1's 2× shows about ten tiles across — too tight to read a ridge, which is
+/// most of what the view is for. 1× shows roughly twenty. The ladder itself is
+/// untouched in either view: three rungs, and the other two are a scroll away.
+pub(crate) const ISO_DEFAULT_ZOOM_INDEX: usize = 0; // ZOOM_FACTORS[0] == 1
+
+/// Where the ladder opens in a given projection.
+#[inline]
+pub fn default_zoom_index_for(projection: rail_map::Projection) -> usize {
+    match projection {
+        rail_map::Projection::TopDown => DEFAULT_ZOOM_INDEX,
+        rail_map::Projection::Iso => ISO_DEFAULT_ZOOM_INDEX,
+    }
+}
 
 /// Pixel-unit scroll that buys one rung of the ladder.
 ///
@@ -162,13 +180,14 @@ pub struct CameraFocusRequest(pub Option<Vec2>);
 
 pub fn setup_map_camera(mut commands: Commands, map: Res<MapGrid>) {
     let (cx, cy) = map_center_world(map.width, map.height);
+    let index = default_zoom_index_for(rail_map::projection());
     commands.spawn((
         Camera2d,
         MapCamera,
-        CameraZoomIndex(DEFAULT_ZOOM_INDEX),
+        CameraZoomIndex(index),
         Transform::from_xyz(cx.round(), cy.round(), 1000.0),
         Projection::Orthographic(OrthographicProjection {
-            scale: ortho_scale_for_zoom(DEFAULT_ZOOM_FACTOR),
+            scale: ortho_scale_for_zoom(zoom_factor_at(index)),
             ..OrthographicProjection::default_2d()
         }),
     ));
@@ -338,6 +357,28 @@ mod tests {
         assert_eq!(ZOOM_FACTORS, [1, 2, 3]);
         assert_eq!(DEFAULT_ZOOM_FACTOR, 2);
         assert_eq!(zoom_factor_at(DEFAULT_ZOOM_INDEX), DEFAULT_ZOOM_FACTOR);
+    }
+
+    /// The ladder is the same in both views; only the rung it opens on differs,
+    /// because a tile is twice as wide in isometric.
+    #[test]
+    fn each_projection_opens_on_its_own_rung() {
+        use rail_map::Projection;
+        assert_eq!(
+            default_zoom_index_for(Projection::TopDown),
+            DEFAULT_ZOOM_INDEX
+        );
+        assert_eq!(
+            zoom_factor_at(default_zoom_index_for(Projection::TopDown)),
+            2
+        );
+        assert_eq!(zoom_factor_at(default_zoom_index_for(Projection::Iso)), 1);
+        for projection in [Projection::TopDown, Projection::Iso] {
+            assert!(
+                default_zoom_index_for(projection) < ZOOM_FACTORS.len(),
+                "{projection:?} opens off the end of the ladder"
+            );
+        }
     }
 
     #[test]

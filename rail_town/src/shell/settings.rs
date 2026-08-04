@@ -108,6 +108,15 @@ pub struct DisplaySettings {
     pub ui_scale: u32,
     /// World zoom a new game starts at, 1×–3×.
     pub world_zoom_default: u32,
+    /// Draw the world in 2:1 dimetric instead of from directly above.
+    ///
+    /// A view mode, not a world property: the same world and the same save read
+    /// either way, and flipping it mid-session is a presentation rebuild and
+    /// nothing else (`map::projection`). It lives here because the settings file
+    /// is a flat key-value document with no schema — an absent key reads as the
+    /// default, so an old profile opens top-down and an older build ignores the
+    /// key entirely. Nothing about it reaches a save.
+    pub isometric: bool,
     pub vsync: bool,
     /// `0` means uncapped.
     pub frame_cap: u32,
@@ -152,6 +161,7 @@ impl Default for DisplaySettings {
             window_mode: WindowModeChoice::Windowed,
             ui_scale: UI_SCALE_AUTO,
             world_zoom_default: 2,
+            isometric: false,
             vsync: true,
             frame_cap: 0,
             tile_grid: false,
@@ -229,6 +239,7 @@ pub enum SettingId {
     WindowMode,
     UiScale,
     WorldZoomDefault,
+    Projection,
     Vsync,
     FrameCap,
     TileGrid,
@@ -259,6 +270,7 @@ impl SettingId {
         Self::WindowMode,
         Self::UiScale,
         Self::WorldZoomDefault,
+        Self::Projection,
         Self::Vsync,
         Self::FrameCap,
         Self::TileGrid,
@@ -286,6 +298,7 @@ impl SettingId {
             Self::WindowMode
             | Self::UiScale
             | Self::WorldZoomDefault
+            | Self::Projection
             | Self::Vsync
             | Self::FrameCap
             | Self::TileGrid
@@ -314,6 +327,7 @@ impl SettingId {
             Self::WindowMode => "Window",
             Self::UiScale => "UI scale",
             Self::WorldZoomDefault => "World zoom",
+            Self::Projection => "World view",
             Self::Vsync => "Vsync",
             Self::FrameCap => "Frame cap",
             Self::TileGrid => "Tile grid",
@@ -352,6 +366,9 @@ impl SettingId {
                 }
             }
             Self::WorldZoomDefault => format!("{}x", d.world_zoom_default),
+            Self::Projection => crate::map::projection::projection_for(d.isometric)
+                .label()
+                .into(),
             Self::Vsync => on_off(d.vsync),
             Self::FrameCap => {
                 if d.frame_cap == 0 {
@@ -401,6 +418,8 @@ impl SettingId {
             Self::WorldZoomDefault => {
                 d.world_zoom_default = cycle_range(d.world_zoom_default, 1, 3, 1, delta)
             }
+            // Two members, so either direction is the same flip.
+            Self::Projection => d.isometric = !d.isometric,
             Self::Vsync => d.vsync = !d.vsync,
             Self::FrameCap => {
                 d.frame_cap = cycle_values(&[0, 60, 90, 120, 144, 240], d.frame_cap, delta)
@@ -530,6 +549,7 @@ impl Settings {
         doc.set_str("display_window_mode", d.window_mode.label());
         doc.set_int("display_ui_scale", d.ui_scale as i64);
         doc.set_int("display_world_zoom_default", d.world_zoom_default as i64);
+        doc.set_bool("display_isometric", d.isometric);
         doc.set_bool("display_vsync", d.vsync);
         doc.set_int("display_frame_cap", d.frame_cap as i64);
         doc.set_bool("display_tile_grid", d.tile_grid);
@@ -578,6 +598,7 @@ impl Settings {
                 world_zoom_default: doc
                     .int("display_world_zoom_default", d.world_zoom_default as i64)
                     .clamp(1, 3) as u32,
+                isometric: doc.bool("display_isometric", d.isometric),
                 vsync: doc.bool("display_vsync", d.vsync),
                 frame_cap: doc
                     .int("display_frame_cap", d.frame_cap as i64)

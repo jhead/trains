@@ -234,28 +234,36 @@ fn spawn_chunks(
     (cols, rows)
 }
 
-/// Paint the atlas, then build the chunk grid for the starting map.
-pub fn setup_terrain(
-    mut commands: Commands,
-    map: Res<MapGrid>,
-    mut images: ResMut<Assets<Image>>,
-    mut dirty: ResMut<TerrainDirty>,
-) {
+/// Bake the tile atlas without drawing anything.
+///
+/// The projection is a runtime choice, so both renderers' atlases are baked at
+/// startup whatever the view opens in: a flip then costs a re-spawn and no bake
+/// at all, which is what makes it feel like a view change rather than a load.
+pub fn setup_terrain_atlas(mut commands: Commands) {
     let started = Instant::now();
     let atlas = TerrainAtlas::build();
-    let atlas_done = Instant::now();
-
-    let (cols, rows) = spawn_chunks(&mut commands, &mut images, &map, &atlas, &mut dirty);
-
     info!(
-        "terrain: atlas {} texels in {:?}, {}x{} chunks composited in {:?}",
+        "terrain: atlas {} texels in {:?}",
         atlas.texel_count(),
-        atlas_done - started,
-        cols,
-        rows,
-        atlas_done.elapsed(),
+        started.elapsed()
     );
     commands.insert_resource(atlas);
+}
+
+/// Drop every composited chunk and its texture — the flip out of top-down.
+pub fn despawn_flat_terrain(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+    dirty: &mut TerrainDirty,
+    chunks: &Query<(Entity, &TerrainChunk, &Sprite)>,
+) {
+    for (entity, _, sprite) in chunks.iter() {
+        images.remove(&sprite.image);
+        commands.entity(entity).despawn();
+    }
+    // Nothing is composited any more, so nothing may be claimed as composited.
+    dirty.signature = None;
+    dirty.resize(0, 0);
 }
 
 /// Re-composite chunks whose tiles changed. Idle when nothing has.
@@ -278,18 +286,22 @@ pub fn rebuild_dirty_terrain(
     chunks: Query<(Entity, &TerrainChunk, &Sprite)>,
 ) {
     let _perf = crate::overlays::perf::scope("rebuild_dirty_terrain");
-    let mut swapped = false;
+    // No chunks at all is the other entry point into a full build: either
+    // startup has not run yet, or the player has just flipped back from the
+    // isometric view, which despawns this renderer's sprites on its way out.
+    let absent = chunks.is_empty();
+    let mut swapped = absent;
     if map.is_changed() {
         let signature = terrain_signature(&map);
         // `is_added` is the startup composite, which already ran; record its
         // signature so the first ordinary frame does not redo it.
-        swapped = !map.is_added() && dirty.signature != Some(signature);
+        swapped |= !map.is_added() && dirty.signature != Some(signature);
         dirty.signature = Some(signature);
         if swapped {
             dirty.mark_all();
         }
     }
-    if !dirty.any {
+    if !dirty.any && !absent {
         return;
     }
     let Some(atlas) = atlas else {
@@ -297,15 +309,22 @@ pub fn rebuild_dirty_terrain(
     };
 
     // A different map size means a different chunk grid: drop it and rebuild.
-    let resized = map.width.div_ceil(CHUNK_TILES) != dirty.cols
+    // So does having no grid at all.
+    let resized = absent
+        || map.width.div_ceil(CHUNK_TILES) != dirty.cols
         || map.height.div_ceil(CHUNK_TILES) != dirty.rows;
     if swapped && resized {
+        let started = Instant::now();
         for (entity, _, sprite) in &chunks {
             images.remove(&sprite.image);
             commands.entity(entity).despawn();
         }
-        spawn_chunks(&mut commands, &mut images, &map, &atlas, &mut dirty);
+        let (cols, rows) = spawn_chunks(&mut commands, &mut images, &map, &atlas, &mut dirty);
         dirty.clear();
+        info!(
+            "terrain: {cols}x{rows} chunks composited in {:?}",
+            started.elapsed()
+        );
         return;
     }
 
@@ -583,7 +602,10 @@ mod tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<TerrainDirty>();
         app.insert_resource(generate_map(width, height, DEFAULT_MAP_SEED));
-        app.add_systems(Startup, setup_terrain);
+        // No separate spawn step: the atlas is baked at startup and
+        // `rebuild_dirty_terrain` composites whatever it finds missing, which
+        // is the path a flip back into this view takes as well.
+        app.add_systems(Startup, setup_terrain_atlas);
         app.add_systems(Update, rebuild_dirty_terrain);
         app
     }

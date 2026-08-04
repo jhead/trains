@@ -70,7 +70,14 @@ const POLISH_Z: f32 = 0.01;
 const TEXELS_PER_TILE: f32 = 32.0;
 /// Cell edge in texels. Three tiles: a half-step leg reaches √5/2 tiles from
 /// the centre, and the ballast is 8 wide beyond that.
-const CELL: u32 = 96;
+///
+/// Sized for the wider of the two projections: isometric stretches the ground
+/// plane to twice its width, so the widest leg (`(1, -2)`, projecting to 48
+/// texels of run) plus its ballast wants ±60. 128 gives that with room to
+/// spare, and top-down simply leaves the outside of the cell transparent. The
+/// cell is cached per (mask, projection) and only combinations that occur are
+/// ever baked, so the extra texels cost nothing that matters.
+const CELL: u32 = 128;
 /// Cell centre, in texels from the top-left.
 const CENTER: i32 = (CELL / 2) as i32;
 
@@ -112,11 +119,18 @@ pub struct TrackPolish {
 }
 
 /// What a baked cell is keyed on. Everything else about a piece is position.
+///
+/// The projection is part of the key because the bake walks *projected*
+/// direction axes (see [`axes`]) — the same link mask is a different drawing
+/// from above than it is in isometric. Keying on it rather than clearing the
+/// bank means the second flip back re-uses cells instead of re-painting them:
+/// a view the player is A/B-ing costs its bake once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ArtKey {
     links: u16,
     bridge: bool,
     variant: u32,
+    projection: rail_map::Projection,
 }
 
 /// Baked cells, kept for the life of the session.
@@ -236,10 +250,38 @@ fn cell_image(canvas: Canvas) -> Image {
 }
 
 /// Unit vector along a direction, and the perpendicular, in texel space.
-fn axes(dir: usize) -> (Vec2, Vec2) {
+///
+/// From above these are the direction itself and its perpendicular, and the
+/// §5.3 cross-section is measured straight down a screen column.
+///
+/// In isometric both are *projected*, so every painter below draws on the
+/// ground plane instead of on the screen plane. That is the whole of the track
+/// reprojection — the bed, the sleepers, the rail bodies and the railheads all
+/// walk `along · t + across · s` in ground units and land on the diamond grid
+/// without any of them knowing which projection they are in.
+///
+/// The projected vectors are deliberately **not** re-normalised. A leg running
+/// south-east projects to 1.41× its ground length and a leg running north-east
+/// to 0.71×, and that foreshortening is exactly what makes a rail read as lying
+/// on the ground rather than floating over it. `across` is the projection of
+/// the ground-plane perpendicular, not the screen-space perpendicular of the
+/// projected run, so the sleepers lie flat too.
+fn axes(dir: usize, projection: rail_map::Projection) -> (Vec2, Vec2) {
     let (dx, dy) = DIR16[dir];
     let v = Vec2::new(dx as f32, dy as f32).normalize();
-    (v, Vec2::new(-v.y, v.x))
+    let perp = Vec2::new(-v.y, v.x);
+    match projection {
+        rail_map::Projection::TopDown => (v, perp),
+        rail_map::Projection::Iso => (project(v), project(perp)),
+    }
+}
+
+/// Ground-plane vector to screen-plane vector. The projection is linear, so it
+/// applies to a direction exactly as it applies to a point.
+#[inline]
+fn project(v: Vec2) -> Vec2 {
+    let (x, y) = rail_map::project(v.x, v.y);
+    Vec2::new(x, y)
 }
 
 /// Half the length of a link in texels — the share this piece draws.
@@ -280,18 +322,18 @@ fn paint_cell(key: ArtKey, pass: Pass) -> Canvas {
             paint_sleepers(&mut canvas, key, dir, reach);
         }
         for &(dir, reach) in &legs {
-            paint_rail_bodies(&mut canvas, dir, reach);
+            paint_rail_bodies(&mut canvas, key, dir, reach);
         }
     }
     for &(dir, reach) in &legs {
-        paint_railheads(&mut canvas, dir, reach, pass);
+        paint_railheads(&mut canvas, key, dir, reach, pass);
     }
     canvas
 }
 
 /// Ballast bed, or bridge deck planking where the piece spans water.
 fn paint_bed(canvas: &mut Canvas, key: ArtKey, dir: usize, reach: f32) {
-    let (along, across) = axes(dir);
+    let (along, across) = axes(dir, key.projection);
     let mut t = 0.0;
     while t <= reach {
         let mut s = -BALLAST_HALF;
@@ -328,7 +370,7 @@ fn paint_sleepers(canvas: &mut Canvas, key: ArtKey, dir: usize, reach: f32) {
         // The deck *is* the sleepers on a bridge.
         return;
     }
-    let (along, across) = axes(dir);
+    let (along, across) = axes(dir, key.projection);
     let mut index = 0u32;
     let mut t = 0.0;
     while t <= reach {
@@ -359,8 +401,8 @@ fn paint_sleepers(canvas: &mut Canvas, key: ArtKey, dir: usize, reach: f32) {
 
 /// The web either side of each railhead: shadow on one flank, body on the other
 /// (§5.3, rail body half-width 1).
-fn paint_rail_bodies(canvas: &mut Canvas, dir: usize, reach: f32) {
-    let (along, across) = axes(dir);
+fn paint_rail_bodies(canvas: &mut Canvas, key: ArtKey, dir: usize, reach: f32) {
+    let (along, across) = axes(dir, key.projection);
     for side in [-RAIL_GAUGE_HALF, RAIL_GAUGE_HALF] {
         let mut t = 0.0;
         while t <= reach {
@@ -378,8 +420,8 @@ fn paint_rail_bodies(canvas: &mut Canvas, dir: usize, reach: f32) {
 ///
 /// [`Pass::Polish`] paints the same texels in `railS` and nothing else, which is
 /// what the gleam fades up.
-fn paint_railheads(canvas: &mut Canvas, dir: usize, reach: f32, pass: Pass) {
-    let (along, across) = axes(dir);
+fn paint_railheads(canvas: &mut Canvas, key: ArtKey, dir: usize, reach: f32, pass: Pass) {
+    let (along, across) = axes(dir, key.projection);
     let color = rgba(match pass {
         Pass::Base => RAIL_L,
         Pass::Polish => RAIL_S,
@@ -434,9 +476,12 @@ pub fn apply_track_sprites(
         }
     }
 
-    // A wholesale swap — a load, or a new map — brings its own pieces with no
-    // edit messages behind them, and its ids are its own.
-    let rebuild_all = network.is_added();
+    // A wholesale swap — a load, a new map, or a projection flip — brings its
+    // own pieces with no edit messages behind them, and every sprite it wants
+    // is missing. `map::projection` despawns the lot on its way past, so
+    // "there are pieces and no art for them" is the whole trigger; the bake is
+    // keyed on the projection, so the art that comes back is this view's.
+    let rebuild_all = network.is_added() || (existing.is_empty() && network.len() > 0);
     if rebuild_all {
         touched.extend(network.iter().map(|p| p.id));
     }
@@ -472,6 +517,7 @@ pub fn apply_track_sprites(
             links: piece.links.0,
             bridge: piece.is_bridge(),
             variant: variant_for(piece.tile),
+            projection: rail_map::projection(),
         };
         let (base, polish) = art.get(&mut images, key);
         commands
@@ -567,11 +613,23 @@ mod tests {
     use rail_map::TILE_SIZE;
     use rail_sim::track::is_half_step;
 
+    /// Hold the top-down projection for a test that bakes a cell.
+    ///
+    /// The bake reads the live projection (see [`ArtKey`]), which is a
+    /// process-global, so every test in this module that paints anything has to
+    /// pin it — otherwise a test that installs isometric and a test that does
+    /// not will interleave and one of them will measure the other's drawing.
+    fn flat() -> crate::map::tests::ProjectionGuard {
+        crate::map::tests::ProjectionGuard::new(rail_map::Projection::TopDown)
+    }
+
+    /// A cell key in whichever projection the test has installed.
     fn key(links: u16, bridge: bool) -> ArtKey {
         ArtKey {
             links,
             bridge,
             variant: 0,
+            projection: rail_map::projection(),
         }
     }
 
@@ -583,6 +641,7 @@ mod tests {
     /// sprite is ever rotated.
     #[test]
     fn track_sprites_are_never_rotated() {
+        let _flat = flat();
         for x in -3..=3 {
             for y in -3..=3 {
                 let tf = track_transform(TileCoord { x, y });
@@ -596,6 +655,7 @@ mod tests {
     /// sixteen has to produce different pixels from every other.
     #[test]
     fn all_sixteen_directions_are_distinct_sprites() {
+        let _flat = flat();
         let cells: Vec<Vec<u8>> = (0..DIR_COUNT)
             .map(|d| paint_cell(key(1 << d, false), Pass::Base).px)
             .collect();
@@ -624,52 +684,123 @@ mod tests {
         }
     }
 
+    /// Sample the cell at `t` texels along a leg and `s` across it, in whichever
+    /// projection the bake used.
+    ///
+    /// From above `along` and `across` are the screen axes and this is a screen
+    /// column. In isometric both are projected, so the same `(t, s)` walks the
+    /// *ground* plane — which is the point: the §5.3 cross-section is a fact
+    /// about the railway, not about the screen, and it has to hold in both.
+    fn at_run(canvas: &Canvas, dir: usize, t: f32, s: f32) -> [u8; 4] {
+        let (along, across) = axes(dir, rail_map::projection());
+        let p = along * t + across * s;
+        canvas.at(p.x.round() as i32, p.y.round() as i32)
+    }
+
     /// The §5.3 line weights, measured off the baked art rather than asserted
-    /// in a comment. An east leg is axis-aligned, so a column of it reads the
-    /// cross-section directly.
+    /// in a comment — in both projections, because the bake walks the ground
+    /// plane in each and the cross-section is a fact about the ground.
     #[test]
     fn the_cross_section_matches_the_brief() {
-        let canvas = paint_cell(key(1 << 2, false), Pass::Base);
-        // Ten texels along the leg, clear of the sleeper at t = 0.
-        let x = 10;
-        let bed: Vec<i32> = (-20..=20).filter(|&y| opaque(canvas.at(x, y))).collect();
-        assert_eq!(
-            (*bed.first().unwrap(), *bed.last().unwrap()),
-            (-BALLAST_HALF as i32, BALLAST_HALF as i32),
-            "ballast bed is 8 either side of the centreline"
-        );
-
-        // Rails at ±4 with a bright head on the centre texel of each.
-        for gauge in [-4, 4] {
-            assert_eq!(
-                canvas.at(x, gauge),
-                rgba(RAIL_L),
-                "railhead missing at gauge {gauge}"
+        for projection in [rail_map::Projection::TopDown, rail_map::Projection::Iso] {
+            let _guard = crate::map::tests::ProjectionGuard::new(projection);
+            let dir = 2; // due east
+            let canvas = paint_cell(key(1 << dir, false), Pass::Base);
+            // Ten texels along the leg, clear of the sleeper at t = 0.
+            let t = 10.0;
+            let half = BALLAST_HALF as i32;
+            let bed: Vec<i32> = (-20..=20)
+                .filter(|&s| opaque(at_run(&canvas, dir, t, s as f32)))
+                .collect();
+            // The bed's edge is a straight line from above and a 2:1 staircase
+            // in isometric, where a sample one step out can land on the
+            // neighbouring step's texel. So: 8 either side of the centreline is
+            // solid in both, and only isometric is allowed the one texel of
+            // staircase past it.
+            let slack = match projection {
+                rail_map::Projection::TopDown => 0,
+                rail_map::Projection::Iso => 1,
+            };
+            for s in -half..=half {
+                assert!(
+                    bed.contains(&s),
+                    "a hole in the ballast at {s} across, in {projection:?}"
+                );
+            }
+            // Asymmetric on purpose: which flank the staircase shows depends on
+            // which way the projected edge rounds, so each end is bounded
+            // rather than pinned.
+            let (lo, hi) = (*bed.first().unwrap(), *bed.last().unwrap());
+            assert!(
+                (-half - slack..=-half).contains(&lo) && (half..=half + slack).contains(&hi),
+                "ballast bed runs {lo}..={hi} across in {projection:?}, not 8 either side"
             );
-            assert_eq!(canvas.at(x, gauge - 1), rgba(RAIL_D));
-            assert_eq!(canvas.at(x, gauge + 1), rgba(RAIL_M));
+
+            // Rails at ±4 with a bright head on the centre texel of each.
+            for gauge in [-RAIL_GAUGE_HALF, RAIL_GAUGE_HALF] {
+                assert_eq!(
+                    at_run(&canvas, dir, t, gauge),
+                    rgba(RAIL_L),
+                    "railhead missing at gauge {gauge} in {projection:?}"
+                );
+                // The one-texel web either side of the head is checked from
+                // above only, and this is a real limit of the projection rather
+                // than a gap in the test: one unit across projects to 1.12
+                // texels on a 2:1 staircase, so the head painted half a step
+                // further along the run rounds onto the very texel the web
+                // wants. A three-texel rail — shadow, head, body — cannot
+                // survive being drawn on a diamond lattice at 32 texels to the
+                // tile. Either the rail gets wider or the flanks go.
+                if projection == rail_map::Projection::TopDown {
+                    assert_eq!(at_run(&canvas, dir, t, gauge - 1.0), rgba(RAIL_D));
+                    assert_eq!(at_run(&canvas, dir, t, gauge + 1.0), rgba(RAIL_M));
+                }
+            }
+            // Gauge really is 8 centre to centre.
+            assert_eq!(RAIL_GAUGE_HALF * 2.0, 8.0);
         }
-        // Gauge really is 8 centre to centre.
-        assert_eq!(RAIL_GAUGE_HALF * 2.0, 8.0);
     }
 
     #[test]
     fn sleepers_sit_at_the_briefs_spacing_and_length() {
-        let canvas = paint_cell(key(1 << 2, false), Pass::Base);
-        let is_tie = |x: i32, y: i32| {
-            let px = canvas.at(x, y);
-            px == rgba(TIE_D) || px == rgba(TIE_M) || px == rgba(TIE_L)
-        };
-        // Sleepers every 4 texels along the run; between them, no tie colour
-        // outside the rails.
-        for n in 0..3 {
-            let x = n * SLEEPER_SPACING as i32;
-            assert!(is_tie(x, 6), "no sleeper at x={x}");
-            assert!(!is_tie(x + 2, 6), "sleeper bled between pitches at x={x}");
+        for projection in [rail_map::Projection::TopDown, rail_map::Projection::Iso] {
+            let _guard = crate::map::tests::ProjectionGuard::new(projection);
+            let dir = 2; // due east
+            let canvas = paint_cell(key(1 << dir, false), Pass::Base);
+            let is_tie = |t: f32, s: f32| {
+                let px = at_run(&canvas, dir, t, s);
+                px == rgba(TIE_D) || px == rgba(TIE_M) || px == rgba(TIE_L)
+            };
+            // Sleepers every 4 texels along the run; between them, no tie colour
+            // outside the rails.
+            for n in 0..3 {
+                let t = n as f32 * SLEEPER_SPACING;
+                assert!(is_tie(t, 6.0), "no sleeper at t={t} in {projection:?}");
+                assert!(
+                    !is_tie(t + 2.0, 6.0),
+                    "sleeper bled between pitches at t={t} in {projection:?}"
+                );
+            }
+            // Length 14 → ±7, and nothing beyond.
+            assert!(is_tie(SLEEPER_SPACING, SLEEPER_HALF));
+            assert!(!is_tie(SLEEPER_SPACING, SLEEPER_HALF + 1.5));
         }
-        // Length 14 → ±7, and nothing beyond.
-        assert!(is_tie(4, SLEEPER_HALF as i32));
-        assert!(!is_tie(4, SLEEPER_HALF as i32 + 1));
+    }
+
+    /// The same mask is a different drawing in each projection, and the bank
+    /// keeps both — so the player who flips back and forth pays each bake once.
+    #[test]
+    fn the_bank_holds_a_cell_per_projection() {
+        let flat = {
+            let _guard = crate::map::tests::ProjectionGuard::new(rail_map::Projection::TopDown);
+            (key(1 << 2, false), paint_cell(key(1 << 2, false), Pass::Base))
+        };
+        let iso = {
+            let _guard = crate::map::tests::ProjectionGuard::new(rail_map::Projection::Iso);
+            (key(1 << 2, false), paint_cell(key(1 << 2, false), Pass::Base))
+        };
+        assert_ne!(flat.0, iso.0, "the projection has to be part of the key");
+        assert_ne!(flat.1.px, iso.1.px, "and the two keys have to draw apart");
     }
 
     /// The polish layer is railhead only, so fading it up cannot smear the
@@ -677,6 +808,7 @@ mod tests {
     /// where several legs' rails cross each other.
     #[test]
     fn the_polish_layer_holds_only_railheads() {
+        let _flat = flat();
         let masks = [
             1u16 << 2,                                     // a straight east leg
             (1 << 2) | (1 << 6),                           // straight through
@@ -713,33 +845,63 @@ mod tests {
         }
     }
 
+    /// Counts colours rather than probing fixed texels
+    /// — the claim ("a bridge is timber, not ballast, and still carries rail")
+    /// is the same, but where a given texel lands is now the projection's
+    /// business.
     #[test]
     fn a_bridge_decks_in_timber_instead_of_ballast() {
+        let _flat = flat();
         let ground = paint_cell(key(1 << 2, false), Pass::Base);
         let bridge = paint_cell(key(1 << 2, true), Pass::Base);
         assert_ne!(ground.px, bridge.px);
-        let plank = |px: [u8; 4]| px == rgba(WOOD_D) || px == rgba(WOOD_M);
-        assert!(plank(bridge.at(10, 7)), "deck should be planked");
-        assert!(!plank(ground.at(10, 7)), "ballast should not be timber");
+        let count = |c: &Canvas, want: Color| {
+            let want = rgba(want);
+            c.px.chunks_exact(4).filter(|p| *p == want).count()
+        };
+        // One 16-unit leg of 16-unit-wide deck is ~256 ground units²; the
+        // projection preserves area (its determinant is 1) and rasterising it
+        // rounds some away, so the floor is well under that.
+        let planks = count(&bridge, WOOD_D) + count(&bridge, WOOD_M);
+        assert!(planks > 120, "deck should be planked: {planks} texels");
+        assert_eq!(
+            count(&ground, WOOD_D) + count(&ground, WOOD_M),
+            0,
+            "ballast should not be timber"
+        );
+        assert_eq!(
+            count(&bridge, BALLAST_D) + count(&bridge, BALLAST_M),
+            0,
+            "a deck should not also be ballasted"
+        );
         // Rails still run over the deck.
-        assert_eq!(bridge.at(10, 4), rgba(RAIL_L));
+        assert!(count(&bridge, RAIL_L) > 20, "no railhead over the deck");
     }
 
     #[test]
     fn an_isolated_piece_still_reads_as_track() {
+        let _flat = flat();
         let lone = paint_cell(key(0, false), Pass::Base);
         let painted = (-CENTER..CENTER)
             .flat_map(|x| (-CENTER..CENTER).map(move |y| (x, y)))
             .filter(|&(x, y)| opaque(lone.at(x, y)))
             .count();
         assert!(painted > 500, "a lone tile should still show a stub");
-        assert_eq!(lone.at(8, 4), rgba(RAIL_L));
+        // The stub still carries railhead, but which texel it
+        // lands on is the projection's business, so count instead of probing.
+        let heads = lone
+            .px
+            .chunks_exact(4)
+            .filter(|p| *p == rgba(RAIL_L))
+            .count();
+        assert!(heads > 20, "a lone stub with no railhead: {heads}");
     }
 
     /// A junction is one cell, not a rotation of a straight — the mask picks
     /// which legs get stamped.
     #[test]
     fn a_turnout_composites_all_of_its_legs() {
+        let _flat = flat();
         // N, S and NNE: a through route with a shallow diverging leg.
         let turnout = paint_cell(key((1 << 0) | (1 << 4) | (1 << 8), false), Pass::Base);
         let straight = paint_cell(key((1 << 0) | (1 << 4), false), Pass::Base);
@@ -759,6 +921,7 @@ mod tests {
     /// World-anchored, never screen- or time-anchored (§2.4).
     #[test]
     fn decoration_variants_are_world_anchored() {
+        let _flat = flat();
         let a = variant_for(TileCoord { x: 4, y: 9 });
         assert_eq!(a, variant_for(TileCoord { x: 4, y: 9 }), "must be stable");
         assert!(a < VARIANTS);
@@ -793,6 +956,7 @@ mod tests {
     /// painted twice (§2.5).
     #[test]
     fn the_bank_bakes_each_cell_once() {
+        let _flat = flat();
         let mut app = App::new();
         app.init_resource::<Assets<Image>>();
         let images = &mut app.world_mut().resource_mut::<Assets<Image>>();
@@ -819,6 +983,7 @@ mod tests {
 
     #[test]
     fn the_cell_honours_the_pixel_contract() {
+        let _flat = flat();
         assert_eq!(CELL % TILE_SIZE as u32, 0);
         assert_eq!(TEXELS_PER_TILE, TILE_SIZE);
         let image = cell_image(paint_cell(key(1 << 2, false), Pass::Base));

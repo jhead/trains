@@ -286,7 +286,7 @@ Step 1 runs in `PreUpdate` (`ui::WindowEscSet`) and **consumes the key press** w
 | `V` `B` `X` `L` `T` `G` | Look / Track / Demolish / Line / Transit / Transport |
 | `P` `U` | Place station / upgrade station |
 | `Enter` | Commit the line being drawn |
-| `H` `Y` `K` `C` `O` `N` | Network / Town Talk / Ledger / Alerts / Goals / Neighbours |
+| `H` `Y` `K` `C` `O` `N` `R` | Network / Town Talk / Ledger / Alerts / Goals / Neighbours / Trains |
 | `Space` | Pause / resume |
 | `1` `2` `3` | Speed |
 | `WASD`, arrows | Pan |

@@ -154,6 +154,28 @@ tests.**
 | "Really confused by the Lines mechanic... clicked the train but nothing happens" | A designed-but-never-wired flow: the Line tool switched out of Look mode and never switched back; only Look selects; the assign button fails silently with nothing selected; no dedupe; no delete; the intended click-to-assign helper sat as dead code. Now the tool returns to Look on every exit (Enter *and* Esc), the new line auto-focuses, a fresh train pick assigns to the focused line and says so in Town Talk, the button states its precondition out loud, duplicates (including reversed — an out-and-back is one service) are refused at both layers, rows carry a Remove button through the confirm dialog (X stays demolish: sticky focus would have turned it into a trap), and "Westbroo" got its name back. |
 | "Can the prototype run as a mode inside the game?" | Yes — `iso-mode` merged. The projection is a runtime flag at the coords choke point; `I` (or Settings > Display) flips it live via the same presentation rebuild a new world runs. Top-down default is asserted byte-identical; flip costs 0.3 ms into iso, ~16 ms back (the chunk compositor, priced the same as a world swap); Map View works in both; sim-hash asserted unchanged across mid-play flips. Known iso gaps stand: no autotiling (shoreline staircases), top-down sprites read as stickers, and the calm worldgen means most of a stock map is flat — the projection's best argument now only appears where a landform does. |
 
+## Fourth wave (2026-08-04): five agents, five landings, one dead promise found
+
+Five worktree agents ran concurrently against explicit file fences and landed in
+dependency order, full suite green between every merge. 1,293 → **1,418 tests.**
+
+| Landing | What it settled |
+| --- | --- |
+| **Iso inclines** (brief 15, new) | The 2:1 projection is affine in height, so a ramp is the straight screen segment between tile centres and every joint is whole-texel for all 16 directions × 9 grades — asserted as *equality*, not tolerance. Ghost draws the placed piece's own baked cell. Top-down pinned byte-identical by 96 golden hashes. The "~1 px jog" folklore was measured to be sleeper-pitch stutter, not a gap; pitch now fits the link. |
+| **Desire paths** (brief 16, new) | Wear counts *footfalls* (not ticks — walking speed must not dig deeper), 64 per step against thresholds 256/640/1024, regrowth 60/sim-day. Trunks outside stations wear first; doorsteps stay clean. **Schema 4 → 5 with a real v4 migration** — a deliberate soften of "other schema ⇒ refuse", because losing live worlds to a cosmetic layer is an absurd trade; the mirror-struct caveat is recorded at the code. Known bias, named in the brief: wear samples full-detail peeps, so paths form where the camera has been. |
+| **Coast foam & glints** | Foam applied its edge inset in *screen* space — identical to ground space top-down, 45°-rotated and doubled in iso, so every lip stood a corner off its shore and flips stranded 337/415 of them. Now ground-anchored like everything else. The generic sweep this added — every world sprite resolves to the same tile in both projections — failed on 173/382 sprites pre-fix, and found `game_app` had never registered `AtmospherePlugin`: the whole layer was invisible to every class test until now. |
+| **Trains window & refusals** | "Cannot place a freight train" was four silent refusals, not a sprite bug — led by the failed debit on a $4,500 goods train. Refusals now speak in Town Talk; `R` opens rolling stock with Place/Sell/Find; `TrainsParked` repurposed as a quiet "N in yard" count, deliberately not warn-painted. |
+| **Stations on the toolbar** | Station arms as a mode with the tier row (prices inline); Upgrade stays on the Inspector because it arms nothing. Catchment preview existed and got pinned by tests instead of rebuilt. **The wave's biggest find: growth was structurally dead** — service score decayed 1/tick after 120 idle ticks, nothing outruns that, every station sat at 0 and `density_target_at` multiplies by score/100. Now decay is 1/sim-minute and a scheduled call banks half an arrival; end-to-end test proves a newly line-served station grows its town. *These two constants are the wave's open veto item.* |
+
+Integration notes: the only textual conflicts were where two agents extended the
+same seams (`visuals.rs` bake key, `iso.rs` test compositors) and resolved to
+the union — main's trigger-free reconcile kept, grades and projection both in
+the staleness check. One semantic collision no fence could catch: the stations
+agent widened the toolbar's arm path to carry `StationToolState`, which the
+trains window's minimal test app didn't provide; one `init_resource` line. The
+pacing agent (in flight) was told mid-run that its growth baselines were
+measurements of the broken scorer.
+
 ## Carried debt
 
 Things that work but are known-shallow, with the brief that wants more.
@@ -161,7 +183,9 @@ Things that work but are known-shallow, with the brief that wants more.
 | Item | Note |
 | --- | --- |
 | **Build preview shows cost, not upkeep** | The cold-start work showed alignment efficiency drives payback (4–16 min spread for the same hop). The ghost prices construction; showing the run's added $/min maintenance next to it would put 08 §3.1's liability in the player's hand at decision time. |
-| **Iso mode is a projection, not yet an art style** | No diamond autotiler (material transitions, shorelines, contours), non-terrain sprites are top-down stickers, rail cross-section aliases at 1 texel, cliff-occluded picks (~1 tile in 20). The toggle is the evaluation instrument; the redraw is the (large) bill if it's ever promoted. |
+| **Iso mode is a projection, not yet an art style** | No diamond autotiler (material transitions, shorelines, contours), non-terrain sprites are top-down stickers, cliff-occluded picks (~1 tile in 20). Inclines and the water layer have native iso art now; the autotiler and sprite re-draws remain the (large) bill. Per the owner, iso is where build effort goes. |
+| **Desire-path wear follows the camera** | Wear samples full-detail peeps and that set is viewport-biased (`PeepFocus`). Deterministic, but the network belongs to your attention, not the town's routines. The fix — depositing wear along abstracted peeps' planned routes — is strictly better and considerably larger (16 §5). |
+| **No insert-stop verb** | Extending a line is `RemoveLine` + `CreateLine`. Works, and the station manage flow now makes it visible; a real "add this stop to the line" is the natural next beat. |
 | **Single-track rings still deadlock** | The Gridlock alert names it and the fix; the *sim* remedy (a train backing out, or refusing to enter a corridor that cannot pass) is real movement work. Brief 07 §4.3's signals remain the depth extension. |
 | **Train capacity / acceleration** | Brief 07 §3 calls acceleration "the defining trait" and capacity is still one job per train for both kinds. The profile table has the seams; neither dimension exists yet. |
 | **Brief 13 (shadows) is designed, not built** | The commit that added the brief touched only docs. Phase 1 (shade operator, band hems, fray) is the shippable slice. |

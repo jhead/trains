@@ -58,9 +58,9 @@ Legend: **Built** — works and is defensible · **Thin** — exists but does no
 
 | Promise | Status | Detail |
 | --- | --- | --- |
-| Income from throughput | Built | $5 fares, $20 deliveries. |
-| Costs from construction **and from operating expenses that scale with how much network you're running** | **Thin — promise unmet** | Opex is `TRAIN_OPEX_CENTS = 10` per unparked *train* per tick. **Track has no running cost.** Network size is therefore free to hold. |
-| Overextension inverts it; the response is to prune and rebalance | **Absent** | Cannot happen. A player who paves the entire map pays exactly nothing extra. The prune-and-rebalance response the design names has no trigger. |
+| Income from throughput | Built | Distance-scaled fares with a boarding component, plus deliveries. |
+| Costs from construction **and from operating expenses that scale with how much network you're running** | Built | Per-kind train opex (`TrainProfile::opex_cents_per_real_min`) and per-piece track maintenance (`MAINT_CENTS_PER_WEIGHT_PER_REAL_MIN`, bridges weighted heavier), both billed per real minute. Network size now costs to hold. |
+| Overextension inverts it; the response is to prune and rebalance | Built | Idle track and stock bleed maintenance and opex every real minute; the second playtest's ledger showed exactly this inversion, and demolition refunds make pruning the real response. |
 | Money paces expansion, never ends the game | Built | Soft-park on insufficient funds, never delete. Good, keep it. |
 
 ### 2.6 Pressure

@@ -115,7 +115,7 @@ Growth is driven by **accessibility, not proximity.** A station five tiles away 
 | Factor | Effect |
 | --- | --- |
 | Journey time to places people want to go | The dominant term |
-| Service reliability — do trains actually come? | Multiplier |
+| Service reliability — do trains actually come? | Multiplier. A scheduled call counts at half the weight of a delivery, and the score forgets at one point per sim-minute — corrected (2026-08-04) from per-tick decay, which no schedule on earth could outrun; the multiplier sat at zero everywhere and growth was structurally dead. Arithmetic in `rail_sim/src/stations/service.rs`. |
 | Walking distance to a station | Falloff, but secondary to the above |
 | Local employment — industries and commerce reachable | Enables higher tiers |
 | Terrain suitability | Flat and dry builds; cliffs and marsh don't |

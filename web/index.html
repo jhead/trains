@@ -150,6 +150,31 @@
       const failed = document.getElementById("failed");
       const canvas = document.getElementById("rail-town");
 
+      // A hidden tab throttles requestAnimationFrame, which freezes the game
+      // loop — but the audio callback keeps running, so a backgrounded copy
+      // of the game droned on at its last mix forever (three tabs of it, in
+      // the playtest that found this). The in-game focus mute cannot help
+      // while the loop is not ticking, so the page suspends the audio context
+      // itself. The constructor is wrapped before the engine loads so every
+      // context it creates is caught.
+      const audioContexts = [];
+      for (const name of ["AudioContext", "webkitAudioContext"]) {
+        const Native = window[name];
+        if (!Native) continue;
+        window[name] = class extends Native {
+          constructor(...args) {
+            super(...args);
+            audioContexts.push(this);
+          }
+        };
+      }
+      document.addEventListener("visibilitychange", () => {
+        for (const ctx of audioContexts) {
+          if (document.hidden) ctx.suspend();
+          else ctx.resume();
+        }
+      });
+
       // Right-drag is the demolish gesture (brief 04 §4), and the browser's
       // context menu swallows it. Scoped to the canvas, so the rest of the
       // page — and everything else in the browser — keeps its menu.

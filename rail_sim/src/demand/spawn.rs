@@ -719,11 +719,22 @@ mod tests {
         );
     }
 
+    /// A new settlement becomes work the moment the player reaches it — and not
+    /// one tick before.
+    ///
+    /// Both halves matter, and the second one is why the opening beat was
+    /// unplayable. An opportunity is *unconnected by definition*, so posting
+    /// jobs to it puts demand on the board that no train can ever clear; the
+    /// board is a fixed-size queue with no expiry, and within a couple of real
+    /// minutes every slot held a run between villages with no track while the
+    /// one line the player had built could not get a fare posted. See
+    /// `rail_sim/tests/economy_cold_start.rs` for the measurement.
     #[test]
-    fn jobs_board_picks_up_new_stations() {
+    fn a_new_settlement_becomes_work_once_the_player_connects_it() {
         let mut app = App::new();
         app.add_plugins(SimPlugin);
-        app.world_mut().insert_resource(land_terrain(32, 32));
+        let terrain = land_terrain(32, 32);
+        app.world_mut().insert_resource(terrain.clone());
         {
             let mut stations = StationRegistry::new();
             let mut industries = IndustryRegistry::new();
@@ -753,25 +764,97 @@ mod tests {
         assert!(station_count >= 4, "new settlement should exist");
         let max_seed_id = 3u64;
 
-        // Force frequent job waves so the A→B cycle covers the new station.
-        for _ in 0..40 {
-            {
-                let mut board = app.world_mut().resource_mut::<JobBoard>();
-                board.spawn_cooldown = 10_000; // trip spawn_demand_jobs gate
+        let newcomer = {
+            let stations = app.world().resource::<StationRegistry>();
+            stations
+                .iter()
+                .filter(|s| s.id.0 > max_seed_id)
+                .min_by_key(|s| s.id.0)
+                .map(|s| (s.id, s.tile))
+                .expect("the settlement that just appeared")
+        };
+
+        // Force frequent job waves so every ordered pair comes round.
+        let spin = |app: &mut App, waves: u32| {
+            for _ in 0..waves {
+                {
+                    let mut board = app.world_mut().resource_mut::<JobBoard>();
+                    board.spawn_cooldown = 10_000; // trip spawn_demand_jobs gate
+                }
+                app.world_mut().run_schedule(FixedUpdate);
             }
-            app.world_mut().run_schedule(FixedUpdate);
-        }
-        let board = app.world().resource::<JobBoard>();
-        let has_new_endpoint = board.jobs.iter().any(|j| match &j.kind {
-            crate::economy::JobKind::Passenger { from, to } => {
-                from.0 > max_seed_id || to.0 > max_seed_id
-            }
-            _ => false,
-        });
+        };
+        let mentions_newcomer = |app: &App| {
+            app.world()
+                .resource::<JobBoard>()
+                .jobs
+                .iter()
+                .any(|j| match &j.kind {
+                    crate::economy::JobKind::Passenger { from, to } => {
+                        *from == newcomer.0 || *to == newcomer.0
+                    }
+                    _ => false,
+                })
+        };
+
+        spin(&mut app, 60);
         assert!(
-            has_new_endpoint,
-            "passenger jobs should eventually include new stations; board={:?}",
-            board.jobs
+            !mentions_newcomer(&app),
+            "an unconnected settlement must not hold a board slot no train can \
+             clear; board={:?}",
+            app.world().resource::<JobBoard>().jobs
+        );
+
+        // The player runs a line from the nearest seeded anchor to the newcomer.
+        let anchor = {
+            let stations = app.world().resource::<StationRegistry>();
+            stations
+                .iter()
+                .filter(|s| s.id.0 <= max_seed_id)
+                .min_by_key(|s| {
+                    (
+                        (s.tile.x - newcomer.1.x).abs() + (s.tile.y - newcomer.1.y).abs(),
+                        s.id.0,
+                    )
+                })
+                .map(|s| s.tile)
+                .expect("a seeded anchor")
+        };
+        app.world_mut()
+            .resource_scope(|world, mut network: Mut<crate::track::TrackNetwork>| {
+                world.resource_scope(|world, mut money: Mut<crate::money::Money>| {
+                    world.resource_scope(|_w, mut ledger: Mut<crate::economy::MoneyLedger>| {
+                        *money = crate::money::Money::new(100_000_000);
+                        let mut cur = anchor;
+                        while cur != newcomer.1 {
+                            let _ = crate::track::try_place_track(
+                                &mut network,
+                                &mut money,
+                                &mut ledger,
+                                &terrain,
+                                cur,
+                                GROUND_LAYER,
+                            );
+                            cur.x += (newcomer.1.x - cur.x).signum();
+                            cur.y += (newcomer.1.y - cur.y).signum();
+                        }
+                        let _ = crate::track::try_place_track(
+                            &mut network,
+                            &mut money,
+                            &mut ledger,
+                            &terrain,
+                            newcomer.1,
+                            GROUND_LAYER,
+                        );
+                    });
+                });
+            });
+
+        spin(&mut app, 60);
+        assert!(
+            mentions_newcomer(&app),
+            "a connected settlement must produce fares; board={:?}",
+            app.world().resource::<JobBoard>().jobs
         );
     }
 }

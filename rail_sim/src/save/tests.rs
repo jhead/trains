@@ -115,16 +115,20 @@ fn lived_in_world() -> World {
     let doomed = stations.insert("Gravesend", TileCoord { x: 3, y: 3 }, GROUND_LAYER);
     stations.remove(doomed);
 
+    // Both works stand a row off the line, so a railhead reaches each of them.
+    // That is load-bearing: `spawn_demand_jobs` only posts work a train could
+    // take, so a quarry out in the fields produces no goods job and the
+    // snapshot below would carry no `Goods` variant to round-trip.
     let mut industries = IndustryRegistry::new();
     let quarry = industries.insert(
         "Quarry Ridge",
-        TileCoord { x: 2, y: 6 },
+        TileCoord { x: 2, y: 4 },
         Some(GoodKind::Ore),
         None,
     );
     let foundry = industries.insert(
         "Harbor Foundry",
-        TileCoord { x: 9, y: 1 },
+        TileCoord { x: 4, y: 2 },
         None,
         Some(GoodKind::Ore),
     );

@@ -70,11 +70,48 @@ const MAX_PASSENGER_JOBS: usize = 8;
 const MAX_GOODS_JOBS: usize = 4;
 const SPAWN_EVERY_TICKS: u16 = 45;
 
+/// The board only carries work a train could actually take.
+///
+/// # Why this filter exists
+///
+/// A job is not "somebody wants to travel" — the town wants that whether or not
+/// there is a railway, and [`crate::demand::spawn_new_demand`] is what puts an
+/// unserved place on the player's map. A **job** is a run the railway can make,
+/// and the board is a fixed-size queue with no expiry: anything posted between
+/// two places no train can reach sits there forever, holding a slot.
+///
+/// Left unfiltered that is fatal at cold start, and it was. `spawn_new_demand`
+/// plants a new settlement every few minutes and every one of them is
+/// unconnected *by definition*; each adds ordered pairs to the walk below, and
+/// within a couple of minutes all eight passenger slots are demand between
+/// villages with no track, while the one line the player actually built cannot
+/// get a job posted. Measured on the opening beat: two fares in fifteen minutes,
+/// against $440/min of running costs.
+fn passenger_route_exists(
+    network: &TrackNetwork,
+    stations: &StationRegistry,
+    from: StationId,
+    to: StationId,
+) -> bool {
+    path_stations(network, stations, TrainKind::Transit, from, to).is_some()
+}
+
+fn goods_route_exists(
+    network: &TrackNetwork,
+    stations: &StationRegistry,
+    industries: &IndustryRegistry,
+    from: IndustryId,
+    to: IndustryId,
+) -> bool {
+    path_industries(network, stations, industries, TrainKind::Transport, from, to).is_some()
+}
+
 /// Periodically create passenger A→B and goods industry→industry jobs.
 pub fn spawn_demand_jobs(
     mut board: ResMut<JobBoard>,
     stations: Res<StationRegistry>,
     industries: Res<IndustryRegistry>,
+    network: Res<TrackNetwork>,
     mut service: ResMut<StationService>,
 ) {
     board.spawn_cooldown = board.spawn_cooldown.saturating_add(1);
@@ -84,34 +121,59 @@ pub fn spawn_demand_jobs(
     }
     board.spawn_cooldown = 0;
 
+    // Sweep work the railway can no longer make. Track lifted between two stops
+    // strands whatever was posted between them, and without this the slot is
+    // gone for the rest of the session.
+    board.jobs.retain(|job| match job.kind {
+        JobKind::Passenger { from, to } => passenger_route_exists(&network, &stations, from, to),
+        JobKind::Goods { from, to, .. } => {
+            goods_route_exists(&network, &stations, &industries, from, to)
+        }
+    });
+
     // Sorted, because [`StationRegistry::iter`] walks a `HashMap` and the pair
-    // this picks is indexed by tick. Left unsorted, two runs of the same seed
-    // send different people between different towns — and now that a fare
+    // this picks is indexed by a counter. Left unsorted, two runs of the same
+    // seed send different people between different towns — and now that a fare
     // scales with the distance travelled, they earn different money for it.
+    // Walk the stops rail has reached, not every stop on the map. This is the
+    // half of the cold-start fix that matters most: the walk's period is
+    // `n(n-1)`, so a served pair's share of the waves falls off as `1/n²` if the
+    // whole map is in the domain. A player two minutes into a session has two
+    // connected stops and a world busily adding unconnected ones — walking all
+    // of them would push their one line's turn from every other wave to one in
+    // thirty, and then one in ninety, purely because the world spoke up.
     let mut station_ids: Vec<StationId> = stations.iter().map(|s| s.id).collect();
     station_ids.sort_unstable_by_key(|id| id.0);
-    if station_ids.len() >= 2 {
+    let connected: Vec<StationId> = station_ids
+        .into_iter()
+        .filter(|id| {
+            stations
+                .get(*id)
+                .and_then(|s| track_for_station(&network, s.tile, s.layer))
+                .is_some()
+        })
+        .collect();
+
+    if connected.len() >= 2 {
         let passenger_count = board
             .jobs
             .iter()
             .filter(|j| matches!(j.kind, JobKind::Passenger { .. }))
             .count();
         if passenger_count < MAX_PASSENGER_JOBS {
-            let tick = service.tick as usize;
-            let from = station_ids[tick % station_ids.len()];
-            let to = station_ids[(tick / station_ids.len() + 1) % station_ids.len()];
-            if from != to
-                && !board.jobs.iter().any(|j| {
+            if let Some((from, to)) = next_pair(&connected, spawn_wave(service.tick)) {
+                let already = board.jobs.iter().any(|j| {
                     matches!(
                         &j.kind,
                         JobKind::Passenger { from: f, to: t } if *f == from && *t == to
                     )
-                })
-            {
-                board.jobs.push(Job {
-                    kind: JobKind::Passenger { from, to },
-                    reward_cents: passenger_reward(&stations, from, to),
                 });
+                if !already && passenger_route_exists(&network, &stations, from, to) {
+                    board.jobs.push(Job {
+                        kind: JobKind::Passenger { from, to },
+                        reward_cents: passenger_reward(&stations, from, to),
+                    });
+                }
             }
         }
     }
@@ -139,7 +201,9 @@ pub fn spawn_demand_jobs(
                         if *k == good && *f == producer.id && *t == consumer.id
                 )
             });
-            if !exists {
+            if !exists
+                && goods_route_exists(&network, &stations, &industries, producer.id, consumer.id)
+            {
                 board.jobs.push(Job {
                     kind: JobKind::Goods {
                         kind: good,
@@ -153,6 +217,47 @@ pub fn spawn_demand_jobs(
     }
 
     refresh_waiting(&board, &stations, &mut service);
+}
+
+/// Which spawn wave a tick belongs to.
+///
+/// [`StationService::tick`] advances once per Advance tick and this system fires
+/// every [`SPAWN_EVERY_TICKS`], so this advances by exactly one per wave — a
+/// per-wave counter that costs no new state on [`JobBoard`], which is
+/// positionally serialised into the save.
+fn spawn_wave(tick: u64) -> u64 {
+    tick / SPAWN_EVERY_TICKS as u64
+}
+
+/// The `wave`-th ordered pair of `ids`, walking every pair before repeating.
+///
+/// # The walk that did not walk
+///
+/// This used to be `from = ids[tick % n]`, `to = ids[(tick / n + 1) % n]`, with
+/// `tick` the raw sim tick. Between two spawn waves the tick advances by exactly
+/// [`SPAWN_EVERY_TICKS`] = 45, so with three stations `tick % 3` never changed
+/// (45 is a multiple of 3) and `tick / 3` advanced by 15, which is also a
+/// multiple of 3 — **both** indices were frozen. Three seeded anchors is what
+/// every new world opens with, so the board posted one ordered pair, forever,
+/// and a one-in-three chance decided whether the player's first line was ever
+/// given a single fare to earn. `economy_arc.rs` never saw it because it builds
+/// two-station worlds, and `gcd(45, 2) = 1`.
+///
+/// Indexing by wave rather than by tick removes the shared factor, and
+/// enumerating the pairs directly removes the modular arithmetic that hid it:
+/// `n` stations have `n(n-1)` ordered pairs and this returns each in turn.
+fn next_pair(ids: &[StationId], wave: u64) -> Option<(StationId, StationId)> {
+    let n = ids.len();
+    if n < 2 {
+        return None;
+    }
+    let pairs = (n * (n - 1)) as u64;
+    let k = (wave % pairs) as usize;
+    let from = k / (n - 1);
+    let offset = k % (n - 1);
+    // Skip the diagonal: `to` is never `from`.
+    let to = if offset >= from { offset + 1 } else { offset };
+    Some((ids[from], ids[to]))
 }
 
 /// Publish the peep platform queue into the service score.
@@ -179,6 +284,7 @@ pub fn drain_peep_demand(
     mut board: ResMut<JobBoard>,
     mut flow: ResMut<DistrictFlow>,
     stations: Res<StationRegistry>,
+    network: Res<TrackNetwork>,
 ) {
     for (from, to) in flow.take_pending() {
         if from == to {
@@ -186,6 +292,13 @@ pub fn drain_peep_demand(
         }
         if board.jobs.len() >= MAX_PASSENGER_JOBS + MAX_GOODS_JOBS {
             break;
+        }
+        // Somebody in an unconnected village still wants to travel — they walk,
+        // and the flow model grades that as a failed journey. What they cannot
+        // do is become a *rail* job holding a board slot no train can clear.
+        // See [`passenger_route_exists`].
+        if !passenger_route_exists(&network, &stations, from, to) {
+            continue;
         }
         let already = board.jobs.iter().any(|j| {
             matches!(
@@ -634,6 +747,79 @@ mod tests {
     use crate::money::Money;
     use crate::stations::{IndustryTier, GOODS_PLATFORM_COST_CENTS};
     use crate::track::{try_place_track, TrackTerrain};
+
+    fn ids(n: u64) -> Vec<StationId> {
+        (1..=n).map(StationId).collect()
+    }
+
+    /// Every ordered pair comes round, for every size of network.
+    ///
+    /// The walk is the whole demand supply for a passenger railway. One pair it
+    /// can never reach is a line the player built that can never earn.
+    #[test]
+    fn the_pair_walk_reaches_every_ordered_pair() {
+        for n in 2..=6u64 {
+            let stops = ids(n);
+            let pairs = (n * (n - 1)) as usize;
+            let mut seen: Vec<(StationId, StationId)> = (0..pairs as u64)
+                .map(|wave| next_pair(&stops, wave).expect("two or more stops"))
+                .collect();
+            assert!(
+                seen.iter().all(|(a, b)| a != b),
+                "{n} stops: the walk sent somebody to the town they started in"
+            );
+            seen.sort_unstable_by_key(|(a, b)| (a.0, b.0));
+            seen.dedup();
+            assert_eq!(
+                seen.len(),
+                pairs,
+                "{n} stops has {pairs} ordered pairs; the walk found {}",
+                seen.len()
+            );
+        }
+    }
+
+    /// **The regression this file exists for.**
+    ///
+    /// The walk used to be indexed by the raw sim tick, and it fires every
+    /// [`SPAWN_EVERY_TICKS`] ticks — so between waves the index advanced by
+    /// exactly 45. With three stations `tick % 3` never changed, because 45 is a
+    /// multiple of 3, and `tick / 3` advanced by 15, which is also a multiple of
+    /// 3: **both ends of the pair were frozen for the whole session**. Three
+    /// seeded anchors is what every new world opens with, so a one-in-three
+    /// chance decided whether the player's first line was ever offered a fare.
+    ///
+    /// Indexing by wave is what fixes it, and this is the check that the two
+    /// numbers cannot silently share a factor again.
+    #[test]
+    fn the_walk_still_walks_when_the_spawn_interval_divides_the_station_count() {
+        for n in 2..=6u64 {
+            let stops = ids(n);
+            let waves: Vec<(StationId, StationId)> = (0..8)
+                .map(|w| {
+                    let tick = w * u64::from(SPAWN_EVERY_TICKS);
+                    next_pair(&stops, spawn_wave(tick)).expect("two or more stops")
+                })
+                .collect();
+            let distinct = {
+                let mut v = waves.clone();
+                v.sort_unstable_by_key(|(a, b)| (a.0, b.0));
+                v.dedup();
+                v.len()
+            };
+            assert!(
+                distinct > 1,
+                "{n} stops: eight consecutive spawn waves produced one pair \
+                 forever — {waves:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lone_station_has_nobody_to_send_anywhere() {
+        assert_eq!(next_pair(&ids(1), 0), None);
+        assert_eq!(next_pair(&[], 7), None);
+    }
 
     /// Flat land with one east-west line along `y = 8`, `x = 2..=17`.
     fn line_world() -> TrackNetwork {

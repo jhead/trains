@@ -23,9 +23,10 @@ pub struct TrainProfile {
     /// 640 apart, and naming the wrong one made every running cost inert.
     ///
     /// Sized against what a train earns rather than what it cost: a transit
-    /// working a good line grosses around `$1,300` a minute, so `$140` of that
-    /// is the crew and the coal. Rolling stock that sits idle on a siding is
-    /// therefore a slow leak, which is the point (design 08 §3.3).
+    /// working the opening beat grosses around `$1,070` a minute and a
+    /// well-shaped line rather more, so `$140` of that is the crew and the
+    /// coal. Rolling stock that sits idle on a siding is therefore a slow leak,
+    /// which is the point (design 08 §3.3).
     pub opex_cents_per_real_min: i64,
     /// Ticks to wait at a stop after arrival before taking new work.
     pub dwell_ticks: u16,

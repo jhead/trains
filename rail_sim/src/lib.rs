@@ -52,8 +52,8 @@ pub use demand::{
 pub use economy::{
     apply_track_maintenance, apply_train_opex, assign_jobs, drain_peep_demand,
     goods_delivery_cents, haul_tiles, passenger_fare_cents, refresh_alerts, requeue_cargo,
-    resolve_deliveries,
-    spawn_demand_jobs, sync_peep_platform_pressure, tick_money_ledger, track_maintenance_total,
+    resolve_deliveries, spawn_demand_jobs, station_maintenance_billed,
+    sync_peep_platform_pressure, tick_money_ledger, track_maintenance_total,
     train_opex_total_cents_per_real_min, Alert, AlertBoard, AlertFocus, AlertKind, AlertKey, Job,
     JobBoard, JobKind, MaintenanceAccrual, MoneyCategory, MoneyLedger, ALERT_CASH_LOW_MINUTES,
     ALERT_SERVICE_LOW_SCORE, ALERT_WAITING_OVERWHELMED, GOODS_DELIVERY_CENTS,

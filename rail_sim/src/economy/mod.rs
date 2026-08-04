@@ -20,8 +20,8 @@ pub use ledger::{
     LEDGER_SAMPLE_SIM_SECS,
 };
 pub use opex::{
-    apply_track_maintenance, apply_train_opex, track_maintenance_total,
-    train_opex_total_cents_per_real_min, MaintenanceAccrual,
+    apply_track_maintenance, apply_train_opex, station_maintenance_billed,
+    track_maintenance_total, train_opex_total_cents_per_real_min, MaintenanceAccrual,
     MAINT_CENTS_PER_WEIGHT_PER_REAL_MIN, TICKS_PER_REAL_MINUTE, TICKS_PER_SIM_MINUTE,
     TRAIN_OPEX_CENTS,
 };

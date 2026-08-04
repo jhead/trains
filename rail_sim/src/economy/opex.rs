@@ -54,7 +54,7 @@ use bevy_ecs::prelude::*;
 use crate::commands::TrainKind;
 use crate::money::Money;
 use crate::peeps::SIM_SECONDS_PER_TICK;
-use crate::stations::{station_maintenance_total, StationRegistry};
+use crate::stations::StationRegistry;
 use crate::track::{piece_maintenance_weight, TrackNetwork};
 use crate::trains::{Train, TrainLocation, TrainProfile};
 
@@ -78,11 +78,15 @@ pub const TICKS_PER_REAL_MINUTE: i64 = 64 * 60;
 /// bridge `4`); this turns that weight into money — `$10` a minute for a tile
 /// of plain track, `$40` for a tile of bridge.
 ///
-/// Sized against what track *earns*, not what it cost to lay. A sixteen-tile
-/// first line worked by one transit train grosses around `$1,300` a minute and
-/// spends `$160` of it holding its own ground: a felt share, comfortably paid.
+/// Sized against what track *earns*, not what it cost to lay. The opening
+/// beat — twenty-odd tiles round a corner, two stops ten apart, one transit —
+/// grosses about `$1,070` a minute and spends `$210` of it holding its own
+/// ground. A straight sixteen-tile line between stops fifteen apart does much
+/// better, `$2,520` against the same `$160`, which is the super-linear fare
+/// rewarding a better-shaped railway rather than a cheaper one.
+///
 /// The same rate makes two hundred tiles carrying nothing cost `$2,000` a
-/// minute — against a healthy four-stop network's `$855` of margin, more than
+/// minute — against a healthy four-stop network's `$829` of margin, more than
 /// twice over. That is design 08 §3.1 working: *"track that isn't carrying
 /// enough starts costing more than it earns."*
 ///
@@ -164,6 +168,37 @@ pub fn track_maintenance_total(network: &TrackNetwork) -> i64 {
         .sum()
 }
 
+/// Station upkeep the player is actually billed for, in cents per real minute.
+///
+/// A stop with no railhead under it is not a stop the railway is maintaining —
+/// it is a town on the map. The distinction is not pedantic, because two kinds
+/// of station arrive without the player building anything:
+/// [`seed_stations_and_industries`](crate::stations::seed_stations_and_industries)
+/// plants the opening anchors, and
+/// [`spawn_new_demand`](crate::demand::spawn_new_demand) plants a new settlement
+/// every few minutes for the rest of the session — *unconnected by definition*,
+/// since being unconnected is what makes it an opportunity.
+///
+/// Billing those was a slow, invisible tax on doing nothing: a fresh world
+/// opened at `$90`/min of station upkeep for three anchors the player had not
+/// reached, and every marker the world put down added `$30`/min more, forever,
+/// whether or not it was ever served. Measured over the first fifteen minutes of
+/// the opening beat that is `$440`/min rising to `$500`/min with no change to
+/// the railway. Design 08 §3.3's liability is *"an interchange nobody uses"* —
+/// something the player chose and paid for — not a village the world invented.
+///
+/// Player-built stops are unaffected: [`try_place_station`] refuses a site with
+/// no track under it, so anything the player paid for is always billed.
+///
+/// [`try_place_station`]: crate::stations::try_place_station
+pub fn station_maintenance_billed(network: &TrackNetwork, stations: &StationRegistry) -> i64 {
+    stations
+        .iter()
+        .filter(|s| crate::trains::track_for_station(network, s.tile, s.layer).is_some())
+        .map(|s| s.tier.maint_cents_per_real_min())
+        .sum()
+}
+
 /// Debit track and station maintenance, spread evenly across the minute.
 ///
 /// Never parks trains and never drains the balance below zero: unpaid upkeep is
@@ -176,7 +211,8 @@ pub fn apply_track_maintenance(
     stations: Res<StationRegistry>,
 ) {
     // A station is a kind of track, so its upkeep shares the same bucket.
-    let per_real_min = track_maintenance_total(&network) + station_maintenance_total(&stations);
+    let per_real_min =
+        track_maintenance_total(&network) + station_maintenance_billed(&network, &stations);
     if per_real_min <= 0 {
         return;
     }

@@ -24,7 +24,8 @@ use bevy_app::{App, FixedUpdate};
 use rail_sim::economy::opex::{train_opex_total_cents_per_real_min, TICKS_PER_REAL_MINUTE};
 use rail_sim::ids::{StationId, TileCoord, TrackId, TrainId};
 use rail_sim::{
-    passenger_fare_cents, station_maintenance_total, track_maintenance_total, DemandSpawner,
+    passenger_fare_cents, station_maintenance_billed, station_maintenance_total,
+    track_maintenance_total, DemandSpawner,
     GoodKind, IndustryRegistry, Money, MoneyCategory, MoneyLedger, SimPlugin, StationRegistry,
     StationService, TrackNetwork, TrackTerrain, Train, TrainCargo, TrainKind, TrainLocation,
     WorldAnchorsSeeded, GROUND_LAYER, MAINT_CENTS_PER_WEIGHT_PER_REAL_MIN, TRACK_MAINT_WEIGHT,
@@ -308,6 +309,37 @@ fn demolish_dead_track(app: &mut App, from_y: i32) {
 /// Brief 08 §7: by minute ten the player has three or four stations and a first
 /// profit. Upkeep has to be a *felt* share of that — big enough that holding
 /// ground is a decision, small enough that the first line is never a mistake.
+///
+/// # The share moved, and why
+///
+/// The band below used to be `20..=45`, and this line measured 27%. It now
+/// measures 14% against **identical constants**, because the line got twice as
+/// much work done rather than because anything got cheaper:
+///
+/// | | before | after |
+/// | --- | --- | --- |
+/// | runs in three minutes | 128 | 245 |
+/// | gross | $1,318/min | $2,523/min |
+/// | upkeep | $360/min | $360/min |
+///
+/// `spawn_demand_jobs` picked its station pair by indexing the raw sim tick,
+/// which advances by exactly the spawn interval between waves; with two
+/// stations, every other wave picked the same station for both ends and posted
+/// nothing, so this train stood idle for half of every cycle. The two-station
+/// networks in this file all roughly doubled when that was fixed; the
+/// four-station ones did not move at all (`mid` went $2,428 → $2,409), and
+/// neither did the 60-tile haul, which is travel-bound rather than demand-bound.
+/// See `rail_sim/tests/economy_cold_start.rs`.
+///
+/// So the *floor* here was calibrated against a line idling half the time and
+/// has been lowered to match what the same standing cost is a share of now. It
+/// is a sanity bound, not a tuning target: the mechanism it was standing in for
+/// — track that carries nothing costing more than it earns — is measured
+/// directly by [`dead_track_sinks_the_network_and_pruning_brings_it_back`], and
+/// the share is *supposed* to vary with shape. Measured across this file after
+/// the fix: 44% for a four-tile shuttle, 38% for the opening beat, 14% here,
+/// 65% for the mid network, 16% for a sixty-tile haul. That spread is the
+/// design — reaching further keeps more of what it earns.
 #[test]
 fn an_early_network_clears_its_upkeep_with_room_to_expand() {
     let mut app = early_network();
@@ -321,8 +353,8 @@ fn an_early_network_clears_its_upkeep_with_room_to_expand() {
         rates.describe("early")
     );
     assert!(
-        (20..=45).contains(&rates.upkeep_percent()),
-        "upkeep should be a quarter to a half of gross: a rounding error means \
+        (10..=45).contains(&rates.upkeep_percent()),
+        "upkeep should stay a visible share of gross: a rounding error means \
          overextension cannot happen, a stranglehold means expansion cannot — {}",
         rates.describe("early")
     );
@@ -522,7 +554,16 @@ fn the_upkeep_the_constants_promise_is_the_upkeep_that_is_collected() {
     let promised = {
         let network = app.world().resource::<TrackNetwork>();
         let stations = app.world().resource::<StationRegistry>();
-        track_maintenance_total(network) + station_maintenance_total(stations)
+        // `_billed` rather than `_total`: what the ledger collects is the
+        // upkeep of stops rail has reached, and every stop in this network has.
+        // The two agree here, and must — a world where they disagree is one
+        // where the player is being charged for towns they never connected.
+        assert_eq!(
+            station_maintenance_billed(network, stations),
+            station_maintenance_total(stations),
+            "every stop in the mid network is on the railway"
+        );
+        track_maintenance_total(network) + station_maintenance_billed(network, stations)
     } + train_opex_total_cents_per_real_min(&[
         TrainKind::Transit,
         TrainKind::Transit,

@@ -142,12 +142,26 @@ Also in this batch: briefs 02/04 caught up to the eight-span ladder and the
 crossing target's geometric floor; the `iso-prototype` branch (2:1 dimetric,
 presentation-only) awaits the owner's accept/reject.
 
+## Third session live-fire (2026-08-03, evening): the owner played while we fixed
+
+Three defects the owner hit in a live session, each root-caused from his own
+screenshots, fixed by parallel agents, merged in sequence. 1,181 → **1,274
+tests.**
+
+| Report | Root cause and landing |
+| --- | --- |
+| "Barely moving anyone, virtually no money" — a correct 20-tile opening line bled ~$410/min against $28.80 of fares | **No constant was wrong; the demand path had three bugs.** The station-pair walk indexed the raw tick, fired every 45 ticks over 3 anchors — gcd says both ends were frozen forever, so the board posted one ordered pair and a 1-in-3 dice roll decided if a player's line ever saw a fare. The 8-slot board had no expiry while the world planted unconnected settlements, silting it shut in two minutes. And station maintenance billed every stop in the registry — $90/min for unreached anchors, rising $30/min per invented village: a tax on doing nothing. Now: the walk mixes, unservable jobs expire, and only railhead-backed stations bill. Measured: the owner's exact scenario goes from bankrupt-by-minute-8 to **surplus from minute one**, every standard seed 2.1–4.0× running costs by minute three — brief 02 §4.1's "paying out by the third" finally true. Zero src constants changed. |
+| "Really confused by the Lines mechanic... clicked the train but nothing happens" | A designed-but-never-wired flow: the Line tool switched out of Look mode and never switched back; only Look selects; the assign button fails silently with nothing selected; no dedupe; no delete; the intended click-to-assign helper sat as dead code. Now the tool returns to Look on every exit (Enter *and* Esc), the new line auto-focuses, a fresh train pick assigns to the focused line and says so in Town Talk, the button states its precondition out loud, duplicates (including reversed — an out-and-back is one service) are refused at both layers, rows carry a Remove button through the confirm dialog (X stays demolish: sticky focus would have turned it into a trap), and "Westbroo" got its name back. |
+| "Can the prototype run as a mode inside the game?" | Yes — `iso-mode` merged. The projection is a runtime flag at the coords choke point; `I` (or Settings > Display) flips it live via the same presentation rebuild a new world runs. Top-down default is asserted byte-identical; flip costs 0.3 ms into iso, ~16 ms back (the chunk compositor, priced the same as a world swap); Map View works in both; sim-hash asserted unchanged across mid-play flips. Known iso gaps stand: no autotiling (shoreline staircases), top-down sprites read as stickers, and the calm worldgen means most of a stock map is flat — the projection's best argument now only appears where a landform does. |
+
 ## Carried debt
 
 Things that work but are known-shallow, with the brief that wants more.
 
 | Item | Note |
 | --- | --- |
+| **Build preview shows cost, not upkeep** | The cold-start work showed alignment efficiency drives payback (4–16 min spread for the same hop). The ghost prices construction; showing the run's added $/min maintenance next to it would put 08 §3.1's liability in the player's hand at decision time. |
+| **Iso mode is a projection, not yet an art style** | No diamond autotiler (material transitions, shorelines, contours), non-terrain sprites are top-down stickers, rail cross-section aliases at 1 texel, cliff-occluded picks (~1 tile in 20). The toggle is the evaluation instrument; the redraw is the (large) bill if it's ever promoted. |
 | **Single-track rings still deadlock** | The Gridlock alert names it and the fix; the *sim* remedy (a train backing out, or refusing to enter a corridor that cannot pass) is real movement work. Brief 07 §4.3's signals remain the depth extension. |
 | **Train capacity / acceleration** | Brief 07 §3 calls acceleration "the defining trait" and capacity is still one job per train for both kinds. The profile table has the seams; neither dimension exists yet. |
 | **Brief 13 (shadows) is designed, not built** | The commit that added the brief touched only docs. Phase 1 (shade operator, band hems, fray) is the shippable slice. |

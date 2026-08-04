@@ -287,6 +287,21 @@ impl Ridge {
     }
 }
 
+/// How far a ridge spine keeps clear of open sea, in tiles. See [`add_ridges`].
+const SEA_STANDOFF: u16 = 10;
+
+/// Half-width of a saddle, in spine steps.
+///
+/// Arc position is carried by [`chamfer`] from the nearest spine point, so it
+/// arrives quantised to whole steps: a notch narrower than a step or so can miss
+/// every cell on the spine and cut nothing at all. At 1.6 the point nearest a
+/// designed pass always lands inside the flat of the col, whatever fraction of a
+/// step the pass itself sits at.
+const NOTCH_STEPS: f32 = 1.6;
+
+/// How sharply the saddle's flat bottom gives way to its shoulders.
+const NOTCH_SHOULDER: f32 = 1.6;
+
 /// Elevation a saddle is held down to, in bands.
 ///
 /// Band 3: hills, buildable, and two clear bands below the rock crest either
@@ -317,6 +332,24 @@ impl Elevation {
     fn at(&self, index: usize, gain: f32) -> f32 {
         (self.base[index] + self.ridge[index] * gain).min(self.ceiling[index])
     }
+
+    /// The ground as a continuous surface, before it is cut into bands **and
+    /// before the passes are notched out of it**.
+    ///
+    /// Water runs over this, not over the drawn bands (see
+    /// [`super::hydro::carve_rivers`]). Two things follow, and both of them are
+    /// the point. A dry valley half a band deep is level ground to the eye and
+    /// to the cost model, and still the line a river takes — which is how the map
+    /// gets a watercourse that reads as a deliberate corridor without paying a
+    /// band boundary for it. And a saddle, which is the *cheapest* way across a
+    /// massif, is not offered to the water at all: a pass is a gap cut for track,
+    /// and a river that took one would pin its own shore apron down through the
+    /// crest and leave a gorge with the massif in two pieces either side.
+    pub(crate) fn relief(&self, gain: f32) -> Vec<f32> {
+        (0..self.base.len())
+            .map(|i| self.base[i] + self.ridge[i] * gain)
+            .collect()
+    }
 }
 
 /// Build the elevation field from placed landforms plus a little grain.
@@ -328,18 +361,29 @@ pub(crate) fn landform_field(
 ) -> Elevation {
     let w = canvas.w;
     let h = canvas.h;
-    // A base of one band: open, buildable countryside is the default surface and
-    // everything else is something placed on top of it.
-    let mut base = vec![1.15f32; canvas.len()];
+    // **The plain.** Band 0, dead flat, and it is the whole map until something
+    // is placed on it.
+    //
+    // It used to be band 1, with the low ground cut back down to band 0 around
+    // every watercourse. That put two band boundaries either side of every river
+    // on the map — the floodplain edge — plus two more down every dry valley,
+    // and those alone crossed a random 30-tile sight line more than once. Sitting
+    // the plain on the floor instead costs the ridge one extra band of climb and
+    // buys back every one of those boundaries: a river now runs *in* the plain
+    // rather than in a trench cut through it, and the shore apron
+    // ([`Canvas::clamp_shores`]) only draws a valley wall where the water really
+    // does cut through high ground.
+    let mut base = vec![0.0f32; canvas.len()];
     let mut ridge = vec![0.0f32; canvas.len()];
     let mut ceiling = vec![f32::MAX; canvas.len()];
 
-    let saddles = add_ridges(&mut ridge, &mut ceiling, canvas, seed, options, scale);
+    let Ridges { saddles, tails } =
+        add_ridges(&mut ridge, &mut ceiling, canvas, seed, options, scale);
     // What a ridge already claims, nothing may dig out again. A valley that cut
     // clean through a crest would leave a hole the generator never chose, and a
     // wall with unplanned holes in it is not a wall — it is a texture.
     let shield: Vec<f32> = ridge.iter().map(|r| (r / 1.5).clamp(0.0, 1.0)).collect();
-    add_plateaus(&mut base, canvas, seed, options, scale);
+    add_plateaus(&mut base, canvas, seed, options, scale, &tails);
     add_basins(&mut base, canvas, seed, options, scale, &shield);
     add_valleys(&mut base, canvas, seed, scale, &shield);
 
@@ -380,6 +424,15 @@ fn clip_to_map(w: usize, h: usize, points: &[(f32, f32)]) -> Vec<(f32, f32)> {
     }
 }
 
+/// What ridge placement wrote down for the phases that come after it.
+struct Ridges {
+    /// Cells where a crest was deliberately notched — the passes.
+    saddles: Vec<usize>,
+    /// The inland end of each spine. [`add_plateaus`] seats a tableland here so
+    /// the map's high ground is one system rather than two.
+    tails: Vec<(f32, f32)>,
+}
+
 fn add_ridges(
     field: &mut [f32],
     ceiling: &mut [f32],
@@ -387,30 +440,74 @@ fn add_ridges(
     seed: u64,
     options: MapGenOptions,
     scale: f32,
-) -> Vec<usize> {
+) -> Ridges {
     let w = canvas.w;
     let h = canvas.h;
     let mut rng = stream(seed, salt::RIDGE);
     let count = ((options.terrain.ridges() as f32) * scale).round().max(1.0) as usize;
     let short = w.min(h) as f32;
     let mut saddles = Vec::new();
+    let mut tails = Vec::new();
     if short < 12.0 {
-        return saddles;
+        return Ridges { saddles, tails };
     }
 
+    // Distance to open sea, on the maps that have any. A massif standing in the
+    // water is a massif the shoreline planes back down — every seed that came up
+    // short of §2.1's rock share was one where the ridge and the inlet had been
+    // rolled onto the same corner. Mountains go inland; the coast is for looking
+    // at.
+    let from_sea = canvas
+        .surface
+        .contains(&Surface::Sea)
+        .then(|| canvas.distance_to(|i| canvas.surface[i] == Surface::Sea));
+
     for i in 0..count {
-        // Start off one edge and cross the map, so the ridge is a barrier rather
-        // than a lump in the middle of a field.
-        let angle = rng.gen_range(0.0..std::f32::consts::TAU);
-        let offset = rng.gen_range(-0.26..0.26) * short;
-        let cx = (w - 1) as f32 * 0.5 + (angle + std::f32::consts::FRAC_PI_2).cos() * offset;
-        let cy = (h - 1) as f32 * 0.5 + (angle + std::f32::consts::FRAC_PI_2).sin() * offset;
-        let reach = ((w * w + h * h) as f32).sqrt() * 0.5 + 3.0;
-        let start = (cx - angle.cos() * reach, cy - angle.sin() * reach);
-        let points = clip_to_map(w, h, &walk(w, h, start, angle, 1.5, 0.09, &mut rng));
-        if points.len() < 8 {
-            continue;
+        // Start off one edge, so the massif arrives already committed to a
+        // direction rather than being a lump someone dropped in a field — and
+        // then **stop**, `reach` tiles in.
+        //
+        // A spine that ran right across the map dragged its four-tile flank
+        // across with it: a fifth of a 64² map was ground that changed height,
+        // whichever way you crossed it. The same rock run in from one edge
+        // keeps a chunk of its apron off-frame, leaves the far side of the map
+        // open, and still asks the only question a ridge is for — round the end,
+        // or through a pass.
+        let run = ((short * options.terrain.reach()) / 1.5).round() as usize;
+        let mut best: Option<(usize, Vec<(f32, f32)>)> = None;
+        for _ in 0..3 {
+            let angle = rng.gen_range(0.0..std::f32::consts::TAU);
+            let offset = rng.gen_range(-0.26..0.26) * short;
+            let cx = (w - 1) as f32 * 0.5 + (angle + std::f32::consts::FRAC_PI_2).cos() * offset;
+            let cy = (h - 1) as f32 * 0.5 + (angle + std::f32::consts::FRAC_PI_2).sin() * offset;
+            let launch = ((w * w + h * h) as f32).sqrt() * 0.5 + 3.0;
+            let start = (cx - angle.cos() * launch, cy - angle.sin() * launch);
+            let mut points = clip_to_map(w, h, &walk(w, h, start, angle, 1.5, 0.09, &mut rng));
+            if points.len() < 8 {
+                continue;
+            }
+            // Truncation keeps the entry end, which is the end that is anchored
+            // to the frame.
+            points.truncate(run.max(8).min(points.len()));
+            let wet = from_sea.as_ref().map_or(0, |sea| {
+                points
+                    .iter()
+                    .filter(|&&(px, py)| {
+                        canvas
+                            .idx(px.round() as i32, py.round() as i32)
+                            .is_some_and(|k| sea[k] < SEA_STANDOFF)
+                    })
+                    .count()
+            });
+            let better = best.as_ref().is_none_or(|(worst, _)| wet < *worst);
+            if better {
+                best = Some((wet, points));
+            }
+            if wet == 0 {
+                break;
+            }
         }
+        let Some((_, points)) = best else { continue };
 
         let wanted = ((options.terrain.passes_per_ridge() as f32) * scale)
             .round()
@@ -425,17 +522,26 @@ fn add_ridges(
             .collect();
 
         let ridge = Ridge {
-            // A saddle about three tiles along the crest: wide enough to lay
-            // track through, narrow enough that the wall still reads as a wall.
-            notch: (2.0 / (points.len() - 1) as f32).clamp(0.02, 0.14),
+            // A saddle a couple of tiles either side of the spine: wide enough
+            // to lay track through, narrow enough that the wall still reads as
+            // a wall.
+            notch: (NOTCH_STEPS / (points.len() - 1) as f32).clamp(0.02, 0.2),
             points,
             // Wide enough that the crest survives relaxation. Bands may only
-            // step one at a time, so a crest five bands above the surrounding
-            // country needs five tiles of flank beneath it on each side — draw a
-            // narrower ridge and it is planed down to a hill however tall it was
-            // meant to be. The flanks are open buildable hill either way; only
-            // the last tile or two of crest is the wall.
-            half_width: (short * rng.gen_range(0.10..0.13)).clamp(6.0, 9.0),
+            // step one at a time, so a crest five bands above the plain needs
+            // five tiles of flank beneath it on each side — draw a narrower
+            // ridge and it is planed down to a hill however tall it was meant to
+            // be. Stout rather than thin, too: for a given amount of rock, the
+            // squarer the massif the less apron there is round it, and the apron
+            // is what the player feels.
+            //
+            // Note this is a *ceiling* on the massif, not its size: the crest
+            // reaches whatever radius [`solve_ridge_gain`] needs for §2.1's rock
+            // share, and relaxation lays the same four-tile apron round it
+            // whatever this says. What a too-small half-width does is cap the
+            // rock below its target on the smaller map sizes, where four tiles
+            // of apron eat a much larger share of the landform.
+            half_width: (short * rng.gen_range(0.16..0.21)).clamp(10.0, 14.0),
             crest: options.terrain.crest() * if i == 0 { 1.0 } else { rng.gen_range(0.82..1.0) },
             passes,
         };
@@ -443,6 +549,9 @@ fn add_ridges(
         let seeds = spine_seeds(w, h, &ridge.points);
         if seeds.is_empty() {
             continue;
+        }
+        if let Some(&tail) = ridge.points.last() {
+            tails.push(tail);
         }
         // Remember where the saddles landed on the spine.
         for &pass in &ridge.passes {
@@ -462,21 +571,45 @@ fn add_ridges(
             // Cosine section: flanks that ease out instead of ending in a step.
             let profile = 0.5 * (1.0 + (std::f32::consts::PI * u).cos());
             field[index] += ridge.crest * profile;
-            // A saddle holds the crest down where it crosses the spine, and lets
-            // go out on the flanks where there is nothing to hold down.
-            let notch = ridge.notch_at(arc[index]) * profile;
+            // A saddle is a col **right across** the ridge, so the cap follows
+            // the arc alone and not the crest profile.
+            //
+            // Weighting it by the profile as well used to be right: when a ridge
+            // was a thin wall, a notch that faded out towards the flanks still
+            // reached both sides of it. A massif is three times as wide, and the
+            // same notch became a dimple in the middle of a rock plateau with
+            // crest all the way round it — a pass you could walk into and not
+            // out of, which the verifier in `gen.rs` correctly refused to call a
+            // pass at all. Off the crest the cap is above the ground anyway, so
+            // the col only shows where there is something to cut through.
+            let notch = ridge.notch_at(arc[index]);
             if notch > 0.05 {
                 // Ramp the cap out over the shoulders. Gentle enough that the
                 // saddle is a few tiles of buildable ground and not a keyhole.
-                let cap = SADDLE_CEILING + (1.0 - notch) * 5.0;
+                let cap = SADDLE_CEILING + (1.0 - NOTCH_SHOULDER * notch).max(0.0) * 5.0;
                 ceiling[index] = ceiling[index].min(cap);
             }
         }
     }
-    saddles
+    Ridges { saddles, tails }
 }
 
-fn add_plateaus(field: &mut [f32], canvas: &Canvas, seed: u64, options: MapGenOptions, scale: f32) {
+/// Tablelands: broad, flat-topped uplands one band above the plain.
+///
+/// §2.2's plateau exactly — "flat on top, expensive to reach" — and now the map's
+/// other shade of grass. Wide and low beats small and tall for the same reason a
+/// massif beats a wall: the player pays at the *rim* and builds freely on the
+/// top, so a table twelve tiles across is one 6× decision and a hundred and fifty
+/// tiles of open country, while three tables four tiles across are three
+/// decisions and nowhere to put anything.
+fn add_plateaus(
+    field: &mut [f32],
+    canvas: &Canvas,
+    seed: u64,
+    options: MapGenOptions,
+    scale: f32,
+    tails: &[(f32, f32)],
+) {
     let w = canvas.w;
     let h = canvas.h;
     let mut rng = stream(seed, salt::PLATEAU);
@@ -486,13 +619,28 @@ fn add_plateaus(field: &mut [f32], canvas: &Canvas, seed: u64, options: MapGenOp
         return;
     }
 
-    for _ in 0..count {
-        let radius = (short * rng.gen_range(0.08..0.12)).clamp(3.0, 10.0);
-        let px = rng.gen_range(radius + 2.0..(w as f32 - radius - 2.0).max(radius + 3.0));
-        let py = rng.gen_range(radius + 2.0..(h as f32 - radius - 2.0).max(radius + 3.0));
-        // Flat on top, expensive to reach: the lift is constant inside and the
-        // flank is short, so the whole cost of the plateau is at its edge (§2.2).
-        let lift = rng.gen_range(1.7..2.6);
+    for k in 0..count {
+        // The lift is held close to a whole band. Half a band either way and the
+        // grain would decide the table's band for it, tile by tile, and a
+        // tableland whose edge is a rash of single steps is the texture this
+        // whole pass exists to remove.
+        let lift = options.terrain.plateau_lift() * rng.gen_range(0.94..1.06);
+        // A table that stands higher takes less of the map: its rim costs more
+        // to cross, and an upland the player pays two bands to climb onto had
+        // better be a mesa rather than half the countryside.
+        let radius = (short * rng.gen_range(0.17..0.24) / lift.max(1.0)).clamp(4.0, 18.0);
+        let lo = radius + 2.0;
+        let hi = |limit: usize| (limit as f32 - lo).max(lo + 1.0);
+        let mut px = rng.gen_range(lo..hi(w));
+        let mut py = rng.gen_range(lo..hi(h));
+        if let Some(&(tx, ty)) = tails.get(k) {
+            // Seated against the inland end of a ridge, just clear of the crest:
+            // the table is the massif's shoulder, not ground buried under its
+            // flank, and the two share an outline instead of each paying for one.
+            let bearing = rng.gen_range(0.0..std::f32::consts::TAU);
+            px = (tx + bearing.cos() * radius * 0.55).clamp(lo, hi(w));
+            py = (ty + bearing.sin() * radius * 0.55).clamp(lo, hi(h));
+        }
         let flank = 2.5f32;
         let (x0, x1) = span(px, radius + flank, w);
         let (y0, y1) = span(py, radius + flank, h);
@@ -503,12 +651,26 @@ fn add_plateaus(field: &mut [f32], canvas: &Canvas, seed: u64, options: MapGenOp
                     continue;
                 }
                 let t = ((radius + flank - d) / flank).clamp(0.0, 1.0);
-                field[y * w + x] += lift * t;
+                // An upper envelope, not a sum. Two tables that touch are one
+                // wider table at one height; added together they made a seam of
+                // hills along the join that nothing had placed and nothing
+                // explained — landform arithmetic doing exactly what §2.2 says
+                // noise must not.
+                let i = y * w + x;
+                field[i] = field[i].max(lift * t);
             }
         }
     }
 }
 
+/// Hollows: low ground scooped out of whatever is standing above the plain.
+///
+/// The raised rim this used to carry is gone. On a band-1 map a rim was a ring of
+/// hills round a dip and read as a crater; on a band-0 plain it would be a ring of
+/// single-tile steps round nothing at all — the map's most obvious piece of
+/// texture-for-its-own-sake. What is left digs a vale into a tableland, seats a
+/// lake ([`super::hydro::place_lakes`]) in ground that explains it, and does
+/// nothing whatsoever out on the open plain, which is the right amount.
 fn add_basins(
     field: &mut [f32],
     canvas: &Canvas,
@@ -531,23 +693,18 @@ fn add_basins(
         let px = rng.gen_range(radius + 3.0..(w as f32 - radius - 3.0).max(radius + 4.0));
         let py = rng.gen_range(radius + 3.0..(h as f32 - radius - 3.0).max(radius + 4.0));
         let depth = rng.gen_range(1.2..2.0);
-        let rim = rng.gen_range(0.5..1.1);
-        let (x0, x1) = span(px, radius + 3.0, w);
-        let (y0, y1) = span(py, radius + 3.0, h);
+        let flank = 3.0f32;
+        let (x0, x1) = span(px, radius + flank, w);
+        let (y0, y1) = span(py, radius + flank, h);
         for y in y0..y1 {
             for x in x0..x1 {
                 let d = ((x as f32 - px).powi(2) + (y as f32 - py).powi(2)).sqrt();
-                if d > radius + 3.0 {
+                if d > radius + flank {
                     continue;
                 }
                 let i = y * w + x;
-                if d <= radius {
-                    // Cheap inside…
-                    field[i] -= depth * (1.0 - shield[i]);
-                } else {
-                    // …costly to enter or leave.
-                    field[i] += rim * (1.0 - (d - radius) / 3.0);
-                }
+                let t = ((radius + flank - d) / flank).clamp(0.0, 1.0);
+                field[i] -= depth * t * (1.0 - shield[i]);
             }
         }
     }
@@ -560,8 +717,18 @@ fn span(centre: f32, radius: f32, limit: usize) -> (usize, usize) {
     (lo.min(limit), hi)
 }
 
-/// Dry valleys: corridors that are cheap to build along and that tell the player
-/// where the obvious route goes (§2.2). Rivers cut their own.
+/// Dry valleys: the corridors that tell the player — and the water — where the
+/// obvious route goes (§2.2).
+///
+/// Cut deeper than they used to be, and mostly invisible, which is the point.
+/// Out on the plain a valley floor a band and a half down still quantises to
+/// band 0, so it draws no step and costs nothing to build along; what it does is
+/// tilt the ground under [`super::hydro::carve_rivers`], which reads the
+/// continuous relief rather than the drawn bands. So the trunk river lies in a
+/// valley for the whole of its length without the valley itself ever being a
+/// thing the player has to climb out of. Where the same corridor crosses a
+/// tableland it *is* drawn, as the gap in the escarpment — which is where a
+/// valley earns being visible.
 fn add_valleys(field: &mut [f32], canvas: &Canvas, seed: u64, scale: f32, shield: &[f32]) {
     let w = canvas.w;
     let h = canvas.h;
@@ -584,8 +751,8 @@ fn add_valleys(field: &mut [f32], canvas: &Canvas, seed: u64, scale: f32, shield
             continue;
         }
         let (dist, _) = chamfer(w, h, &seeds);
-        let half_width = (short * 0.05).clamp(2.0, 5.0);
-        let depth = rng.gen_range(1.0..1.8);
+        let half_width = (short * 0.06).clamp(2.0, 6.0);
+        let depth = rng.gen_range(1.6..2.6);
         for index in 0..field.len() {
             let u = dist[index] / half_width;
             if u >= 1.0 {
@@ -656,7 +823,10 @@ pub(crate) fn solve_ridge_gain(canvas: &mut Canvas, elevation: &Elevation, targe
 /// Growth is band by band: a tile may only be raised to `b` when every orthogonal
 /// neighbour has already reached `b - 1`, so the one-band-per-tile rule that makes
 /// the whole map climbable is never broken. When the crest has no room left to
-/// spread, its apron is raised first and the crest tries again next round.
+/// spread, its apron is raised first and the crest tries again next round — and
+/// each of those recoveries costs a round, which is why there are as many as
+/// there are. A massif is stouter than the old map-long wall and its crest runs
+/// out of room sooner.
 fn grow_rock_to(canvas: &mut Canvas, target: f32) {
     let rock = super::field::ROCK_BAND;
     let mut have = canvas
@@ -666,7 +836,7 @@ fn grow_rock_to(canvas: &mut Canvas, target: f32) {
         .filter(|(b, s)| **b >= rock && **s == Surface::Land)
         .count() as f32;
 
-    for _ in 0..8 {
+    for _ in 0..24 {
         if have >= target {
             return;
         }

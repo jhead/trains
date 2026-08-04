@@ -35,7 +35,7 @@ use rand::Rng;
 use crate::features::{RiverCrossing, Surface};
 use crate::options::MapGenOptions;
 
-use super::field::{salt, stream, Canvas, Grain};
+use super::field::{salt, stream, Canvas, Grain, ROCK_BAND};
 
 /// Width of a river where it is not meant to be crossed cheaply.
 ///
@@ -72,12 +72,35 @@ pub(crate) struct River {
     pub(crate) crossings: Vec<RiverCrossing>,
 }
 
+/// How far below the plain a valley floor may lie, in bands. See [`flow_to_sea`].
+const RELIEF_FLOOR: f32 = 3.0;
+
+/// Cost of entering a tile, per *squared* band of height above the valley floor.
+///
+/// Squared, because linear was not enough to keep water off the high ground.
+/// A source is chosen for being expensive to reach, which puts it *behind* the
+/// massif as often as not, and under a linear cost the cheapest way to the sea
+/// from there was straight over the top: twenty-odd tiles of climb still added
+/// up to less than going round. The river then pinned its shore apron down
+/// through the crest and cut the massif in half — every seed that missed §2.1's
+/// rock share was this. Squaring makes the detour win by a distance, which is
+/// what water does anyway.
+const RELIEF_CLIMB: f32 = 6.0;
+
 /// Least-cost descent to an outlet for every land tile.
 ///
 /// One Dijkstra from every outlet at once, over a cost dominated by elevation, so
 /// following `downhill` from anywhere traces the course water would take: along
 /// valleys, around ridges, through a pass only when going round is genuinely
 /// worse.
+///
+/// The elevation it reads is the **continuous relief**, not the drawn bands.
+/// That distinction is what lets the map be calm and still have a river worth
+/// crossing: the plain is one flat band from edge to edge, so bands alone would
+/// leave the water nothing to follow but noise, and a river that wanders twenty
+/// tiles to the nearest border is not the "continuous line the player must cross
+/// somewhere" §2.1 asks for. Under the bands the dry valleys are still there,
+/// a band or two deep, and the trunk lies in one for its whole length.
 ///
 /// An **outlet** is the sea where there is one and the map border where there is
 /// not. Most Rail Town maps are landlocked, and a river that runs off the edge is
@@ -90,7 +113,7 @@ struct Flow {
 
 const NO_STEP: u32 = u32::MAX;
 
-fn flow_to_sea(canvas: &Canvas, seed: u64) -> Flow {
+fn flow_to_sea(canvas: &Canvas, seed: u64, relief: &[f32]) -> Flow {
     let w = canvas.w;
     let h = canvas.h;
     let mut rng = stream(seed, salt::RIVER);
@@ -104,7 +127,11 @@ fn flow_to_sea(canvas: &Canvas, seed: u64) -> Flow {
             let x = (i % w) as f32 / (w.max(2) - 1) as f32;
             let y = (i / w) as f32 / (h.max(2) - 1) as f32;
             let wobble = ((meander.sample(x, y) + 1.0) * 2.5) as u32;
-            4 + (canvas.band[i].max(0) as u32) * 7 + wobble
+            let ground = relief
+                .get(i)
+                .map_or(canvas.band[i].max(0) as f32, |r| r + RELIEF_FLOOR)
+                .max(0.0);
+            4 + (ground * ground * RELIEF_CLIMB) as u32 + wobble
         })
         .collect();
 
@@ -415,6 +442,14 @@ fn pick_source(canvas: &Canvas, flow: &Flow, taken: &[usize], rng: &mut StdRng) 
         if canvas.surface[i] != Surface::Land || flow.downhill[i] == NO_STEP {
             continue;
         }
+        // A spring rises in the hills, not off the top of a cliff. Left to
+        // itself the score below picks the highest, most expensive ground on the
+        // map, which is the crest of the massif — and a course starting there
+        // runs straight down through the wall, taking its band-0 shore apron
+        // with it and leaving a gorge where §2.2 wanted a barrier.
+        if canvas.band[i] >= ROCK_BAND - 1 {
+            continue;
+        }
         let x = (i % canvas.w) as i32;
         let y = (i / canvas.w) as i32;
         // A spring wants to be inland. On a landlocked map the border *is* the
@@ -457,6 +492,7 @@ pub(crate) fn carve_rivers(
     seed: u64,
     options: MapGenOptions,
     scale: f32,
+    relief: &[f32],
 ) -> Vec<River> {
     let mut rng = stream(seed, salt::RIVER ^ 0x5151);
     let short = canvas.w.min(canvas.h);
@@ -493,11 +529,19 @@ pub(crate) fn carve_rivers(
     for trunk in 0..trunks {
         // Recomputed per trunk: a tributary should descend into water that is
         // already there, which means the flow field has to know about it.
-        let flow = flow_to_sea(canvas, seed ^ (trunk as u64) << 32);
-        // Try a few springs: the best-scoring one can sit behind a ridge with the
-        // outlet just past it, and a six-tile river is not a crossing decision.
+        let flow = flow_to_sea(canvas, seed ^ (trunk as u64) << 32, relief);
+        // Try a few springs and keep the **longest** course, not the first one
+        // that clears the bar.
+        //
+        // §2.1 wants "a continuous line the player must cross somewhere", and on
+        // a plain that is one flat band from edge to edge every border tile is an
+        // outlet — so the highest-scoring spring is quite often one with an
+        // outlet twenty tiles away, and twenty tiles of river is something you
+        // walk round rather than a crossing decision. Taking the best of four
+        // costs nothing and reliably finds the course that runs the length of a
+        // valley.
         let least = (short / 4).max(8);
-        let mut course = Vec::new();
+        let mut course: Vec<usize> = Vec::new();
         for _ in 0..4 {
             let Some(source) = pick_source(canvas, &flow, &sources, &mut rng) else {
                 break;
@@ -505,12 +549,11 @@ pub(crate) fn carve_rivers(
             sources.push(source);
             let mut candidate = course_from(&flow, canvas, source);
             trim(&mut candidate, spent);
-            if candidate.len() >= least {
+            if candidate.len() > course.len() {
                 course = candidate;
-                break;
             }
         }
-        if course.is_empty() {
+        if course.len() < least {
             continue;
         }
         spent += course.len() * TRUNK_WIDTH as usize;
@@ -532,7 +575,7 @@ pub(crate) fn carve_rivers(
         // Tributaries descend from their own source and stop where they meet
         // water — which is what makes a river system rather than parallel lines.
         for _ in 0..tributaries {
-            let flow = flow_to_sea(canvas, seed ^ 0xbeef ^ (sources.len() as u64) << 40);
+            let flow = flow_to_sea(canvas, seed ^ 0xbeef ^ (sources.len() as u64) << 40, relief);
             let Some(source) = pick_source(canvas, &flow, &sources, &mut rng) else {
                 break;
             };
@@ -632,14 +675,17 @@ const HEAD_TAPER: [u32; 3] = [1, 2, 3];
 ///
 /// Lakes go where a basin already is — cheap inside, costly to enter (§2.2) —
 /// so the water reads as something the landscape explains rather than as blue
-/// paint applied to hit a number.
-pub(crate) fn place_lakes(canvas: &mut Canvas, seed: u64, quota: usize) {
+/// paint applied to hit a number. "Where a basin is" now means the continuous
+/// relief rather than the drawn bands: on an open plain every tile is band 0 and
+/// the bands have nothing to say about which hollow is the lowest.
+pub(crate) fn place_lakes(canvas: &mut Canvas, seed: u64, quota: usize, relief: &[f32]) {
     if quota == 0 {
         return;
     }
     let quota = quota.min(canvas.len() / LAKE_SHARE_DENOM);
     let mut rng = stream(seed, salt::LAKE);
     let from_water = canvas.distance_to(|i| canvas.surface[i].is_water());
+    let ground = |i: usize| relief.get(i).copied().unwrap_or(canvas.band[i] as f32);
     let mut remaining = quota;
 
     for _ in 0..3 {
@@ -657,13 +703,14 @@ pub(crate) fn place_lakes(canvas: &mut Canvas, seed: u64, quota: usize) {
             if x < 4 || y < 4 || x >= canvas.w as i32 - 4 || y >= canvas.h as i32 - 4 {
                 continue;
             }
-            let score = from_water[i] as i64 * 2 - canvas.band[i] as i64 * 6
+            let score = from_water[i] as i64 * 2 - (ground(i) * 8.0) as i64
                 + rng.gen_range(0..3) as i64;
             if best.is_none_or(|(b, _)| score > b) {
                 best = Some((score, i));
             }
         }
         let Some((_, centre)) = best else { break };
+        let (cx, cy) = ((centre % canvas.w) as i32, (centre / canvas.w) as i32);
 
         // Flood the low ground outward from the centre until the quota is met.
         let size = remaining.min(quota / 2 + 8).max(6);
@@ -698,7 +745,13 @@ pub(crate) fn place_lakes(canvas: &mut Canvas, seed: u64, quota: usize) {
                 if let Some(n) = canvas.idx(x + dx, y + dy) {
                     if !seen[n] && canvas.surface[n] == Surface::Land {
                         seen[n] = true;
-                        frontier.push(Reverse((canvas.band[n] as i32, n)));
+                        // Lowest ground first, and *nearest* to break the tie.
+                        // Without the second term a lake on flat ground grew in
+                        // whatever order the cells happened to be numbered in,
+                        // which on an open plain is one tile high and fifty
+                        // long — a worm along a row, not a pool.
+                        let reach = (x + dx - cx).abs() + (y + dy - cy).abs();
+                        frontier.push(Reverse(((ground(n) * 64.0) as i32 + reach, n)));
                     }
                 }
             }

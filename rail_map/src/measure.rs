@@ -333,6 +333,213 @@ pub fn ridge_passes(map: &MapGrid) -> Vec<TileCoord> {
     out
 }
 
+// -- Relief: how *often* the ground changes height ---------------------------
+
+/// Land at or above this height reads as hills — `rail_sim`'s 3× band.
+pub const HILL_HEIGHT_MIN: i8 = 7;
+
+/// A hill clump smaller than this is a bump, not a system.
+const SYSTEM_MIN_TILES: usize = 8;
+
+/// Length, in tiles, of the sight lines [`relief`] samples.
+const SIGHT_LINE: i32 = 30;
+
+/// How many sight lines are walked. Enough that the mean is stable to ~0.02.
+const SIGHT_SAMPLES: usize = 600;
+
+/// How often the ground changes height, as opposed to how much of it is high.
+///
+/// Playtest: *"I'm constantly fighting terrain … just mountains and up/down
+/// everywhere."* That is a complaint about **frequency**, and the composition
+/// numbers in [`Composition`] cannot see it — a map can hit every share in §2.1
+/// and still be a rash of one-tile steps. These four are what a player feels:
+/// how much ground is uninterrupted, how many separate things are in the way,
+/// how often a straight line runs into one, and where the height actually sits.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Relief {
+    /// Share of land tiles with no height step to any of their eight
+    /// neighbours — open country you can build across without thinking.
+    pub flat_share: f32,
+    /// Connected hill-or-higher systems of real size: the ridges and massifs.
+    pub systems: usize,
+    /// Hill clumps too small to be one — scattered bumps.
+    pub specks: usize,
+    /// Mean band boundaries a straight [`SIGHT_LINE`]-tile line over land
+    /// crosses. Under one means the ground is usually just ground.
+    pub crossings: f32,
+    /// Share of *land* in each elevation band, band 0 first.
+    pub bands: [f32; 6],
+}
+
+/// Which elevation band a tile height belongs to.
+///
+/// `rail_map` generates only the six band heights, so anything else — a save
+/// from a hand-built test grid — takes the nearest band below.
+fn band_of(height: i8) -> usize {
+    match height {
+        h if h >= 16 => 5,
+        h if h >= 13 => 4,
+        h if h >= 10 => 3,
+        h if h >= 7 => 2,
+        h if h >= 4 => 1,
+        _ => 0,
+    }
+}
+
+/// Measure a map's relief — see [`Relief`].
+pub fn relief(map: &MapGrid) -> Relief {
+    let w = map.width as i32;
+    let h = map.height as i32;
+    if w < 2 || h < 2 {
+        return Relief::default();
+    }
+    let idx = |x: i32, y: i32| (y * w + x) as usize;
+    let dry = |x: i32, y: i32| map.get(TileCoord { x, y }).is_some_and(|t| !t.water);
+
+    // 1. Flat share, and the band histogram, in one sweep.
+    let mut land = 0usize;
+    let mut flat = 0usize;
+    let mut bands = [0usize; 6];
+    for y in 0..h {
+        for x in 0..w {
+            let tile = map.tile(TileCoord { x, y });
+            if tile.water {
+                continue;
+            }
+            land += 1;
+            bands[band_of(tile.height)] += 1;
+            let level = (-1i32..=1)
+                .flat_map(|dy| (-1i32..=1).map(move |dx| (dx, dy)))
+                .filter(|&(dx, dy)| (dx, dy) != (0, 0))
+                .all(|(dx, dy)| {
+                    map.get(TileCoord {
+                        x: x + dx,
+                        y: y + dy,
+                    })
+                    .is_none_or(|n| n.height == tile.height)
+                });
+            if level {
+                flat += 1;
+            }
+        }
+    }
+
+    // 2. Hill systems: 8-connected clumps of hill-or-higher ground.
+    let hill = |x: i32, y: i32| {
+        map.get(TileCoord { x, y })
+            .is_some_and(|t| !t.water && t.height >= HILL_HEIGHT_MIN)
+    };
+    let mut seen = vec![false; (w * h) as usize];
+    let mut systems = 0usize;
+    let mut specks = 0usize;
+    for y in 0..h {
+        for x in 0..w {
+            if seen[idx(x, y)] || !hill(x, y) {
+                continue;
+            }
+            let mut stack = vec![(x, y)];
+            seen[idx(x, y)] = true;
+            let mut size = 0usize;
+            while let Some((cx, cy)) = stack.pop() {
+                size += 1;
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        let (nx, ny) = (cx + dx, cy + dy);
+                        if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                            continue;
+                        }
+                        if seen[idx(nx, ny)] || !hill(nx, ny) {
+                            continue;
+                        }
+                        seen[idx(nx, ny)] = true;
+                        stack.push((nx, ny));
+                    }
+                }
+            }
+            if size >= SYSTEM_MIN_TILES {
+                systems += 1;
+            } else {
+                specks += 1;
+            }
+        }
+    }
+
+    // 3. Sight lines. Drawn from the map's own seed so the number is a property
+    //    of the world, not of whoever measured it.
+    let mut state = map.seed ^ 0x5ee5_1941_7000;
+    let mut roll = |n: u32| -> i32 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 33) % n as u64) as i32
+    };
+    let mut walked = 0usize;
+    let mut steps = 0usize;
+    for _ in 0..SIGHT_SAMPLES * 8 {
+        if walked >= SIGHT_SAMPLES {
+            break;
+        }
+        let ax = roll(w as u32);
+        let ay = roll(h as u32);
+        // A direction on the SIGHT_LINE-radius circle, quantised to whole tiles.
+        let turn = roll(360) as f32 * std::f32::consts::TAU / 360.0;
+        let bx = ax + (turn.cos() * SIGHT_LINE as f32).round() as i32;
+        let by = ay + (turn.sin() * SIGHT_LINE as f32).round() as i32;
+        if bx < 0 || by < 0 || bx >= w || by >= h || !dry(ax, ay) || !dry(bx, by) {
+            continue;
+        }
+        walked += 1;
+        let mut previous: Option<i8> = None;
+        for point in line(TileCoord { x: ax, y: ay }, TileCoord { x: bx, y: by }) {
+            let Some(tile) = map.get(point) else { continue };
+            if tile.water {
+                previous = None;
+                continue;
+            }
+            if previous.is_some_and(|p| p != tile.height) {
+                steps += 1;
+            }
+            previous = Some(tile.height);
+        }
+    }
+
+    let share = |n: usize| n as f32 * 100.0 / land.max(1) as f32;
+    Relief {
+        flat_share: share(flat),
+        systems,
+        specks,
+        crossings: steps as f32 / walked.max(1) as f32,
+        bands: std::array::from_fn(|b| share(bands[b])),
+    }
+}
+
+/// Tiles on the straight line between two points (Bresenham).
+fn line(a: TileCoord, b: TileCoord) -> Vec<TileCoord> {
+    let mut out = Vec::new();
+    let (mut x, mut y) = (a.x, a.y);
+    let dx = (b.x - a.x).abs();
+    let dy = -(b.y - a.y).abs();
+    let sx = if a.x < b.x { 1 } else { -1 };
+    let sy = if a.y < b.y { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        out.push(TileCoord { x, y });
+        if x == b.x && y == b.y {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+    out
+}
+
 /// Size of the largest 4-connected run of buildable land.
 pub fn largest_buildable_region(map: &MapGrid) -> usize {
     let w = map.width as i32;
@@ -476,6 +683,49 @@ mod tests {
         let passes = ridge_passes(&map);
         assert_eq!(passes.len(), 1, "one saddle is one pass: {passes:?}");
         assert_eq!(passes[0].x, 4);
+    }
+
+    #[test]
+    fn relief_counts_the_ground_that_does_not_move() {
+        // A 20² plain with one 6² hill stamped on it. Everything but the hill and
+        // the ring of plain around it is flat, and the hill is one system.
+        let map = grid(20, 20, |x, y| {
+            if (7..13).contains(&x) && (7..13).contains(&y) {
+                land(HILL_HEIGHT_MIN)
+            } else {
+                land(0)
+            }
+        });
+        let relief = relief(&map);
+        // 400 tiles, less the 6² hill and the 8² ring round it that sees it.
+        assert_eq!(relief.systems, 1);
+        assert_eq!(relief.specks, 0);
+        let moving = 8 * 8 - 4 * 4; // the hill's own edge plus the plain that abuts it
+        let expected = (400 - moving) as f32 * 100.0 / 400.0;
+        assert!(
+            (relief.flat_share - expected).abs() < 0.01,
+            "flat share {:.2}, expected {expected:.2}",
+            relief.flat_share
+        );
+        assert!((relief.bands[0] - 91.0).abs() < 0.01);
+        assert!((relief.bands[2] - 9.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn relief_hears_a_wall_and_not_an_open_field() {
+        // Same map twice over, once dead flat and once striped every other tile.
+        // The sight-line count is what separates them, and it is the number the
+        // §2.1 composition shares cannot see: both maps here are 100% buildable.
+        let flat = grid(64, 64, |_, _| land(0));
+        let striped = grid(64, 64, |x, _| land(if x % 2 == 0 { 0 } else { 4 }));
+        assert_eq!(relief(&flat).crossings, 0.0);
+        assert!(
+            relief(&striped).crossings > 12.0,
+            "a map that steps every other tile should light this up: {:.2}",
+            relief(&striped).crossings
+        );
+        assert!(relief(&flat).flat_share > 99.9);
+        assert_eq!(relief(&striped).flat_share, 0.0);
     }
 
     #[test]

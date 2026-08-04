@@ -13,7 +13,30 @@
 //! (§2.2): a coastline is placed, ridges are drawn as spines with a named handful
 //! of passes, plateaus and basins are stamped, rivers are routed down the
 //! resulting valleys and given authored narrows, and only then is a little noise
-//! added on top. Every stage is in a module of its own:
+//! added on top.
+//!
+//! # The plain, and the things standing on it
+//!
+//! Playtest, on the map this used to make: *"Too much terrain on the base world
+//! gen. I'm constantly fighting terrain and it's not super fun. Just mountains
+//! and up/down everywhere."* Every share in §2.1's table was on target and the
+//! map was still wrong, because the table cannot see how *often* the ground
+//! changes height. It was measured: 56% of land was level with its own
+//! neighbours and a straight 30-tile line crossed five and a half band
+//! boundaries. [`crate::measure::relief`] is that measurement, and the tests
+//! below hold the generator to it.
+//!
+//! What the numbers said was that the map had no ground *between* its features.
+//! The fix is one sentence: **the map is a band-0 plain, and everything else is
+//! a landform standing on it.** A ridge is a massif that runs in from one edge
+//! and stops rather than a wall dragging four tiles of flank across the whole
+//! frame; the tableland is seated against it so the high ground is one system
+//! with one outline; the valleys are cut *under* the plain, where water can
+//! follow them and the eye and the cost model cannot see them at all. What is
+//! left is a landscape whose decisions are a massif to round or cross, a table
+//! to climb or skirt, and a river to bridge — with open country in between.
+//!
+//! Every stage is in a module of its own:
 //!
 //! | Stage | Module | Brief |
 //! | --- | --- | --- |
@@ -45,6 +68,12 @@ use crate::tile::{TerrainKind, Tile};
 use crate::{EdgeFacing, PortalId};
 
 use field::{band_height, Canvas, INLAND_DEPTH_MAX, SEA_DEPTH_MAX};
+
+/// Ridge gain the water is routed against, before the real one is solved.
+///
+/// A stand-in for the gain step 4 will settle on. It only has to be close enough
+/// that the massif is already in the way when the rivers choose their courses.
+const RIVER_GAIN: f32 = 1.0;
 
 /// Generate a deterministic map: same `(width, height, seed)` → identical tiles & portals.
 ///
@@ -78,19 +107,30 @@ pub fn generate_map_with(width: u32, height: u32, seed: u64, options: MapGenOpti
     shape::carve_sea(&mut canvas, seed, options, scale);
 
     // 2. Landforms, then a provisional banding for water to run downhill over.
+    //    The provisional pass raises the ridges too: a river routed over a map
+    //    where the massif is not yet there would run straight through where it
+    //    is about to be, and then plane it down to a gorge.
     let elevation = shape::landform_field(&canvas, seed, options, scale);
-    shape::apply_field(&mut canvas, &elevation, 0.0);
+    shape::apply_field(&mut canvas, &elevation, RIVER_GAIN);
 
     // 3. Rivers first — they are the best feature in the game and they get the
     //    valleys they want — then lakes to finish the inland-water budget.
-    let rivers = hydro::carve_rivers(&mut canvas, seed, options, scale);
+    //    Water reads the continuous relief, not the bands: the plain is one flat
+    //    band, and the valleys under it are what give the trunk a course.
+    let relief = elevation.relief(RIVER_GAIN);
+    let rivers = hydro::carve_rivers(&mut canvas, seed, options, scale, &relief);
     let inland_target = (options.water.inland_target() / 100.0 * canvas.len() as f32) as usize;
     let river_tiles = canvas
         .surface
         .iter()
         .filter(|s| **s == Surface::River)
         .count();
-    hydro::place_lakes(&mut canvas, seed, inland_target.saturating_sub(river_tiles));
+    hydro::place_lakes(
+        &mut canvas,
+        seed,
+        inland_target.saturating_sub(river_tiles),
+        &relief,
+    );
 
     // 4. Re-band against the finished water, scaling the ridges until the
     //    impassable-rock share is on target.
@@ -917,7 +957,7 @@ mod tests {
         let riverlands = generate(
             2024,
             MapGenOptions {
-                water: WaterStyle::Riverlands,
+                water: WaterStyle::Balanced,
                 ..base
             },
         );
@@ -990,6 +1030,150 @@ mod tests {
         assert!(
             spread(ResourceSpread::Scattered) > spread(ResourceSpread::Clustered),
             "Clustered towns should sit closer together than Scattered ones"
+        );
+    }
+
+    // -- Playtest: how *often* the ground changes height ---------------------
+
+    /// The bar each style has to clear, per seed. See [`measure::Relief`].
+    ///
+    /// `(least flat land, most hill systems, most band crossings per sight line)`.
+    /// Bands rather than exact numbers: these are properties of the generator's
+    /// shape, not a hash of its output, and one seed is allowed to come out a
+    /// little lumpier than its neighbours without the whole thing being wrong.
+    fn relief_bar(style: TerrainStyle) -> (f32, usize, f32) {
+        match style {
+            TerrainStyle::Gentle => (75.0, 3, 2.5),
+            TerrainStyle::Rolling => (74.0, 3, 2.7),
+            // Rugged is the style you pick in order to be argued with: two
+            // massifs, half as much rock again, and its tablelands up in the
+            // hills rather than a band above the plain.
+            TerrainStyle::Rugged => (57.0, 3, 5.4),
+        }
+    }
+
+    fn mean_relief(style: TerrainStyle) -> (f32, f32) {
+        let mut flat = 0.0;
+        let mut crossings = 0.0;
+        for seed in SEEDS {
+            let relief = measure::relief(&generate(
+                seed,
+                MapGenOptions {
+                    terrain: style,
+                    ..MapGenOptions::standard()
+                },
+            ));
+            flat += relief.flat_share;
+            crossings += relief.crossings;
+        }
+        let n = SEEDS.len() as f32;
+        (flat / n, crossings / n)
+    }
+
+    #[test]
+    fn most_of_the_map_is_ground_that_does_not_change_height() {
+        // **Playtest, verbatim: "Too much terrain on the base world gen. I'm
+        // constantly fighting terrain and it's not super fun. Just mountains and
+        // up/down everywhere."**
+        //
+        // That is a complaint about *frequency*, and nothing in §2.1's
+        // composition table can see it: the map it was written about hit every
+        // share in that table, and 56% of its land was level with its own
+        // neighbours while a straight 30-tile line crossed five and a half band
+        // boundaries. These are the numbers that say countryside is countryside.
+        for style in TerrainStyle::ALL {
+            let (least_flat, most_systems, most_crossings) = relief_bar(*style);
+            for seed in SEEDS {
+                let map = generate(
+                    seed,
+                    MapGenOptions {
+                        terrain: *style,
+                        ..MapGenOptions::standard()
+                    },
+                );
+                let relief = measure::relief(&map);
+                let label = format!("{} seed {seed}", style.label());
+                assert!(
+                    relief.flat_share >= least_flat,
+                    "{label}: only {:.1}% of land is level with all eight neighbours",
+                    relief.flat_share
+                );
+                assert!(
+                    relief.systems <= most_systems,
+                    "{label}: {} separate hill systems is a rash, not a landscape",
+                    relief.systems
+                );
+                assert!(
+                    relief.specks <= 2,
+                    "{label}: {} stray hill clumps — noise is deciding where the \
+                     high ground goes",
+                    relief.specks
+                );
+                assert!(
+                    relief.crossings <= most_crossings,
+                    "{label}: a straight 30-tile line crosses {:.2} band boundaries",
+                    relief.crossings
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_plain_is_the_map_and_the_landforms_sit_on_it() {
+        // §2.2 wants elevation to be *features*. The test of that is not how much
+        // high ground there is but how much of the map is the plain the features
+        // stand on — and that both plains bands are really there, because band 1
+        // is the tableland and the Δ4 step onto it is §3.1's 6× rung.
+        for seed in SEEDS {
+            let relief = measure::relief(&generate_map(64, 64, seed));
+            let plains = relief.bands[0] + relief.bands[1];
+            assert!(
+                (80.0..=95.0).contains(&plains),
+                "seed {seed}: {plains:.1}% of land is plains — bands {:?}",
+                relief.bands
+            );
+            assert!(
+                relief.bands[1] >= 2.0,
+                "seed {seed}: only {:.1}% of land is the upper plains band",
+                relief.bands[1]
+            );
+            // Every band above the plains is a landform, and no landform is
+            // allowed to become the surface the map is made of.
+            for (band, share) in relief.bands.iter().enumerate().skip(2) {
+                assert!(
+                    *share <= 8.0,
+                    "seed {seed}: band {band} covers {share:.1}% of the land"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terrain_style_steps_how_often_the_ground_changes_height() {
+        // The Terrain knob has to move the thing the owner actually complained
+        // about, not only the rock share that
+        // `terrain_style_changes_how_hard_the_terrain_argues` checks. Averaged
+        // over the seeds, because one map is one roll.
+        let gentle = mean_relief(TerrainStyle::Gentle);
+        let rolling = mean_relief(TerrainStyle::Rolling);
+        let rugged = mean_relief(TerrainStyle::Rugged);
+        assert!(
+            gentle.1 < rolling.1,
+            "Gentle crosses {:.2} bands per line and Rolling {:.2}",
+            gentle.1,
+            rolling.1
+        );
+        assert!(
+            rolling.1 + 1.0 < rugged.1,
+            "Rolling crosses {:.2} bands per line and Rugged only {:.2}",
+            rolling.1,
+            rugged.1
+        );
+        assert!(
+            rugged.0 + 5.0 < rolling.0,
+            "Rugged leaves {:.1}% of land flat and Rolling {:.1}%",
+            rugged.0,
+            rolling.0
         );
     }
 

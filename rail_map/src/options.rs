@@ -123,12 +123,12 @@ impl TerrainStyle {
         Self::ALL.get(index).copied()
     }
 
-    /// Ridge spines on a Standard map.
+    /// Ridge systems on a Standard map.
     ///
     /// §2.2: a ridge is a *barrier*, and crossing one costs a run of 6× cut-and-
     /// fill however you take it. Two of them on a 64² map already means no route
     /// across the map is cheap, which is the opposite of the open countryside the
-    /// owner asked for. One wall with a couple of passes is the decision; more
+    /// owner asked for. One massif with a couple of passes is the decision; more
     /// than that is a maze.
     pub const fn ridges(self) -> usize {
         match self {
@@ -138,49 +138,86 @@ impl TerrainStyle {
         }
     }
 
+    /// How far a ridge runs in from the edge it enters, as a fraction of the
+    /// short edge.
+    ///
+    /// **Playtest, verbatim: "I'm constantly fighting terrain … just mountains
+    /// and up/down everywhere."** A ridge is five bands of climb, and bands may
+    /// only step one per tile, so a crest has at least four tiles of flank on
+    /// each side — every one of them a step. Spread that over a spine that
+    /// crosses the whole map and a quarter of the frame is ground that changes
+    /// height, which is exactly the complaint. The same rock drawn as a massif
+    /// that runs *in* from an edge and stops has a fraction of the apron, keeps
+    /// part of it off-frame, and is still something a route has to answer: go
+    /// round the end, or take a pass.
+    pub fn reach(self) -> f32 {
+        match self {
+            Self::Gentle => 0.22,
+            Self::Rolling => 0.26,
+            Self::Rugged => 0.36,
+        }
+    }
+
     /// Passes per ridge. §2.2 exactly: "two passes is a decision; twenty is a
-    /// texture." Gentle terrain is forgiving, so its one ridge gets three.
+    /// texture."
     pub const fn passes_per_ridge(self) -> usize {
         match self {
-            Self::Gentle => 3,
+            Self::Gentle => 2,
             Self::Rolling => 2,
             Self::Rugged => 2,
         }
     }
 
     /// Crest height in bands. Anything at or above [`crate::ROCK_BAND`] is rock.
+    ///
+    /// A band higher than it used to be, because the ground it now stands on is
+    /// the band-0 plain rather than a band-1 field.
     pub fn crest(self) -> f32 {
         match self {
-            Self::Gentle => 4.6,
-            Self::Rolling => 5.2,
-            Self::Rugged => 5.8,
+            Self::Gentle => 5.4,
+            Self::Rolling => 5.8,
+            Self::Rugged => 6.4,
         }
     }
 
     /// Amplitude, in bands, of the noise that decorates the placed landforms.
     ///
-    /// Deliberately below half a band: noise is texture on top of features, never
-    /// the source of them (§2.2).
+    /// Well below half a band: noise is texture on top of features, never the
+    /// source of them (§2.2). On the plain it is invisible by construction —
+    /// band 0 ± 0.3 is still band 0 — so all it does is rough up the outline of
+    /// whatever was placed, which is the only job it should ever have had.
     pub fn grain(self) -> f32 {
         match self {
-            Self::Gentle => 0.22,
-            Self::Rolling => 0.32,
-            Self::Rugged => 0.46,
+            Self::Gentle => 0.16,
+            Self::Rolling => 0.26,
+            Self::Rugged => 0.34,
         }
     }
 
-    /// Plateaus and basins placed on a Standard map.
+    /// Tablelands placed on a Standard map.
     ///
-    /// Deliberately few. Every band boundary is a 6× cut-and-fill to cross, so a
-    /// map crowded with landforms is a map where no long route is affordable —
-    /// and the owner's brief is explicit that the space *between* the interesting
-    /// bits is a feature, not filler. One of each, plus the ridges, leaves most of
-    /// the map as open 1× country to route freely across.
+    /// Deliberately few and deliberately broad. Every band boundary is a 6×
+    /// cut-and-fill to cross, so what costs the player is the *rim*, not the
+    /// area: one wide table is one decision and a lot of open ground, where four
+    /// small ones are four decisions and no ground at all.
     pub const fn plateaus(self) -> usize {
         match self {
             Self::Gentle => 1,
             Self::Rolling => 1,
             Self::Rugged => 2,
+        }
+    }
+
+    /// How far a tableland stands above the ground it is stamped on, in bands.
+    ///
+    /// One band on the calmer styles — the upland is plains you pay once to
+    /// climb onto and then build freely across, and it is where the second shade
+    /// of grass on the map comes from. Rugged lifts its tables into the hills.
+    pub fn plateau_lift(self) -> f32 {
+        match self {
+            Self::Gentle => 1.0,
+            Self::Rolling => 1.0,
+            Self::Rugged => 2.0,
         }
     }
 
@@ -192,12 +229,14 @@ impl TerrainStyle {
     ///
     /// Elevation carries most of the routing puzzle now that water is an accent,
     /// so rock is the only hard wall on a typical map and its share is what
-    /// separates Gentle from Rugged.
+    /// separates Gentle from Rugged. The share is also what sets how much apron
+    /// the map has to carry — four tiles of flank for every tile of crest — so
+    /// the calm styles sit near the bottom of the band.
     pub fn rock_target(self) -> f32 {
         match self {
-            Self::Gentle => 4.5,
-            Self::Rolling => 5.5,
-            Self::Rugged => 6.5,
+            Self::Gentle => 4.4,
+            Self::Rolling => 4.6,
+            Self::Rugged => 6.0,
         }
     }
 }

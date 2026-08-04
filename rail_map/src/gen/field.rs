@@ -9,20 +9,28 @@
 //! for drawing — it **is** six values, and everything else is arranged around
 //! what those six values mean to the rest of the game:
 //!
-//! | Band | Height | `rail_sim` reads it as | Renderer draws |
-//! | --- | --- | --- | --- |
-//! | 0 | 0 | flat plains, 1× | grass dark |
-//! | 1 | 4 | plains, 1× on the flat | grass mid |
-//! | 2 | 7 | hills, 3× on the flat | hill mid |
-//! | 3 | 10 | hills, 3× on the flat | hill light |
-//! | 4 | 13 | high mountain band, 10× | rock mid |
-//! | 5 | 16 | **refused** — the wall | rock cap |
+//! | Band | Height | `rail_sim` reads it as | Renderer draws | Generator uses it for |
+//! | --- | --- | --- | --- | --- |
+//! | 0 | 0 | flat plains, 1× | grass dark | **the plain** — most of the map |
+//! | 1 | 4 | plains, 1× on the flat | grass mid | tablelands, and a massif's foot |
+//! | 2 | 7 | hills, 3× on the flat | hill mid | a massif's flank |
+//! | 3 | 10 | hills, 3× on the flat | hill light | a massif's flank, and its passes |
+//! | 4 | 13 | high mountain band, 10× | rock mid | the shoulder of the crest |
+//! | 5 | 16 | **refused** — the wall | rock cap | the crest |
 //!
 //! The gaps are chosen, not rounded. Every step is 3 or 4 — at 3 the terrain
 //! renderer draws a shadowed bank, at 4 (`MAX_GRADE`, the last delta track may
 //! cross) a full banded cliff face. So *every* band boundary on a generated map
 //! is a visible edge, and none of them is an invisible tax. Staying inside a band
 //! is the cheap contour route; crossing one is the 6× cut-and-fill (§3.2).
+//!
+//! The last column is what playtest changed. The heights are untouched — the
+//! renderer and `rail_sim` both read them — but a band boundary is a *drawn
+//! edge* and therefore something the player has to answer, so where those
+//! boundaries fall is the whole of whether a map feels open or crowded. Five of
+//! the six bands are now landform and one is countryside; it used to be four and
+//! two, with band 0 spent on the floodplain either side of every watercourse.
+//! See [`super`]'s "The plain, and the things standing on it".
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};

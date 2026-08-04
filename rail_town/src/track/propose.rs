@@ -6,6 +6,16 @@
 //! *sparse* — the tiles it crosses stay bare, because that is the only way the
 //! shallow link can exist (see [`rail_sim::straight_line`]).
 //!
+//! # This is the default drag
+//!
+//! The ray snap is what a plain drag does, and the search in
+//! [`super::route`] is what Shift does. That is the way round the game is
+//! actually played: pointing *is* the angle pick, the run goes exactly where it
+//! is pointed and stops exactly where the drag stops, and terrain is answered
+//! by the player rather than routed around behind their back. The ghost still
+//! prices every tile and refuses loudly, which is the difference between
+//! "terrain be damned" and "terrain ignored".
+//!
 //! # Stability
 //!
 //! Brief 04 §2.2: a flickering ghost is unusable. Doubling the ray count
@@ -36,28 +46,33 @@ pub const HALF_STEP_DETENT: i32 = 1;
 /// How the cursor maps onto a proposed tile run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PathMode {
-    /// Cheapest legal path, weighted toward straightness (default drag).
+    /// Snap the endpoint onto the nearest of the sixteen rays — the default
+    /// drag, and brief 04 §2.2's "Straight": one direction, terrain be damned.
     ///
-    /// Terrain-aware — proposed by [`super::route::propose_smart`], not here.
-    /// Brief 04 §2.2: smart is the default "because it is right the
-    /// overwhelming majority of the time, and because it is where the game
-    /// demonstrates that it understands terrain."
+    /// The player picks the angle by pointing and the length by dragging, and
+    /// the game's job is to price it and to refuse the illegal tiles out loud —
+    /// not to have an opinion about where the line should go.
     #[default]
-    Smart,
-    /// [`Smart`](Self::Smart), refusing any step that changes height (Alt).
-    ContourLock,
-    /// Snap the endpoint onto the nearest of the sixteen rays (Shift) —
-    /// brief 04 §2.2's "Straight": one direction, terrain be damned.
-    Autofill,
-    /// Exactly the cursor tile (Ctrl).
+    Straight,
+    /// Exactly the cursor tile (Ctrl) — placing one piece at a time.
     SingleTile,
+    /// [`SmartAssist`](Self::SmartAssist), refusing any step that changes
+    /// height (Alt). The one piece of automation that is unambiguously a
+    /// convenience: "keep me level" is a constraint, not a route.
+    ContourLock,
+    /// Cheapest legal path, weighted toward straightness (Shift).
+    ///
+    /// Terrain-aware — proposed by [`super::route::propose_smart`], not here,
+    /// and held inside a corridor so it assists with the crossing in front of
+    /// the player instead of re-planning the journey.
+    SmartAssist,
 }
 
 impl PathMode {
     /// Modes routed through the terrain-aware search rather than
-    /// [`propose_path`].
-    pub fn is_smart(self) -> bool {
-        matches!(self, Self::Smart | Self::ContourLock)
+    /// [`propose_path`] — the two the player has to ask for.
+    pub fn is_assisted(self) -> bool {
+        matches!(self, Self::SmartAssist | Self::ContourLock)
     }
 }
 
@@ -70,16 +85,16 @@ pub struct ProposedPath {
 
 /// Propose tiles from `from` toward `to` under `mode`.
 ///
-/// Pure in the endpoints: the smart modes need terrain and are handled by the
-/// preview before it gets here. A terrain-blind caller asking anyway gets the
-/// ray snap, which is the closest thing this function can honestly offer.
+/// Pure in the endpoints: the assisted modes need terrain and are handled by
+/// the preview before it gets here. A terrain-blind caller asking anyway gets
+/// the ray snap, which is the closest thing this function can honestly offer.
 pub fn propose_path(from: TileCoord, to: TileCoord, mode: PathMode) -> ProposedPath {
     match mode {
         PathMode::SingleTile => ProposedPath {
             tiles: vec![to],
             endpoint: to,
         },
-        PathMode::Autofill | PathMode::Smart | PathMode::ContourLock => {
+        PathMode::Straight | PathMode::SmartAssist | PathMode::ContourLock => {
             let endpoint = snap_to_direction(from, to);
             let tiles = straight_line(from, endpoint).unwrap_or_else(|| vec![from]);
             ProposedPath { tiles, endpoint }
@@ -174,7 +189,7 @@ mod tests {
         let from = tile(2, 2);
         let to = tile(5, 5);
         assert_eq!(snap_to_direction(from, to), to);
-        let p = propose_path(from, to, PathMode::Autofill);
+        let p = propose_path(from, to, PathMode::Straight);
         assert_eq!(p.tiles.len(), 4);
     }
 
@@ -209,7 +224,7 @@ mod tests {
     fn a_shallow_drag_gets_a_half_step_run() {
         let from = tile(0, 0);
         // 26.57° is exactly ENE.
-        let p = propose_path(from, tile(6, 3), PathMode::Autofill);
+        let p = propose_path(from, tile(6, 3), PathMode::Straight);
         assert_eq!(p.endpoint, tile(6, 3));
         assert_eq!(
             p.tiles,
@@ -252,7 +267,7 @@ mod tests {
             let mut last_len = 0usize;
             for n in 1..=8 {
                 let cursor = tile(from.x + sx * n, from.y + sy * n);
-                let p = propose_path(from, cursor, PathMode::Autofill);
+                let p = propose_path(from, cursor, PathMode::Straight);
                 assert_eq!(p.endpoint, cursor, "dir {dir} at {n} drifted off its ray");
                 assert!(
                     p.tiles.len() >= last_len,
@@ -275,7 +290,7 @@ mod tests {
                     straight_line(from, end).is_some(),
                     "snap of ({x},{y}) gave {end:?}, which is not a run"
                 );
-                let p = propose_path(from, cursor, PathMode::Autofill);
+                let p = propose_path(from, cursor, PathMode::Straight);
                 assert!(!p.tiles.is_empty());
                 assert_eq!(p.tiles.first(), Some(&from));
                 assert_eq!(p.tiles.last(), Some(&end));

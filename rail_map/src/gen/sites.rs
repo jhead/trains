@@ -183,8 +183,11 @@ fn question_score(canvas: &Canvas, from: TileCoord, to: TileCoord) -> i32 {
 
     let mut score = 0;
     if water > 0 {
-        // A crossing the player can actually afford in minute one.
-        score += if worst_run <= rail_sim::MAX_BRIDGE_SPAN as i32 {
+        // A crossing the player can actually afford in minute one — which means
+        // the cheap tier, not the span limit. The premium rungs are buildable
+        // but cost multiples of the opening balance, so a wide channel between
+        // the first two towns is still a wall as far as the opening beat goes.
+        score += if worst_run <= rail_sim::CHEAP_BRIDGE_SPAN as i32 {
             45 - water * 2
         } else {
             -60
@@ -462,8 +465,10 @@ mod tests {
         assert!(stream > flat + 40, "stream {stream} vs flat {flat}");
     }
 
+    /// Six wide is bridgeable now, but at 56x a tile — so it is still not an
+    /// opening beat, and the score has to say so.
     #[test]
-    fn an_unbridgeable_channel_is_not_an_opening_question() {
+    fn a_premium_channel_is_not_an_opening_question() {
         let mut canvas = Canvas::new(16, 3);
         for y in 0..3i32 {
             for x in 5..11i32 {
@@ -476,6 +481,9 @@ mod tests {
             TileCoord { x: 1, y: 1 },
             TileCoord { x: 14, y: 1 },
         );
-        assert!(score < -30, "a six-wide river is a wall, not a beat: {score}");
+        assert!(
+            score < -30,
+            "a six-wide river is a mid-game project, not a beat: {score}"
+        );
     }
 }

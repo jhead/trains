@@ -1,10 +1,29 @@
-//! Smart route proposal — the default drag (brief 04 §2.2).
+//! Smart assist — the opt-in drag (Shift), and Alt's contour lock.
 //!
 //! A* over the sixteen-direction graph, weighted by what a tile actually
 //! costs to build ([`tile_build_cost`]) plus a straightness term, so the
 //! proposal follows contours, picks river narrows, and spends the player's
-//! money the way the player would. This is where the game demonstrates that
-//! it understands its own terrain.
+//! money the way the player would.
+//!
+//! # Why this is not the default any more
+//!
+//! Because "cheapest legal path" and "the line the player is drawing" are not
+//! the same object. Given a whole map to optimise over, the search would go
+//! around and up and over things to save a few tiles of hillside, and every one
+//! of those detours is a decision the player did not make and cannot see the
+//! reasoning for. A drag is now the ray snap in [`super::propose`], and this is
+//! offered on Shift for the moments it is genuinely wanted: *find me the way
+//! through this*.
+//!
+//! # The corridor
+//!
+//! Even asked for, the assist stays near the line it was asked about. No node
+//! is expanded further than [`ASSIST_CORRIDOR_TILES`] from the segment between
+//! the anchor and the cursor, which is enough room to find a narrows, a pass or
+//! a gentler bank a few tiles off the direct line, and nowhere near enough to
+//! re-plan the journey. If the only way through is outside the corridor the
+//! answer is an honest `None` and the preview says so — the player can drag
+//! toward the crossing themselves, which is the point.
 //!
 //! # What the search will and will not propose
 //!
@@ -60,24 +79,36 @@ const PREVIOUS_SHAPE_DISCOUNT_CENTS: i64 = 1;
 /// moves — optimal, and deranged on screen. Charging most of the saved tile
 /// back keeps the shallow run the honest winner for a genuinely shallow drag
 /// while a straight drag proposes the straight line. The player who wants the
-/// sparse-run discount on a cardinal alignment can still lay it with Shift.
+/// sparse-run discount on a cardinal alignment lays it with a plain drag, which
+/// puts the run exactly where they point and never second-guesses it.
 const HALF_STEP_EXTRA_CENTS: i64 = rail_sim::TRACK_COST_CENTS * 9 / 10;
 
 /// Popped-node ceiling. A 96x96 map holds ~156k states; past a quarter
 /// million something is pathological and the honest answer is "no route".
 const SEARCH_BUDGET: usize = 250_000;
 
+/// How far off the anchor-to-cursor line the assist may look, in tiles.
+///
+/// Six is about as far as a player can still see the reason for: a river
+/// narrows, a gap in a ridge, the shallow end of a bank. Past that a
+/// "suggestion" is a route of its own, and the player who wanted one would have
+/// dragged toward it. This is the whole difference between an assist and the
+/// thing that made decisions nobody asked for.
+pub const ASSIST_CORRIDOR_TILES: i32 = 6;
+
 /// `incoming` value for the start state, where no direction is held yet.
 const NO_DIR: u8 = DIR_COUNT as u8;
 
-/// Propose the cheapest legal run from `from` to `to`.
+/// Propose the cheapest legal run from `from` to `to`, inside a corridor.
 ///
 /// `contour_lock` (Alt) refuses any step that changes ground height, routing
 /// around anything that would climb. `previous` is last frame's accepted
-/// proposal, used only for the one-cent shape hold.
+/// proposal, used only for the one-cent shape hold. `corridor_tiles` is the
+/// leash: no tile further than that from the `from`–`to` segment is ever
+/// expanded (see [`ASSIST_CORRIDOR_TILES`]).
 ///
-/// Returns `None` when no legal route exists inside the search budget — the
-/// preview turns that into a loud, specific rejection.
+/// Returns `None` when no legal route exists inside the corridor and the search
+/// budget — the preview turns that into a loud, specific rejection.
 pub fn propose_smart(
     network: &TrackNetwork,
     terrain: &TrackTerrain,
@@ -85,6 +116,7 @@ pub fn propose_smart(
     to: TileCoord,
     contour_lock: bool,
     previous: Option<&[TileCoord]>,
+    corridor_tiles: i32,
 ) -> Option<ProposedPath> {
     if !terrain.contains(from) || !terrain.contains(to) {
         return None;
@@ -148,6 +180,11 @@ pub fn propose_smart(
             }
             let next = step(cur, dir);
             if !terrain.contains(next) {
+                continue;
+            }
+            // The leash. Checked before anything is priced, so a wide-open map
+            // costs the search no more than the corridor is worth.
+            if !within_corridor(from, to, next, corridor_tiles) {
                 continue;
             }
             let next_water = terrain.is_water(next);
@@ -247,6 +284,38 @@ pub fn propose_smart(
     })
 }
 
+/// Is `tile` within `corridor` tiles of the `from`–`to` segment?
+///
+/// Distance to the *segment*, not to the infinite line it lies on, so the
+/// corridor is a capsule: the search cannot overshoot the cursor or reverse
+/// past the anchor and call it perpendicular slack.
+///
+/// All integer arithmetic. A float here would be a determinism hazard for
+/// nothing — the comparison is exact once both sides are multiplied through by
+/// the segment's squared length.
+fn within_corridor(from: TileCoord, to: TileCoord, tile: TileCoord, corridor: i32) -> bool {
+    let limit_sq = (corridor as i64) * (corridor as i64);
+    let (vx, vy) = ((to.x - from.x) as i64, (to.y - from.y) as i64);
+    let (wx, wy) = ((tile.x - from.x) as i64, (tile.y - from.y) as i64);
+    let len_sq = vx * vx + vy * vy;
+    if len_sq == 0 {
+        return wx * wx + wy * wy <= limit_sq;
+    }
+    let dot = wx * vx + wy * vy;
+    if dot <= 0 {
+        // Behind the anchor: measure to the anchor itself.
+        return wx * wx + wy * wy <= limit_sq;
+    }
+    if dot >= len_sq {
+        // Past the cursor: measure to the cursor itself.
+        let (ex, ey) = (wx - vx, wy - vy);
+        return ex * ex + ey * ey <= limit_sq;
+    }
+    // Alongside: the perpendicular distance, both sides times `len_sq`.
+    let cross = wx * vy - wy * vx;
+    cross * cross <= limit_sq * len_sq
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +346,19 @@ mod tests {
         TileCoord { x, y }
     }
 
+    /// The assist as the game asks for it: the shipped corridor.
+    fn assist(
+        n: &TrackNetwork,
+        t: &TrackTerrain,
+        from: TileCoord,
+        to: TileCoord,
+        contour_lock: bool,
+        previous: Option<&[TileCoord]>,
+    ) -> Option<ProposedPath> {
+        let leash = ASSIST_CORRIDOR_TILES;
+        propose_smart(n, t, from, to, contour_lock, previous, leash)
+    }
+
     fn legs_are_dir16(tiles: &[TileCoord]) {
         for w in tiles.windows(2) {
             assert!(
@@ -292,7 +374,7 @@ mod tests {
     fn open_ground_proposes_the_straight_line() {
         let t = terrain_with(16, 16, &[], &[]);
         let n = TrackNetwork::default();
-        let p = propose_smart(&n, &t, tile(2, 8), tile(12, 8), false, None).unwrap();
+        let p = assist(&n, &t, tile(2, 8), tile(12, 8), false, None).unwrap();
         legs_are_dir16(&p.tiles);
         assert_eq!(p.tiles.first(), Some(&tile(2, 8)));
         assert_eq!(p.tiles.last(), Some(&tile(12, 8)));
@@ -301,50 +383,107 @@ mod tests {
         assert!(p.tiles.iter().all(|c| c.y == 8), "swerved on open ground");
     }
 
+    /// A wall of rock with one gap in it. The gap sits five tiles off the
+    /// straight line — inside the corridor — so the assist is allowed to find
+    /// it. It used to sit at y = 12, ten tiles off, which is exactly the sort
+    /// of unasked-for expedition the corridor exists to stop.
     #[test]
     fn a_mountain_wall_is_walked_around_not_through() {
         // A vertical wall of unbuildable rock with one gap.
         let mut heights = Vec::new();
         for y in 0..16 {
-            if y != 12 {
+            if y != 7 {
                 heights.push(((8, y), 14i8));
             }
         }
         let t = terrain_with(16, 16, &[], &heights);
         let n = TrackNetwork::default();
-        let p = propose_smart(&n, &t, tile(2, 2), tile(14, 2), false, None).unwrap();
+        let p = assist(&n, &t, tile(2, 2), tile(14, 2), false, None).unwrap();
         legs_are_dir16(&p.tiles);
         assert!(
-            p.tiles.contains(&tile(8, 12)),
+            p.tiles.contains(&tile(8, 7)),
             "the only gap in the wall is the only way through: {:?}",
             p.tiles
         );
         assert!(p.tiles.iter().all(|c| {
-            c.x != 8 || c.y == 12
+            c.x != 8 || c.y == 7
         }));
     }
 
+    /// The taming, stated: the same wall with its gap out past the corridor is
+    /// a refusal, not a trek. "No buildable route to here" is a better answer
+    /// than a line that dives ten tiles south without being asked.
+    #[test]
+    fn a_gap_outside_the_corridor_is_refused_rather_than_hunted_down() {
+        let mut heights = Vec::new();
+        for y in 0..16 {
+            if y != 13 {
+                heights.push(((8, y), 14i8));
+            }
+        }
+        let t = terrain_with(16, 16, &[], &heights);
+        let n = TrackNetwork::default();
+        assert!(
+            assist(&n, &t, tile(2, 2), tile(14, 2), false, None).is_none(),
+            "the assist wandered out of its corridor"
+        );
+        // Widen the leash and the same search finds the same gap, so this is
+        // the corridor talking and not a broken graph.
+        let wide = propose_smart(&n, &t, tile(2, 2), tile(14, 2), false, None, 12).unwrap();
+        assert!(wide.tiles.contains(&tile(8, 13)));
+    }
+
+    /// The narrows sits five tiles off the straight line, inside the corridor,
+    /// so the assist still does the thing it is good at: finding the cheap
+    /// crossing the player was going to have to find anyway. (It was at y = 10
+    /// — seven tiles off — which the corridor now puts out of reach.)
     #[test]
     fn a_river_is_crossed_at_its_narrows() {
-        // A river three wide, narrowing to one tile at y = 10.
+        // A river three wide, narrowing to one tile at y = 8.
         let mut water = Vec::new();
         for y in 0..16 {
             water.push((7, y));
-            if y != 10 {
+            if y != 8 {
                 water.push((6, y));
                 water.push((8, y));
             }
         }
         let t = terrain_with(16, 16, &water, &[]);
         let n = TrackNetwork::default();
-        let p = propose_smart(&n, &t, tile(2, 3), tile(13, 3), false, None).unwrap();
+        let p = assist(&n, &t, tile(2, 3), tile(13, 3), false, None).unwrap();
         legs_are_dir16(&p.tiles);
         let wet: Vec<_> = p.tiles.iter().filter(|c| t.is_water(**c)).collect();
         assert_eq!(
             wet,
-            vec![&tile(7, 10)],
+            vec![&tile(7, 8)],
             "the one-tile narrows is the cheap crossing: {:?}",
             p.tiles
+        );
+    }
+
+    /// And when the narrows is beyond the corridor, the assist crosses in
+    /// front of the player at the premium span rather than marching off to
+    /// find it. Both halves of the same rule: help with what is here.
+    #[test]
+    fn a_narrows_beyond_the_corridor_is_left_alone() {
+        let mut water = Vec::new();
+        for y in 0..16 {
+            water.push((7, y));
+            if y != 14 {
+                water.push((6, y));
+                water.push((8, y));
+            }
+        }
+        let t = terrain_with(16, 16, &water, &[]);
+        let n = TrackNetwork::default();
+        let p = assist(&n, &t, tile(2, 3), tile(13, 3), false, None).unwrap();
+        legs_are_dir16(&p.tiles);
+        let wet: Vec<TileCoord> =
+            p.tiles.iter().copied().filter(|c| t.is_water(*c)).collect();
+        assert_eq!(wet.len(), 3, "a three-wide crossing near the line: {wet:?}");
+        assert!(
+            wet.iter().all(|c| (c.y - 3).abs() <= ASSIST_CORRIDOR_TILES),
+            "the assist went looking for the far narrows: {wet:?}"
         );
     }
 
@@ -360,7 +499,7 @@ mod tests {
         }
         let t = terrain_with(16, 16, &water, &[]);
         let n = TrackNetwork::default();
-        let p = propose_smart(&n, &t, tile(1, 2), tile(14, 13), false, None).unwrap();
+        let p = assist(&n, &t, tile(1, 2), tile(14, 13), false, None).unwrap();
         legs_are_dir16(&p.tiles);
         for w in p.tiles.windows(3) {
             if t.is_water(w[1]) {
@@ -385,16 +524,16 @@ mod tests {
         let n = TrackNetwork::default();
 
         // Unlocked: happy to climb the bank and come back down.
-        let free = propose_smart(&n, &t, tile(2, 14), tile(14, 2), false, None).unwrap();
+        let free = assist(&n, &t, tile(2, 14), tile(14, 2), false, None).unwrap();
         assert!(free.tiles.iter().any(|c| t.height_at(*c) == Some(7)));
 
         // Locked from the low side: no step may change height, and the high
         // plateau is unreachable — the proposal must refuse, not sneak a climb.
-        let locked = propose_smart(&n, &t, tile(2, 14), tile(14, 2), true, None);
+        let locked = assist(&n, &t, tile(2, 14), tile(14, 2), true, None);
         assert!(locked.is_none(), "contour lock climbed: {locked:?}");
 
         // Locked along the level corridor: fine.
-        let along = propose_smart(&n, &t, tile(2, 14), tile(14, 14), true, None).unwrap();
+        let along = assist(&n, &t, tile(2, 14), tile(14, 14), true, None).unwrap();
         assert!(along.tiles.iter().all(|c| t.height_at(*c) == Some(4)));
     }
 
@@ -422,7 +561,7 @@ mod tests {
             )
             .expect("corridor tile places");
         }
-        let p = propose_smart(&owned, &t, tile(2, 6), tile(13, 6), false, None).unwrap();
+        let p = assist(&owned, &t, tile(2, 6), tile(13, 6), false, None).unwrap();
         assert!(
             p.tiles.iter().filter(|c| c.y == 10).count() >= 8,
             "should ride the free corridor: {:?}",
@@ -437,7 +576,7 @@ mod tests {
         // both cheaper and the shape the player pointed at.
         let t = terrain_with(16, 16, &[], &[]);
         let n = TrackNetwork::default();
-        let p = propose_smart(&n, &t, tile(2, 8), tile(12, 13), false, None).unwrap();
+        let p = assist(&n, &t, tile(2, 8), tile(12, 13), false, None).unwrap();
         legs_are_dir16(&p.tiles);
         assert_eq!(
             p.tiles.len(),
@@ -453,8 +592,8 @@ mod tests {
         // previous path must win the tie, whichever it was.
         let t = terrain_with(12, 12, &[], &[]);
         let n = TrackNetwork::default();
-        let first = propose_smart(&n, &t, tile(2, 2), tile(9, 5), false, None).unwrap();
-        let held = propose_smart(&n, &t, tile(2, 2), tile(9, 5), false, Some(&first.tiles))
+        let first = assist(&n, &t, tile(2, 2), tile(9, 5), false, None).unwrap();
+        let held = assist(&n, &t, tile(2, 2), tile(9, 5), false, Some(&first.tiles))
             .unwrap();
         assert_eq!(first.tiles, held.tiles, "the held shape flickered");
     }
@@ -463,9 +602,32 @@ mod tests {
     fn proposals_are_deterministic() {
         let t = terrain_with(24, 24, &[(9, 9), (9, 10), (9, 11)], &[((14, 14), 8)]);
         let n = TrackNetwork::default();
-        let a = propose_smart(&n, &t, tile(2, 2), tile(21, 20), false, None).unwrap();
-        let b = propose_smart(&n, &t, tile(2, 2), tile(21, 20), false, None).unwrap();
+        let a = assist(&n, &t, tile(2, 2), tile(21, 20), false, None).unwrap();
+        let b = assist(&n, &t, tile(2, 2), tile(21, 20), false, None).unwrap();
         assert_eq!(a.tiles, b.tiles);
+    }
+
+    /// The corridor is a capsule around the segment, not a slab across the map:
+    /// it bounds how far the search may reach sideways *and* how far it may
+    /// overshoot either end.
+    #[test]
+    fn the_corridor_is_a_capsule_around_the_drag() {
+        let from = tile(10, 10);
+        let to = tile(20, 10);
+        // Alongside the line.
+        assert!(within_corridor(from, to, tile(15, 16), 6));
+        assert!(!within_corridor(from, to, tile(15, 17), 6));
+        // Past the cursor and behind the anchor, measured to the endpoints.
+        assert!(within_corridor(from, to, tile(26, 10), 6));
+        assert!(!within_corridor(from, to, tile(27, 10), 6));
+        assert!(within_corridor(from, to, tile(4, 10), 6));
+        assert!(!within_corridor(from, to, tile(3, 10), 6));
+        // A diagonal drag gets the same treatment, and a zero-length one is a
+        // disc rather than a division by zero.
+        assert!(within_corridor(tile(0, 0), tile(8, 8), tile(8, 0), 6));
+        assert!(!within_corridor(tile(0, 0), tile(8, 8), tile(9, 0), 6));
+        assert!(within_corridor(from, from, tile(14, 10), 6));
+        assert!(!within_corridor(from, from, tile(17, 10), 6));
     }
 
     #[test]
@@ -473,6 +635,6 @@ mod tests {
         // Goal on high rock.
         let t = terrain_with(8, 8, &[], &[((6, 6), 16)]);
         let n = TrackNetwork::default();
-        assert!(propose_smart(&n, &t, tile(1, 1), tile(6, 6), false, None).is_none());
+        assert!(assist(&n, &t, tile(1, 1), tile(6, 6), false, None).is_none());
     }
 }

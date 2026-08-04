@@ -8,21 +8,27 @@
 //! That sentence sets the whole shape of this module. A river here is a *route*
 //! first — a least-cost course from a source in the high ground down to the sea,
 //! which is why it lies in the valleys and why its banks are a corridor. Its
-//! width is then authored along that course: wide enough to refuse a bridge
-//! everywhere except at two to four **named narrows**, whose spans deliberately
-//! differ so the player is choosing between a cheap bridge with a long detour and
-//! an expensive one with a short detour. §2.1 calls that pair "a complete design
-//! problem on its own".
+//! width is then authored along that course: wide enough to refuse a *cheap*
+//! bridge everywhere except at two to four **named narrows**, whose spans
+//! deliberately differ so the player is choosing between a cheap bridge with a
+//! long detour and an expensive one with a short detour. §2.1 calls that pair "a
+//! complete design problem on its own".
+//!
+//! A trunk is not a wall. It is `TRUNK_WIDTH` across, inside `rail_sim`'s span
+//! limit, so a player who wants to cross *here* can always buy their way over at
+//! the premium end of the bridge ladder. That is the third option in the same
+//! decision, not an escape from it: paying 30x a tile to avoid a detour is
+//! exactly the trade §2.1 is asking the player to weigh.
 //!
 //! The widths are not merely intended, they are **enforced**: after carving,
-//! anything outside a named crossing that turns out to be bridgeable gets
-//! widened until it is not. Otherwise a lucky bend quietly becomes a fifth
-//! crossing and the decision evaporates.
+//! anything outside a named crossing that turns out to be *cheaply* bridgeable
+//! gets widened until it is not. Otherwise a lucky bend quietly becomes a fifth
+//! narrows and the decision evaporates.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use rail_sim::MAX_BRIDGE_SPAN;
+use rail_sim::CHEAP_BRIDGE_SPAN;
 use rand::rngs::StdRng;
 use rand::Rng;
 
@@ -31,16 +37,20 @@ use crate::options::MapGenOptions;
 
 use super::field::{salt, stream, Canvas, Grain};
 
-/// Width of a river where it is not meant to be crossable.
+/// Width of a river where it is not meant to be crossed cheaply.
 ///
-/// One tile past `MAX_BRIDGE_SPAN`: the narrowest width that refuses a bridge,
-/// so the water the player cannot cross is never more water than it has to be.
-const TRUNK_WIDTH: u32 = MAX_BRIDGE_SPAN + 1;
+/// One tile past `CHEAP_BRIDGE_SPAN`: the narrowest width that refuses a *cheap*
+/// bridge, so the water between the narrows is never more water than it has to
+/// be. It stays inside `MAX_BRIDGE_SPAN`, so the trunk is crossable at the
+/// premium rate — the expensive answer to "I want to cross right here".
+const TRUNK_WIDTH: u32 = CHEAP_BRIDGE_SPAN + 1;
 
 /// Crossing spans in the order they are handed out along a course.
 ///
-/// Adjacent crossings always differ, and both ends of `rail_sim`'s bridge cost
-/// curve appear: span 1 is 8× base, span 3 is 20× and a commitment (§3.4).
+/// Adjacent crossings always differ, and both ends of the cheap tier of
+/// `rail_sim`'s bridge cost ladder appear: span 1 is 8× base, span 3 is 20× and
+/// already a decision (§3.4). Anything wider is trunk, and trunk prices at 30×
+/// and up.
 const CROSSING_SPANS: [u32; 4] = [1, 3, 2, 3];
 
 /// How far from a named crossing the width enforcement stops caring.
@@ -231,18 +241,23 @@ fn run_len(canvas: &Canvas, x: i32, y: i32, dx: i32, dy: i32) -> u32 {
     span
 }
 
-/// Shortest bridgeable run through a water cell, or `None` if it refuses one.
-fn crossable_span(canvas: &Canvas, index: usize) -> Option<u32> {
+/// Shortest run through a water cell a *cheap* bridge could cover, or `None`.
+///
+/// The question is deliberately the cheap tier rather than `MAX_BRIDGE_SPAN`:
+/// every trunk tile is bridgeable now, so "can this be bridged" no longer picks
+/// out anything, whereas "can this be bridged without a mid-game budget" is
+/// precisely the narrows §2.1 asks the generator to author.
+fn cheap_span(canvas: &Canvas, index: usize) -> Option<u32> {
     let x = (index % canvas.w) as i32;
     let y = (index / canvas.w) as i32;
     let span = [(1, 0), (0, 1)]
         .into_iter()
         .filter_map(|(dx, dy)| axis_span(canvas, x, y, dx, dy))
         .min()?;
-    (span <= MAX_BRIDGE_SPAN).then_some(span)
+    (span <= CHEAP_BRIDGE_SPAN).then_some(span)
 }
 
-/// Widen every bridgeable spot that is not one of the named crossings.
+/// Widen every cheaply bridgeable spot that is not one of the named crossings.
 ///
 /// A river whose narrows are wherever the rasteriser happened to pinch is a
 /// river with no decision in it. This is the pass that makes the authored
@@ -263,7 +278,7 @@ fn enforce_widths(canvas: &mut Canvas, named: &[usize]) {
             }) {
                 continue;
             }
-            if crossable_span(canvas, index).is_none() {
+            if cheap_span(canvas, index).is_none() {
                 continue;
             }
             // Push out the shorter axis, one tile each side.
@@ -297,15 +312,15 @@ fn enforce_widths(canvas: &mut Canvas, named: &[usize]) {
     }
 }
 
-/// Make every designated narrows actually crossable.
+/// Make every designated narrows actually cheap to cross.
 ///
-/// A meander can leave an authored crossing one tile too wide, and a crossing
-/// that is not crossable is not a decision — it is a wall the player was told
-/// about. So the run is trimmed back to a bridgeable width from whichever end is
-/// further from the crossing itself.
+/// A meander can leave an authored crossing one tile too wide, and a narrows
+/// that prices like the trunk either side of it is not a decision — it is a
+/// name on a map. So the run is trimmed back to a cheap-tier width from
+/// whichever end is further from the crossing itself.
 fn force_crossings(canvas: &mut Canvas, crossings: &[usize]) {
     for &cell in crossings {
-        if crossable_span(canvas, cell).is_some() {
+        if cheap_span(canvas, cell).is_some() {
             continue;
         }
         let x = (cell % canvas.w) as i32;
@@ -316,8 +331,8 @@ fn force_crossings(canvas: &mut Canvas, crossings: &[usize]) {
             (0, 1)
         };
         for _ in 0..12 {
-            if run_len(canvas, x, y, dx, dy) <= MAX_BRIDGE_SPAN
-                && crossable_span(canvas, cell).is_some()
+            if run_len(canvas, x, y, dx, dy) <= CHEAP_BRIDGE_SPAN
+                && cheap_span(canvas, cell).is_some()
             {
                 break;
             }
@@ -353,7 +368,7 @@ fn diversify_spans(canvas: &mut Canvas, named: &[usize]) {
     for attempt in 0..4 {
         let spans: Vec<(usize, u32)> = named
             .iter()
-            .filter_map(|&c| crossable_span(canvas, c).map(|s| (c, s)))
+            .filter_map(|&c| cheap_span(canvas, c).map(|s| (c, s)))
             .collect();
         if spans.len() < 2 || spans.iter().any(|(_, s)| *s != spans[0].1) {
             return;
@@ -554,7 +569,7 @@ pub(crate) fn carve_rivers(
             if !crossings.contains(&cell) {
                 continue;
             }
-            if let Some(span) = crossable_span(canvas, cell) {
+            if let Some(span) = cheap_span(canvas, cell) {
                 river.crossings.push(RiverCrossing {
                     tile: rail_sim::ids::TileCoord {
                         x: (cell % canvas.w) as i32,
@@ -716,10 +731,25 @@ mod tests {
         assert_eq!(width_at(0, 60, &picks, &spans), 1);
     }
 
+    /// The trunk used to be sized to refuse a bridge outright. It is now sized
+    /// to refuse a *cheap* one: a wall is not a decision, and a player who
+    /// wants to cross away from the narrows should be able to buy their way
+    /// over at the premium end of the ladder.
     #[test]
-    fn the_trunk_width_is_the_narrowest_that_refuses_a_bridge() {
-        assert_eq!(TRUNK_WIDTH, MAX_BRIDGE_SPAN + 1);
-        assert!(CROSSING_SPANS.iter().all(|s| *s <= MAX_BRIDGE_SPAN));
+    fn the_trunk_width_is_the_narrowest_that_refuses_a_cheap_bridge() {
+        assert_eq!(TRUNK_WIDTH, CHEAP_BRIDGE_SPAN + 1);
+        assert!(CROSSING_SPANS.iter().all(|s| *s <= CHEAP_BRIDGE_SPAN));
+        // …and the trunk itself is still bridgeable, at a price.
+        let spans: Vec<u32> = (1..=rail_sim::MAX_BRIDGE_SPAN).collect();
+        assert!(
+            spans.contains(&TRUNK_WIDTH),
+            "a trunk nobody can cross is a wall, not a decision"
+        );
+        assert!(
+            rail_sim::bridge_cost_for_span(TRUNK_WIDTH)
+                > rail_sim::bridge_cost_for_span(CHEAP_BRIDGE_SPAN),
+            "crossing the trunk has to cost more than crossing a narrows"
+        );
         // Adjacent crossings differ, so a player always has two prices to weigh.
         for pair in CROSSING_SPANS.windows(2) {
             assert_ne!(pair[0], pair[1]);
@@ -737,8 +767,10 @@ mod tests {
         assert!(picks[0] >= 14 && *picks.last().unwrap() <= 69, "{picks:?}");
     }
 
+    /// Four wide is trunk: bridgeable, but only on the premium rungs, so the
+    /// generator does not count it as one of the authored narrows.
     #[test]
-    fn a_four_wide_channel_refuses_a_bridge_and_a_three_wide_accepts_one() {
+    fn a_four_wide_channel_refuses_a_cheap_bridge_and_a_three_wide_accepts_one() {
         let mut canvas = Canvas::new(12, 3);
         for y in 0..3i32 {
             for x in 4..8i32 {
@@ -746,9 +778,9 @@ mod tests {
                 canvas.surface[i] = Surface::River;
             }
         }
-        assert_eq!(crossable_span(&canvas, canvas.at(5, 1)), None);
+        assert_eq!(cheap_span(&canvas, canvas.at(5, 1)), None);
         let i = canvas.at(7, 1);
         canvas.surface[i] = Surface::Land;
-        assert_eq!(crossable_span(&canvas, canvas.at(5, 1)), Some(3));
+        assert_eq!(cheap_span(&canvas, canvas.at(5, 1)), Some(3));
     }
 }

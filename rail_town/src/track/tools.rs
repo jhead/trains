@@ -1,11 +1,24 @@
 //! Drag-to-build / right-drag demolish → sim [`CommandBuffer`].
 //!
 //! ## Build
-//! Press → drag → release. Live ghost every frame. The default drag proposes
-//! the smart route (brief 04 §2.2 — cheapest legal path, weighted straight);
-//! Shift snaps to one of the sixteen directions, terrain be damned; Ctrl
-//! places a single tile; Alt holds the contour. After a successful commit the
-//! endpoint stays as the continuous-build anchor.
+//! Press → drag → release. Live ghost every frame.
+//!
+//! | Modifier | What a drag does |
+//! | --- | --- |
+//! | none | a straight run, exactly where it is pointed, for exactly as long as the drag |
+//! | Ctrl | one tile, the one under the cursor |
+//! | Alt | the assist, refusing any step that changes height |
+//! | Shift | the assist: cheapest legal path, inside a corridor around the drag |
+//!
+//! The plain drag is the ray snap ([`super::propose`]) and it is deliberately
+//! the default. The player picks the angle by pointing and the length by
+//! dragging; the game prices every tile on the ghost and refuses the illegal
+//! ones out loud, and it does not re-route anybody. The search
+//! ([`super::route`]) is real work and worth having, so it stays — on Shift,
+//! where it is an answer to a question that was asked.
+//!
+//! After a successful commit the endpoint stays as the continuous-build anchor,
+//! which is what makes one-piece-at-a-time building fluent.
 //!
 //! ## Demolish
 //! Left-click / left-drag with the Demolish tool, or right-drag from either
@@ -87,9 +100,13 @@ pub struct TrackToolState {
     pub demolish_preview: Option<DemolishPreview>,
     /// When true (train place mode), ignore build/demolish pointer input.
     pub suppress_build_click: bool,
-    /// Last frame's accepted smart proposal — the shape hold of brief 04
+    /// Last frame's accepted *assisted* proposal — the shape hold of brief 04
     /// §2.2. Fed back into the search so an equal-cost alternative cannot
-    /// flicker the ghost; cleared whenever there is no smart preview.
+    /// flicker the ghost.
+    ///
+    /// Only the searched modes (Shift, Alt) can tie with themselves, so this is
+    /// dead weight under a plain drag and is cleared there: the ray snap is a
+    /// pure function of two tiles and has nothing to hold.
     pub smart_hold: Option<Vec<TileCoord>>,
 }
 
@@ -157,19 +174,25 @@ pub fn demolish_tip(origin: TileCoord, hover: Option<TileCoord>, moved: bool) ->
     }
 }
 
-/// Remember a smart proposal's shape for next frame's tie-breaking, or drop
-/// the hold when the mode is pure or the route was refused.
+/// Remember an assisted proposal's shape for next frame's tie-breaking, or drop
+/// the hold when the drag is unassisted or the route was refused.
 fn update_smart_hold(state: &mut TrackToolState, preview: &BuildPreview) {
-    if state.path_mode.is_smart() && preview.reject.is_none() {
+    if state.path_mode.is_assisted() && preview.reject.is_none() {
         state.smart_hold = Some(preview.tiles.iter().map(|g| g.tile).collect());
-    } else if !state.path_mode.is_smart() {
+    } else if !state.path_mode.is_assisted() {
         state.smart_hold = None;
     }
 }
 
-/// Brief 04 §2.2's modifier table: none = smart, Shift = straight (ray snap,
-/// terrain be damned), Ctrl = single tile, Alt = contour lock. Modifiers are
-/// deliberately literal — they are chords, not rebindable verbs.
+/// The modifier table: none = straight (the ray snap, terrain be damned),
+/// Ctrl = single tile, Alt = contour lock, Shift = the smart assist.
+///
+/// Straight is the default because the player is drawing a railway, not
+/// commissioning one: pointing is the angle pick and the drag is the length,
+/// and nothing between the two makes a decision on their behalf. The search is
+/// still here, one key away, for the times it is wanted.
+///
+/// Modifiers are deliberately literal — they are chords, not rebindable verbs.
 fn path_mode_from_keys(keys: &ButtonInput<KeyCode>) -> PathMode {
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -177,11 +200,11 @@ fn path_mode_from_keys(keys: &ButtonInput<KeyCode>) -> PathMode {
     if ctrl {
         PathMode::SingleTile
     } else if shift {
-        PathMode::Autofill
+        PathMode::SmartAssist
     } else if alt {
         PathMode::ContourLock
     } else {
-        PathMode::Smart
+        PathMode::Straight
     }
 }
 
@@ -412,7 +435,7 @@ fn commit_build(
             }));
             state.anchor = Some(to);
         }
-        PathMode::Smart | PathMode::ContourLock => {
+        PathMode::SmartAssist | PathMode::ContourLock => {
             // The proposal already holds the routed tiles; commit exactly what
             // the ghost showed, as one atomic command and one undo entry.
             let tiles: Vec<TileCoord> = preview.tiles.iter().map(|g| g.tile).collect();
@@ -431,7 +454,7 @@ fn commit_build(
             }
             state.anchor = Some(to);
         }
-        PathMode::Autofill => {
+        PathMode::Straight => {
             if from == to {
                 if network.id_at(to, GROUND_LAYER).is_none() {
                     buffer.push(CommandKind::PlaceTrack(PlaceTrack {
@@ -508,6 +531,72 @@ mod tests {
     use rail_sim::MoneyLedger;
 
     use super::super::preview::preview_demolish;
+
+    fn keys(down: &[KeyCode]) -> ButtonInput<KeyCode> {
+        let mut input = ButtonInput::<KeyCode>::default();
+        for key in down {
+            input.press(*key);
+        }
+        input
+    }
+
+    /// The modifier table, asserted rather than merely documented.
+    ///
+    /// A plain drag is the straight run: the player points, the game builds
+    /// exactly that and prices it. The terrain-aware search is one key away for
+    /// whoever wants it, and it is never what happens by accident.
+    #[test]
+    fn a_plain_drag_is_straight_and_the_search_is_opt_in() {
+        assert_eq!(path_mode_from_keys(&keys(&[])), PathMode::Straight);
+        assert_eq!(PathMode::default(), PathMode::Straight);
+        assert!(!PathMode::Straight.is_assisted(), "a plain drag re-routes nobody");
+
+        for shift in [KeyCode::ShiftLeft, KeyCode::ShiftRight] {
+            assert_eq!(path_mode_from_keys(&keys(&[shift])), PathMode::SmartAssist);
+        }
+        for ctrl in [KeyCode::ControlLeft, KeyCode::ControlRight] {
+            assert_eq!(path_mode_from_keys(&keys(&[ctrl])), PathMode::SingleTile);
+        }
+        for alt in [KeyCode::AltLeft, KeyCode::AltRight] {
+            assert_eq!(path_mode_from_keys(&keys(&[alt])), PathMode::ContourLock);
+        }
+        assert!(PathMode::SmartAssist.is_assisted());
+        assert!(PathMode::ContourLock.is_assisted());
+        assert!(!PathMode::SingleTile.is_assisted());
+
+        // Ctrl outranks the rest: one tile is the most explicit thing to ask
+        // for, so a chord that includes it never becomes a whole run.
+        let all = keys(&[KeyCode::ControlLeft, KeyCode::ShiftLeft, KeyCode::AltLeft]);
+        assert_eq!(path_mode_from_keys(&all), PathMode::SingleTile);
+    }
+
+    /// The shape hold belongs to the searched modes. A straight run is a pure
+    /// function of two tiles and cannot tie with itself, so holding a shape for
+    /// it would only be stale state waiting to surprise somebody.
+    #[test]
+    fn the_shape_hold_is_dropped_the_moment_the_drag_is_unassisted() {
+        let preview = BuildPreview {
+            tiles: Vec::new(),
+            new_tile_count: 0,
+            bridge_count: 0,
+            total_cost_cents: 0,
+            balance_after_cents: 0,
+            can_commit: false,
+            reject: None,
+            endpoint: tile(3, 3),
+        };
+        let mut state = TrackToolState {
+            path_mode: PathMode::SmartAssist,
+            smart_hold: None,
+            ..Default::default()
+        };
+        update_smart_hold(&mut state, &preview);
+        assert!(state.smart_hold.is_some(), "the assist holds its shape");
+
+        state.path_mode = PathMode::Straight;
+        update_smart_hold(&mut state, &preview);
+        assert!(state.smart_hold.is_none(), "a straight drag holds nothing");
+    }
 
     fn tile(x: i32, y: i32) -> TileCoord {
         TileCoord { x, y }

@@ -10,7 +10,7 @@
 //! measurement falls back to geometry, so a grid rebuilt from a save still reads.
 
 use rail_sim::ids::TileCoord;
-use rail_sim::{MAX_BRIDGE_SPAN, MOUNTAIN_HEIGHT_MIN};
+use rail_sim::{CHEAP_BRIDGE_SPAN, MAX_BRIDGE_SPAN, MOUNTAIN_HEIGHT_MIN};
 
 use crate::features::{RiverCrossing, Surface};
 use crate::grid::MapGrid;
@@ -156,6 +156,16 @@ pub fn crossing_span(map: &MapGrid, coord: TileCoord) -> Option<u32> {
         .min()
 }
 
+/// [`crossing_span`], restricted to spans on the cheap rungs of the bridge
+/// ladder ([`CHEAP_BRIDGE_SPAN`]).
+///
+/// This is the one that answers "where can the player cross", because the wide
+/// answer is now "anywhere on the trunk, for a mid-game sum". Scouting is about
+/// the narrows.
+pub fn cheap_crossing_span(map: &MapGrid, coord: TileCoord) -> Option<u32> {
+    crossing_span(map, coord).filter(|span| *span <= CHEAP_BRIDGE_SPAN)
+}
+
 /// Water run through `coord` along one axis, if both ends are buildable land.
 fn axis_span(map: &MapGrid, coord: TileCoord, dx: i32, dy: i32) -> Option<u32> {
     let mut span = 1u32;
@@ -187,10 +197,15 @@ fn axis_span(map: &MapGrid, coord: TileCoord, dx: i32, dy: i32) -> Option<u32> {
     Some(span)
 }
 
-/// Every distinct place the water on this map can be bridged.
+/// Every distinct place the water on this map can be bridged *cheaply*.
 ///
 /// Adjacent narrow tiles are one crossing, not four: what the player chooses
 /// between is *places*, and a four-tile-wide ford is one place.
+///
+/// The cheap tier is the filter because the premium tier is not a place — a
+/// trunk is bridgeable end to end now, so listing every spot that admits a deck
+/// would list the river. What is scarce, and therefore worth scouting, is the
+/// narrows.
 pub fn river_crossings(map: &MapGrid) -> Vec<RiverCrossing> {
     let w = map.width as i32;
     let h = map.height as i32;
@@ -200,7 +215,7 @@ pub fn river_crossings(map: &MapGrid) -> Vec<RiverCrossing> {
     for y in 0..h {
         for x in 0..w {
             let i = idx(x, y);
-            if let Some(span) = crossing_span(map, TileCoord { x, y }) {
+            if let Some(span) = cheap_crossing_span(map, TileCoord { x, y }) {
                 span_at[i] = span;
             }
         }
@@ -417,6 +432,35 @@ mod tests {
         assert_eq!(crossings.len(), 1, "one pinch is one crossing: {crossings:?}");
         assert_eq!(crossings[0].span, 1);
         assert_eq!(crossings[0].tile, TileCoord { x: 4, y: 2 });
+
+        // The four-wide stretch is bridgeable — at the premium end of the
+        // ladder, which is why it is not one of the places worth scouting.
+        let trunk = TileCoord { x: 5, y: 5 };
+        assert_eq!(crossing_span(&map, trunk), Some(4));
+        assert_eq!(cheap_crossing_span(&map, trunk), None);
+    }
+
+    /// Wide water is a premium crossing; water wider than the span limit is
+    /// still genuinely impassable, and both answers have to be distinguishable.
+    #[test]
+    fn water_past_the_span_limit_refuses_a_bridge_at_any_price() {
+        let widest = MAX_BRIDGE_SPAN as i32;
+        for (width, expected) in [(widest, Some(widest as u32)), (widest + 1, None)] {
+            let map = grid((width + 6) as u32, 5, |x, _| {
+                if x >= 3 && x < 3 + width {
+                    water()
+                } else {
+                    land(0)
+                }
+            });
+            assert_eq!(
+                crossing_span(&map, TileCoord { x: 3, y: 2 }),
+                expected,
+                "a {width}-wide channel"
+            );
+            // Neither width is a cheap crossing, so neither is worth scouting.
+            assert!(river_crossings(&map).is_empty());
+        }
     }
 
     #[test]

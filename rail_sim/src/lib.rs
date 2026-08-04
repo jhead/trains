@@ -103,8 +103,8 @@ pub use track::{
     apply_track_commands, bridge_cost_for_span, local_slope, path_bridge_spans_ok, path_grades_ok,
     piece_maintenance_weight, straight_line, tile_build_cost, tile_cost, validate_tile_empty,
     PlacementError, TrackEdit, TrackNetwork, TrackPiece, TrackTerrain, BRIDGE_COST_CENTS,
-    BRIDGE_MAINT_WEIGHT, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_CURVE, MAX_GRADE, MOUNTAIN_HEIGHT_MIN,
-    TRACK_COST_CENTS, TRACK_MAINT_WEIGHT,
+    BRIDGE_MAINT_WEIGHT, CHEAP_BRIDGE_SPAN, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_CURVE, MAX_GRADE,
+    MOUNTAIN_HEIGHT_MIN, TRACK_COST_CENTS, TRACK_MAINT_WEIGHT,
 };
 pub use trains::{
     advance_trains, apply_train_commands, blocked_chain_head, blocker_for, buy_cost, find_path,

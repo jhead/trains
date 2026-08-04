@@ -12,8 +12,8 @@ mod terrain;
 pub use apply::{apply_track_commands, TrackEdit};
 pub use cost::{
     bridge_cost_for_span, local_slope, piece_maintenance_weight, tile_build_cost, tile_cost,
-    BRIDGE_COST_CENTS, BRIDGE_MAINT_WEIGHT, GROUND_LAYER, MAX_BRIDGE_SPAN, MAX_CURVE, MAX_GRADE,
-    MOUNTAIN_HEIGHT_MIN, TRACK_COST_CENTS, TRACK_MAINT_WEIGHT,
+    BRIDGE_COST_CENTS, BRIDGE_MAINT_WEIGHT, CHEAP_BRIDGE_SPAN, GROUND_LAYER, MAX_BRIDGE_SPAN,
+    MAX_CURVE, MAX_GRADE, MOUNTAIN_HEIGHT_MIN, TRACK_COST_CENTS, TRACK_MAINT_WEIGHT,
 };
 pub use dir::{
     bearing_deg, bearing_separation_deg, clock_index, clock_separation, dir_from_clock, dir_index,
@@ -44,11 +44,16 @@ mod tests {
         TrackTerrain::new(w, h, (0..w * h).map(|_| (false, 0i8)))
     }
 
-    /// 8×3 map with a vertical water strip of width `water_w` at x=3..
+    /// Map cut top to bottom by a water strip `water_w` wide at x=3.., with
+    /// three columns of dry land either side.
+    ///
+    /// Taller than `MAX_BRIDGE_SPAN` on purpose: span is measured on the
+    /// *shorter* axis, so a short map would quietly price and permit a strip on
+    /// its height rather than on its width.
     fn map_with_water_strip(water_w: u32) -> TrackTerrain {
-        let w = 10u32;
-        let h = 5u32;
-        TrackTerrain::new(w, h, (0..h).flat_map(|_y| {
+        let w = water_w + 6;
+        let h = MAX_BRIDGE_SPAN + 3;
+        TrackTerrain::new(w, h, (0..h).flat_map(move |_y| {
             (0..w).map(move |x| {
                 let water = x >= 3 && x < 3 + water_w;
                 (water, if water { -2 } else { 1 })
@@ -131,18 +136,72 @@ mod tests {
         )
         .unwrap();
         assert!(placed.piece.is_bridge());
+        // The crossing span is the *shorter* axis — how far it is to dry land.
+        // This used to read `.max()` and still matched, because every span past
+        // 2 billed at the same 20x; the ladder now prices each rung apart, so
+        // the two axes are no longer interchangeable.
         let span = terrain
             .water_span_horizontal(TileCoord { x: 4, y: 2 })
-            .max(terrain.water_span_vertical(TileCoord { x: 4, y: 2 }));
+            .min(terrain.water_span_vertical(TileCoord { x: 4, y: 2 }));
+        assert_eq!(span, 3);
         assert_eq!(money.cents(), 500_000 - bridge_cost_for_span(span));
+    }
+
+    /// The premium tier, priced end to end: a wide crossing is buildable, every
+    /// deck tile bills at its rung, and the bill is one atomic transaction.
+    /// This is the whole point of raising the span limit — a big river is an
+    /// expensive answer rather than a wall.
+    #[test]
+    fn a_wide_bridge_places_at_the_premium_rate() {
+        for span in [5u32, 7] {
+            let terrain = map_with_water_strip(span);
+            let mut network = TrackNetwork::new();
+            let mut money = Money::new(50_000_000);
+            let mut ledger = MoneyLedger::default();
+            let start = money.cents();
+            let west = TileCoord { x: 2, y: 4 };
+            let east = TileCoord {
+                x: 3 + span as i32,
+                y: 4,
+            };
+
+            let placed = try_autofill_track(
+                &mut network,
+                &mut money,
+                &mut ledger,
+                &terrain,
+                west,
+                east,
+                GROUND_LAYER,
+            )
+            .unwrap();
+
+            assert_eq!(placed.len() as u32, span + 2);
+            let decks = placed
+                .iter()
+                .filter(|p| p.piece.kind == TrackKind::Bridge)
+                .count() as u32;
+            assert_eq!(decks, span, "span {span}: one deck tile per water tile");
+            let banks = tile_build_cost(&terrain, west).unwrap()
+                + tile_build_cost(&terrain, east).unwrap();
+            assert_eq!(
+                start - money.cents(),
+                bridge_cost_for_span(span) * span as i64 + banks,
+                "span {span} billed off its rung"
+            );
+        }
+        assert_eq!(bridge_cost_for_span(5), TRACK_COST_CENTS * 42);
+        assert_eq!(bridge_cost_for_span(7), TRACK_COST_CENTS * 72);
     }
 
     #[test]
     fn bridge_rejected_when_water_wider_than_limit() {
-        // Water width 5 → min(h,v) = 5 > 3.
-        let terrain = map_with_water_strip(5);
+        // One past the limit. Was 5, which the ladder now spans at a premium
+        // rather than refusing — the refusal moved with the rule.
+        let span = MAX_BRIDGE_SPAN + 1;
+        let terrain = map_with_water_strip(span);
         let mut network = TrackNetwork::new();
-        let mut money = Money::new(500_000);
+        let mut money = Money::new(50_000_000);
         let mut ledger = MoneyLedger::default();
 
         let err = try_place_track(
@@ -150,12 +209,15 @@ mod tests {
             &mut money,
             &mut ledger,
             &terrain,
-            TileCoord { x: 5, y: 2 },
+            TileCoord {
+                x: 3 + span as i32 / 2,
+                y: 4,
+            },
             GROUND_LAYER,
         )
         .unwrap_err();
-        assert!(matches!(err, PlacementError::BridgeTooLong { .. }));
-        assert_eq!(money.cents(), 500_000);
+        assert_eq!(err, PlacementError::BridgeTooLong { span });
+        assert_eq!(money.cents(), 50_000_000);
         assert!(network.is_empty());
     }
 
@@ -180,10 +242,12 @@ mod tests {
         assert_eq!(placed.len(), 4);
         assert!(network.len() >= 4);
 
-        // Wider water (4) on a fresh map must fail the path run check.
-        let wide = map_with_water_strip(4);
+        // Wider water on a fresh map must fail the path run check. One past the
+        // span limit, not four: four is a premium span now and lays fine.
+        let over = MAX_BRIDGE_SPAN + 1;
+        let wide = map_with_water_strip(over);
         let mut network2 = TrackNetwork::new();
-        let mut money2 = Money::new(500_000);
+        let mut money2 = Money::new(50_000_000);
         let mut ledger2 = MoneyLedger::default();
         let err = try_autofill_track(
             &mut network2,
@@ -191,12 +255,15 @@ mod tests {
             &mut ledger2,
             &wide,
             TileCoord { x: 2, y: 1 },
-            TileCoord { x: 7, y: 1 },
+            TileCoord {
+                x: 3 + over as i32,
+                y: 1,
+            },
             GROUND_LAYER,
         )
         .unwrap_err();
-        assert!(matches!(err, PlacementError::BridgeTooLong { span: 4 }));
-        assert_eq!(money2.cents(), 500_000);
+        assert!(matches!(err, PlacementError::BridgeTooLong { span } if span == over));
+        assert_eq!(money2.cents(), 50_000_000);
     }
 
     #[test]

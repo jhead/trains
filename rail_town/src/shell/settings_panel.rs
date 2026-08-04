@@ -220,6 +220,16 @@ fn spawn_controls_tab(
         parent,
         "Pan also accepts the arrow keys. Middle-drag pans, wheel zooms.",
     );
+    // The build modifiers are chords rather than verbs, so they are not in the
+    // rebind list above and have nowhere else to be written down.
+    spawn_note(
+        parent,
+        "Track drag lays a straight run where you point. Ctrl one tile,",
+    );
+    spawn_note(
+        parent,
+        "Alt holds the contour, Shift asks for a routed suggestion.",
+    );
 }
 
 /// Capture the next key press into the pending rebind.

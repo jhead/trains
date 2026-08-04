@@ -13,7 +13,7 @@ use rail_sim::ids::{StationId, TileCoord, TrainId};
 use rail_sim::{
     AutoFillTrack, BuyTrain, CommandBuffer, CommandKind, ComplaintFeed, IndustryRegistry, JobBoard,
     Money, PlaceTrack, PlaceTrain, SimPlugin, StationRegistry, StationService, TrackNetwork,
-    TrackTerrain, Train, TrainKind, TrainLocation, TrainYard, GROUND_LAYER, MAX_BRIDGE_SPAN,
+    TrackTerrain, Train, TrainKind, TrainLocation, TrainYard, CHEAP_BRIDGE_SPAN, GROUND_LAYER,
     MAX_GRADE, MOUNTAIN_HEIGHT_MIN, STARTING_CASH_CENTS, TRANSIT_COST_CENTS, TRANSPORT_COST_CENTS,
 };
 
@@ -31,6 +31,18 @@ fn terrain_from_map(map: &MapGrid) -> TrackTerrain {
     TrackTerrain::new(map.width, map.height, cells)
 }
 
+/// Tiles this smoke test is willing to route over.
+///
+/// The placement rules allow water up to `MAX_BRIDGE_SPAN` across, but the
+/// BFS below is 4-connected and cost-blind: handed wide water it will walk
+/// *along* a river as readily as across it, and the water run it then hands
+/// `AutoFillTrack` can be far longer than any single tile's span. Placement
+/// refuses that whole segment, which leaves a hole in the spanning tree and
+/// nothing to run trains over.
+///
+/// So this crosses at cheap spans only, which is the network a player would
+/// actually build here anyway. The wide-span ladder is covered directly, by
+/// `rail_sim::track` and `rail_town::track::preview`.
 fn tile_placeable(terrain: &TrackTerrain, tile: TileCoord) -> bool {
     if !terrain.contains(tile) {
         return false;
@@ -38,7 +50,7 @@ fn tile_placeable(terrain: &TrackTerrain, tile: TileCoord) -> bool {
     if terrain.is_water(tile) {
         let h = terrain.water_span_horizontal(tile);
         let v = terrain.water_span_vertical(tile);
-        return h.min(v) <= MAX_BRIDGE_SPAN;
+        return h.min(v) <= CHEAP_BRIDGE_SPAN;
     }
     let height = terrain.height_at(tile).unwrap_or(0);
     if height >= MOUNTAIN_HEIGHT_MIN {

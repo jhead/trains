@@ -16,7 +16,22 @@ pub const TRACK_COST_CENTS: i64 = 10_000;
 pub const BRIDGE_COST_CENTS: i64 = TRACK_COST_CENTS * 8;
 
 /// Maximum contiguous water tiles a bridge may span (inclusive).
-pub const MAX_BRIDGE_SPAN: u32 = 3;
+///
+/// A river the player cannot cross at all is a wall, and a wall is not a
+/// decision — so every trunk a generator draws is reachable, at a price, and so
+/// is the wide water between the narrows. Eight tiles is where a deck stops
+/// being a bridge and starts being a causeway; past it the answer is an honest
+/// refusal that names the span it measured.
+pub const MAX_BRIDGE_SPAN: u32 = 8;
+
+/// Widest span still on the cheap rungs of [`bridge_cost_for_span`] (8–20×).
+///
+/// Above this a crossing is a *premium* one (30× and up) — buildable, but a
+/// different decision entirely. Anything asking "can the player afford to cross
+/// here in minute one" means this constant, not [`MAX_BRIDGE_SPAN`]: the map
+/// generator authors its narrows against it, so the cheap crossing stays the
+/// scarce, interesting one.
+pub const CHEAP_BRIDGE_SPAN: u32 = 3;
 
 /// Hard max absolute height delta between adjacent track tiles.
 /// Above this, placement is refused ([02] §3.2).
@@ -48,13 +63,30 @@ pub const BRIDGE_MAINT_WEIGHT: i64 = 4;
 /// Autofill is straight so this mainly bites at junctions; curves still slow below.
 pub const MAX_CURVE: u8 = 64;
 
-/// Bridge construction cost for a water span (tiles), **8–20×** base.
+/// Bridge construction cost for a water span (tiles), **8–90×** base.
+///
+/// | Span | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+/// | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+/// | Per tile | 8× | 14× | 20× | 30× | 42× | 56× | 72× | 90× |
+///
+/// The first three rungs are the cheap tier ([`CHEAP_BRIDGE_SPAN`]): a ford, a
+/// stream, a small river, all of them things a young railway crosses without
+/// much thought. The ladder then steepens quadratically, because a deck that
+/// stands eight tiles clear of both banks is a different structure and should
+/// read as one — the per-tile rate rises *and* there are more tiles to pay it
+/// on, so a full eight-span crossing is 720× base: a monument the railway saves
+/// up for, not a shortcut it takes.
 #[inline]
 pub fn bridge_cost_for_span(span: u32) -> i64 {
     let mult = match span {
         0 | 1 => 8,
         2 => 14,
-        _ => 20, // span 3 (and any wider that somehow passed span checks)
+        3 => 20,
+        4 => 30,
+        5 => 42,
+        6 => 56,
+        7 => 72,
+        _ => 90, // span 8 (and any wider that somehow passed span checks)
     };
     TRACK_COST_CENTS.saturating_mul(mult)
 }
@@ -87,7 +119,7 @@ pub fn local_slope(terrain: &TrackTerrain, tile: TileCoord) -> u8 {
 /// | Hills (h≤10, slope≤3) | 3× |
 /// | Steep hillside (h≤10, slope≥4) | 6× |
 /// | High mountain band (h 11..=13) | 10× |
-/// | Bridge by span | 8 / 14 / 20× |
+/// | Bridge by span | 8 / 14 / 20 / 30 / 42 / 56 / 72 / 90× |
 /// | Cliff / high peak (h≥14) | refused |
 ///
 /// The slope bands are cut where the generator's elevation bands actually
@@ -232,6 +264,82 @@ mod tests {
             pricey,
             cheap,
             pricey / cheap
+        );
+    }
+
+    /// The ladder the player is being asked to weigh: every rung dearer than
+    /// the last, and the premium rungs (4–6) dearer than the cheap tier by
+    /// enough that a wide crossing is a decision rather than a detail.
+    #[test]
+    fn the_bridge_ladder_climbs_all_the_way_to_the_span_limit() {
+        let rungs: Vec<i64> = (1..=MAX_BRIDGE_SPAN).map(bridge_cost_for_span).collect();
+        assert_eq!(
+            rungs,
+            vec![
+                TRACK_COST_CENTS * 8,
+                TRACK_COST_CENTS * 14,
+                TRACK_COST_CENTS * 20,
+                TRACK_COST_CENTS * 30,
+                TRACK_COST_CENTS * 42,
+                TRACK_COST_CENTS * 56,
+                TRACK_COST_CENTS * 72,
+                TRACK_COST_CENTS * 90,
+            ]
+        );
+        for pair in rungs.windows(2) {
+            assert!(pair[1] > pair[0], "the ladder flattens: {rungs:?}");
+        }
+        // Span 0 is the degenerate "not really water" case and prices as span 1.
+        assert_eq!(bridge_cost_for_span(0), bridge_cost_for_span(1));
+        // The cheap tier is the top of the routine rungs, not of the ladder:
+        // there are premium rungs above it to climb.
+        assert!(
+            rungs.len() > CHEAP_BRIDGE_SPAN as usize,
+            "the cheap tier swallowed the whole ladder"
+        );
+        assert!(
+            bridge_cost_for_span(CHEAP_BRIDGE_SPAN + 1)
+                >= bridge_cost_for_span(CHEAP_BRIDGE_SPAN) * 3 / 2,
+            "stepping off the cheap tier should be felt"
+        );
+    }
+
+    /// A whole eight-span crossing is a monument, not an opening move.
+    #[test]
+    fn the_widest_crossing_costs_more_than_the_player_starts_with() {
+        let whole = bridge_cost_for_span(MAX_BRIDGE_SPAN) * MAX_BRIDGE_SPAN as i64;
+        assert_eq!(whole, TRACK_COST_CENTS * 720);
+        assert!(
+            whole > crate::money::STARTING_CASH_CENTS * 3,
+            "{whole} is pocket change against the opening balance"
+        );
+        // And it is worth several of the cheap crossing it replaces, so
+        // scouting for a narrows is never the foolish option.
+        let narrows = bridge_cost_for_span(CHEAP_BRIDGE_SPAN) * CHEAP_BRIDGE_SPAN as i64;
+        assert!(whole > narrows * 10, "{whole} vs {narrows}");
+    }
+
+    /// Span pricing reads the *shorter* axis: how far it is to dry land, not
+    /// how long the water is. With every rung priced differently this is no
+    /// longer a distinction without a difference.
+    #[test]
+    fn a_long_narrow_channel_prices_on_the_short_axis() {
+        // A 2-wide channel running the full nine rows: cross it, do not swim it.
+        let w = 6u32;
+        let h = 9u32;
+        let channel = TrackTerrain::new(
+            w,
+            h,
+            (0..h).flat_map(move |_y| {
+                (0..w).map(move |x| {
+                    let water = x == 2 || x == 3;
+                    (water, if water { -2 } else { 1 })
+                })
+            }),
+        );
+        assert_eq!(
+            tile_build_cost(&channel, TileCoord { x: 2, y: 4 }).unwrap(),
+            TRACK_COST_CENTS * 14
         );
     }
 

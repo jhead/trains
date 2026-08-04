@@ -68,17 +68,20 @@ pub struct SiteHint {
     pub kind: SiteKind,
 }
 
-/// Somewhere a river can actually be bridged.
+/// Somewhere a river can be bridged without a mid-game budget.
 ///
 /// `span` is the contiguous water run a bridge would have to cover, which is
-/// what `rail_sim`'s `MAX_BRIDGE_SPAN` and `bridge_cost_for_span` charge on. A
-/// span-1 crossing is routine; a span-3 crossing is 20× base and a commitment
-/// (§3.4) — and the whole point is that the map offers both.
+/// what `rail_sim`'s `bridge_cost_for_span` charges on. A span-1 crossing is
+/// routine; a span-3 crossing is 20× base and already a commitment (§3.4) — and
+/// the whole point is that the map offers both.
+///
+/// Only the cheap tier is listed. Wider water is bridgeable too, at 30× a tile
+/// and up, but that is a decision about money rather than a place to scout for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RiverCrossing {
     /// A water tile in the middle of the crossable run.
     pub tile: TileCoord,
-    /// Contiguous water tiles a bridge spans here (1..=`MAX_BRIDGE_SPAN`).
+    /// Contiguous water tiles a bridge spans here (1..=`CHEAP_BRIDGE_SPAN`).
     pub span: u32,
 }
 

@@ -290,7 +290,7 @@ mod tests {
     use crate::measure;
     use crate::options::{MapSize, ResourceSpread, TerrainStyle, WaterStyle};
     use rail_sim::{
-        tile_build_cost, TrackTerrain, MAX_BRIDGE_SPAN, MAX_GRADE, MOUNTAIN_HEIGHT_MIN,
+        tile_build_cost, TrackTerrain, CHEAP_BRIDGE_SPAN, MAX_GRADE, MOUNTAIN_HEIGHT_MIN,
         TRACK_COST_CENTS,
     };
     use std::collections::BTreeMap;
@@ -515,11 +515,14 @@ mod tests {
                 "seed {seed}: every crossing is the same width ({spans:?})"
             );
             for crossing in &crossings {
-                assert!(crossing.span <= MAX_BRIDGE_SPAN);
+                // A recorded crossing is a *cheap* one: the trunk either side of
+                // it is bridgeable too now, so `MAX_BRIDGE_SPAN` no longer says
+                // anything about whether this tile is a narrows.
+                assert!(crossing.span <= CHEAP_BRIDGE_SPAN);
                 assert_eq!(
-                    measure::crossing_span(&map, crossing.tile),
+                    measure::cheap_crossing_span(&map, crossing.tile),
                     Some(crossing.span),
-                    "seed {seed}: recorded crossing {:?} is not actually bridgeable",
+                    "seed {seed}: recorded crossing {:?} is not actually a narrows",
                     crossing.tile
                 );
             }

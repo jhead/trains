@@ -430,6 +430,80 @@ mod tests {
         assert_eq!(seen_cells.len(), rail_sim::track::DIR_COUNT);
     }
 
+    /// **Report A, half one.** "I cannot see it" pointed first at the sprite, so
+    /// this pins the freight train's art to the ground it stands on — in both
+    /// projections, because the game boots isometric and the top-down view is a
+    /// key away. It passes, which is what moved the diagnosis off the sprite
+    /// bank and onto the silence around the verb (see [`super::tools`]).
+    #[test]
+    fn a_freight_train_gets_a_sprite_standing_on_its_own_tile_in_either_view() {
+        use rail_sim::track::{try_place_track, TrackTerrain};
+        use rail_sim::{Money, MoneyLedger, TileCoord, GROUND_LAYER};
+
+        for projection in [rail_map::Projection::TopDown, rail_map::Projection::Iso] {
+            let _guard = crate::map::tests::ProjectionGuard::new(projection);
+            let terrain = TrackTerrain::new(24, 24, (0..24 * 24).map(|_| (false, 0i8)));
+            let mut network = TrackNetwork::new();
+            let mut money = Money::new(10_000_000);
+            let mut ledger = MoneyLedger::default();
+            let tile = TileCoord { x: 8, y: 8 };
+            let id = try_place_track(
+                &mut network,
+                &mut money,
+                &mut ledger,
+                &terrain,
+                tile,
+                GROUND_LAYER,
+            )
+            .expect("track")
+            .id;
+
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .init_resource::<Assets<Image>>()
+                .init_resource::<SimClock>()
+                .init_resource::<TileOccupancy>()
+                .insert_resource(network)
+                .add_systems(Update, sync_train_sprites);
+            app.world_mut().spawn((
+                Train {
+                    id: TrainId(7),
+                    kind: TrainKind::Transport,
+                },
+                TrainLocation::at_track(id),
+            ));
+            app.update();
+
+            let (transform, sprite) = app
+                .world_mut()
+                .query_filtered::<(&Transform, &Sprite), With<TrainSprite>>()
+                .single(app.world())
+                .map(|(t, s)| (*t, s.clone()))
+                .expect("a freight train draws something");
+            let (wx, wy) = tile_to_world(tile);
+            assert_eq!(
+                (transform.translation.x, transform.translation.y),
+                (wx, wy),
+                "{projection:?}: the freight sprite is off its own tile"
+            );
+            assert_eq!(transform.translation.z, TRAIN_Z);
+            // ... and the cell it holds has paint on it. An empty texture is a
+            // sprite that exists and shows nothing, which is the same bug from
+            // the player's side. (That the two kinds draw differently is
+            // `bank::the_two_kinds_do_not_draw_alike`.)
+            let cell = app
+                .world()
+                .resource::<Assets<Image>>()
+                .get(&sprite.image)
+                .and_then(|image| image.data.clone())
+                .expect("a baked cell");
+            assert!(
+                cell.chunks_exact(4).any(|texel| texel[3] > 0),
+                "{projection:?}: the freight cell is blank"
+            );
+        }
+    }
+
     #[test]
     fn puff_fades_to_nothing_over_its_life() {
         assert!(puff_alpha(0.0) > puff_alpha(SMOKE_LIFE_SECS * 0.5));

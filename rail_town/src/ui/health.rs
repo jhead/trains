@@ -34,7 +34,7 @@ use bevy::time::common_conditions::on_timer;
 use rail_map::tile_to_world;
 use rail_sim::{
     Alert, AlertBoard, AlertKey, AlertKind, DemandSpawner, MoneyLedger, StationId,
-    StationRegistry, StationService, TileCoord, TileOccupancy, TrainLocation,
+    StationRegistry, StationService, TileCoord, TileOccupancy, TrainYard,
 };
 
 use crate::inspect::{Selectable, Selection};
@@ -108,7 +108,14 @@ pub struct NetworkHealth {
     /// Mean score across served stations. `None` when nothing has run yet.
     pub score: Option<u32>,
     pub blocked: u32,
-    pub parked: u32,
+    /// Rolling stock bought and never placed.
+    ///
+    /// This slot used to be `parked`, counted off [`TrainLocation::parked`] — a
+    /// flag no shipping code sets and `apply_train_opex` clears every tick, so
+    /// the strip could only ever draw `0 parked`. It now counts the state that
+    /// really does go unnoticed: trains the player paid for that are sitting in
+    /// the yard where nothing draws them. See [`rail_sim::AlertKind::TrainsIdle`].
+    pub in_yard: u32,
     /// Settlements and industries the network does not reach.
     pub unserved: u32,
     /// Stations that exist but have never been served.
@@ -133,8 +140,8 @@ impl NetworkHealth {
         if self.blocked > 0 {
             parts.push(format!("{} blocked", self.blocked));
         }
-        if self.parked > 0 {
-            parts.push(format!("{} parked", self.parked));
+        if self.in_yard > 0 {
+            parts.push(format!("{} in yard", self.in_yard));
         }
         if self.unserved > 0 {
             parts.push(format!("{} unserved", self.unserved));
@@ -155,8 +162,13 @@ impl NetworkHealth {
 
     /// `true` when something here needs the player, as opposed to being merely
     /// unfinished.
+    ///
+    /// Stock in the yard is deliberately *not* here. It is a to-do, like an
+    /// unserved settlement, not the railway falling over — and painting a
+    /// to-do in `warn` is the mistake the old "service low (0)" made. The
+    /// summary still names it, and the Alerts board carries the nudge.
     pub fn needs_attention(&self) -> bool {
-        self.blocked > 0 || self.parked > 0 || self.score.is_some_and(|s| s < 34)
+        self.blocked > 0 || self.score.is_some_and(|s| s < 34)
     }
 }
 
@@ -168,7 +180,7 @@ pub fn refresh_network_health(
     demand: Res<DemandSpawner>,
     occupancy: Res<TileOccupancy>,
     ledger: Res<MoneyLedger>,
-    trains: Query<&TrainLocation>,
+    yard: Res<TrainYard>,
     mut health: ResMut<NetworkHealth>,
 ) {
     let mut rows: Vec<StationHealth> = stations
@@ -207,13 +219,11 @@ pub fn refresh_network_health(
         Some(served.iter().sum::<u32>() / served.len() as u32)
     };
 
-    let parked = trains.iter().filter(|loc| loc.parked).count() as u32;
-
     health.awaiting = rows.iter().filter(|r| !r.served).count() as u32;
     health.stations = rows;
     health.score = score;
     health.blocked = occupancy.blocked_by.len() as u32;
-    health.parked = parked;
+    health.in_yard = yard.unplaced().len() as u32;
     health.unserved = demand.open.len() as u32;
     health.net_rate_cents_per_min = ledger.net_rate_cents_per_min();
 }
@@ -246,11 +256,16 @@ pub fn actionable_alert_count(board: &AlertBoard, service: &StationService) -> u
 /// "service low (0)" — it makes an ordinary state look like an emergency.
 ///
 /// Never colour alone (03 §4): the bell always carries its count as well.
+///
+/// [`AlertKind::TrainsIdle`] joins `NewDemand` on the quiet side for the same
+/// reason: a train waiting in the yard is one click of work outstanding, not a
+/// railway in trouble, and it is very often the state a player is in on purpose
+/// while they finish laying the track it is going to run on.
 pub fn alerts_are_bad_news(board: &AlertBoard, service: &StationService) -> bool {
     board
         .iter()
         .filter(|a| alert_is_actionable(a, service))
-        .any(|a| !matches!(a.kind, AlertKind::NewDemand))
+        .any(|a| !matches!(a.kind, AlertKind::NewDemand | AlertKind::TrainsIdle))
 }
 
 // ─ The strip ───────────────────────────────────────────────
@@ -695,6 +710,25 @@ mod tests {
 
         health.blocked = 0;
         health.unserved = 0;
+        assert_eq!(health.summary(), "all running");
+    }
+
+    /// The count this slot used to hold — parked trains — described a state the
+    /// game cannot enter, so the strip could only ever say `0 parked`. It now
+    /// carries the state a playtester really was blind to: stock bought and
+    /// never placed. Listed, like an unfinished network, but not an emergency.
+    #[test]
+    fn stock_waiting_in_the_yard_is_listed_but_is_not_trouble() {
+        let mut health = NetworkHealth::default();
+        health.stations = vec![station(1, "A", 80, true)];
+        health.in_yard = 2;
+        assert!(health.summary().contains("2 in yard"), "{}", health.summary());
+        assert!(
+            !health.needs_attention(),
+            "a train waiting to be placed is a to-do, not a failure"
+        );
+
+        health.in_yard = 0;
         assert_eq!(health.summary(), "all running");
     }
 

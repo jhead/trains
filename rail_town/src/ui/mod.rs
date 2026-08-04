@@ -19,7 +19,7 @@
 //! | [`status_strip`] | Money, rate, date and time, speed, alert bell |
 //! | [`health`] | Network health — the permanent readout, and its window |
 //! | [`toolbar`] | The build-verb model behind the menu row |
-//! | [`town_talk`], [`ledger`], [`alerts`] | Windows drawn here |
+//! | [`town_talk`], [`ledger`], [`alerts`], [`trains`] | Windows drawn here |
 //! | [`adapters`] | Windows drawn elsewhere (Goals, Neighbours, Inspector) |
 //!
 //! Sound lives in the `audio` module, not here. The one thing this module says
@@ -46,6 +46,7 @@ mod menu_bar;
 mod status_strip;
 mod toolbar;
 mod town_talk;
+mod trains;
 mod undo;
 mod window;
 
@@ -76,6 +77,7 @@ use status_strip::{
     update_status_strip, GameCalendar, StatusStripCache,
 };
 use town_talk::{refresh_town_talk_rows, setup_town_talk_ui, town_talk_clicks};
+use trains::{setup_trains_ui, train_row_clicks, update_train_row_hover, update_trains_ui};
 use undo::undo_redo_input;
 use window::{
     apply_window_layout, close_top_window_on_escape, dress_new_windows, drag_windows, panel_cues,
@@ -134,6 +136,7 @@ impl Plugin for UiPlugin {
                     setup_town_talk_ui,
                     setup_ledger_ui,
                     setup_alerts_ui,
+                    setup_trains_ui,
                 ),
             )
             // Window plumbing.
@@ -193,6 +196,9 @@ impl Plugin for UiPlugin {
                     alert_row_clicks,
                     alert_dismiss_all_clicks,
                     update_alert_row_hover,
+                    update_trains_ui,
+                    train_row_clicks,
+                    update_train_row_hover,
                     undo_redo_input.in_set(crate::input::PlayerVerbSet),
                 ),
             )

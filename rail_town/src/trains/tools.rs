@@ -18,13 +18,36 @@
 //! bank is only touched when there is nothing to place. That makes the verb
 //! honest at any balance, and it is what keeps a broke player from being stuck
 //! with rolling stock they cannot see.
+//!
+//! # A click that places nothing says why
+//!
+//! *"Cannot seem to place a Transport/freight train, it doesn't put anything on
+//! the track. It might be spending money and placing it but I cannot see it."*
+//!
+//! That report is not one bug, it is the absence of an answer. The sprite bank
+//! draws freight correctly in both projections
+//! (`visuals::a_freight_train_gets_a_sprite_standing_on_its_own_tile_in_either_view`)
+//! and the sim spawns it exactly as it spawns a transit. What was missing is
+//! that **every** way this verb can decline was a bare `return`: a purchase the
+//! bank could not cover, a yard with nothing of that kind in it, and — the one a
+//! freight player hits first — a click on the *industry* rather than on a
+//! platform. Three different refusals, all of them indistinguishable from a
+//! placement that worked and could not be seen.
+//!
+//! So [`place_at_tile`] returns a [`PlaceRefusal`] rather than `None`, each
+//! variant carrying the rule it is enforcing, and the tool speaks it into Town
+//! Talk — the feed the buy and the placement already talk in, so the yes and the
+//! no arrive in the same place. Freight gets its own sentence, because "click a
+//! station" is not useful advice to somebody standing on a sawmill.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use rail_map::{world_to_tile, MapGrid};
 use rail_sim::commands::{BuyTrain, PlaceTrain, SellTrain};
 use rail_sim::{
-    buy_cost, track_for_station, CommandBuffer, CommandKind, StationRegistry, TrainKind, TrainYard,
+    buy_cost, track_for_station, CommandBuffer, CommandKind, ComplaintEntry, ComplaintFeed,
+    IndustryRegistry, StationRegistry, StationService, TalkKind, TrainKind, TrainYard,
     TrackNetwork, GROUND_LAYER,
 };
 
@@ -85,21 +108,68 @@ pub fn arm_train_place(
     line.clear_draft();
 }
 
-/// The placement a world click at `tile` should produce, if any.
+/// Why a click did not place a train, in the player's terms.
+///
+/// Each variant is one rule. [`Self::message`] is the sentence that rule turns
+/// into, and it is the only thing the player ever sees of this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceRefusal {
+    /// Nothing of that kind is owned. The purchase that would have stocked the
+    /// yard failed, and the sim has already said why in its own line — so this
+    /// one points at the fix rather than repeating the diagnosis.
+    YardEmpty(TrainPlaceKind),
+    /// The click landed on or beside an industry with no platform on it. This
+    /// is the freight-specific one, and it is the one report A was really about.
+    IndustryWithNoPlatform(String),
+    /// The click landed on nothing that boards trains at all.
+    NotAStop(TrainPlaceKind),
+    /// A stop, but one the rails have not reached.
+    StopWithNoRails(String),
+}
+
+impl PlaceRefusal {
+    /// ASCII, whole sentence, names the rule and the way out (03 §3, 04 §4).
+    pub fn message(&self) -> String {
+        match self {
+            Self::YardEmpty(TrainPlaceKind::Transport) => {
+                "No goods train in the yard - buy one before placing it".into()
+            }
+            Self::YardEmpty(TrainPlaceKind::Transit) => {
+                "No transit train in the yard - buy one before placing it".into()
+            }
+            Self::IndustryWithNoPlatform(name) => {
+                format!("Freight boards at a goods platform - {name} has none yet")
+            }
+            Self::NotAStop(TrainPlaceKind::Transport) => {
+                "Freight boards at a goods platform - place one against an industry".into()
+            }
+            Self::NotAStop(TrainPlaceKind::Transit) => {
+                "Trains board at a station - click a platform to place one".into()
+            }
+            Self::StopWithNoRails(name) => {
+                format!("{name} has no rails yet - run track to the platform")
+            }
+        }
+    }
+}
+
+/// The placement a world click at `tile` should produce, or the rule that
+/// stopped it.
 ///
 /// A click counts for a station when it lands on the station tile, on the track
 /// that serves it, or on any tile touching it — the same generosity the station
-/// tool gives, because a platform is smaller than a finger. Placement needs a
-/// train of that kind in the yard and rails at the stop; without either, the
-/// click is simply not a placement.
+/// tool gives, because a platform is smaller than a finger.
 fn place_at_tile(
     tile: rail_sim::TileCoord,
-    kind: TrainKind,
+    kind: TrainPlaceKind,
     yard: &TrainYard,
     stations: &StationRegistry,
+    industries: &IndustryRegistry,
     network: &TrackNetwork,
-) -> Option<PlaceTrain> {
-    let train = yard.peek_kind(kind)?;
+) -> Result<PlaceTrain, PlaceRefusal> {
+    let Some(train) = yard.peek_kind(kind.to_sim()) else {
+        return Err(PlaceRefusal::YardEmpty(kind));
+    };
 
     let at_station = stations
         .id_at(tile, GROUND_LAYER)
@@ -126,11 +196,61 @@ fn place_at_tile(
                     None
                 }
             })
-        })?;
+        });
 
-    let station = stations.get(at_station)?;
-    track_for_station(network, station.tile, station.layer)?;
-    Some(PlaceTrain { train, at_station })
+    let Some(at_station) = at_station else {
+        // A freight player aims at the works, not at a platform, because the
+        // works is what the train is *for*. Naming the industry they clicked
+        // turns a dead click into the next thing to build.
+        if let Some(industry) = industries
+            .lot_at(tile)
+            .or_else(|| industries.abutting(tile))
+        {
+            return Err(PlaceRefusal::IndustryWithNoPlatform(industry.name.clone()));
+        }
+        return Err(PlaceRefusal::NotAStop(kind));
+    };
+
+    let Some(station) = stations.get(at_station) else {
+        return Err(PlaceRefusal::NotAStop(kind));
+    };
+    if track_for_station(network, station.tile, station.layer).is_none() {
+        return Err(PlaceRefusal::StopWithNoRails(station.name.clone()));
+    }
+    Ok(PlaceTrain { train, at_station })
+}
+
+/// The registries a placement click reads, bundled to stay inside Bevy's
+/// system-parameter budget.
+#[derive(SystemParam)]
+pub struct PlaceWorld<'w> {
+    stations: Res<'w, StationRegistry>,
+    industries: Res<'w, IndustryRegistry>,
+    network: Res<'w, TrackNetwork>,
+    yard: Res<'w, TrainYard>,
+}
+
+/// Push a refusal into Town Talk, where the buy and the placement already speak.
+///
+/// Consecutive identical lines are dropped: a player clicking the same wrong
+/// tile four times has made one mistake, and four copies of the same sentence
+/// would push the rest of the feed off the panel.
+fn refuse(talk: &mut ComplaintFeed, service: &StationService, refusal: &PlaceRefusal) {
+    let line = refusal.message();
+    if talk.iter().next().is_some_and(|e| e.peep_name == line) {
+        return;
+    }
+    talk.push(ComplaintEntry {
+        kind: TalkKind::Warning,
+        peep_name: line,
+        station_name: String::new(),
+        wait_minutes: 0,
+        sim_tick: service.tick,
+        peep_id: None,
+        station_id: None,
+        tile: None,
+        count: 1,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -141,9 +261,9 @@ pub fn train_tool_input(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<MapCamera>>,
     map: Res<MapGrid>,
-    stations: Res<StationRegistry>,
-    network: Res<TrackNetwork>,
-    yard: Res<TrainYard>,
+    world: PlaceWorld,
+    service: Res<StationService>,
+    mut talk: ResMut<ComplaintFeed>,
     mut buffer: ResMut<CommandBuffer>,
     mut train_state: ResMut<TrainToolState>,
     mut track_state: ResMut<TrackToolState>,
@@ -154,7 +274,7 @@ pub fn train_tool_input(
     if bindings.just_pressed(&keys, ControlAction::BuyTransit) {
         arm_train_place(
             TrainPlaceKind::Transit,
-            &yard,
+            &world.yard,
             &mut buffer,
             &mut train_state,
             &mut track_state,
@@ -164,7 +284,7 @@ pub fn train_tool_input(
     if bindings.just_pressed(&keys, ControlAction::BuyTransport) {
         arm_train_place(
             TrainPlaceKind::Transport,
-            &yard,
+            &world.yard,
             &mut buffer,
             &mut train_state,
             &mut track_state,
@@ -207,22 +327,27 @@ pub fn train_tool_input(
     let Ok((camera, cam_transform)) = camera_q.single() else {
         return;
     };
-    let Ok(world) = camera.viewport_to_world_2d(cam_transform, cursor) else {
+    let Ok(pointer) = camera.viewport_to_world_2d(cam_transform, cursor) else {
         return;
     };
-    let tile = world_to_tile(world.x, world.y);
+    let tile = world_to_tile(pointer.x, pointer.y);
     if !map.contains(tile) {
         return;
     }
 
-    if let Some(place) = place_at_tile(
+    match place_at_tile(
         tile,
-        train_state.kind.to_sim(),
-        &yard,
-        &stations,
-        &network,
+        train_state.kind,
+        &world.yard,
+        &world.stations,
+        &world.industries,
+        &world.network,
     ) {
-        buffer.push(CommandKind::PlaceTrain(place));
+        Ok(place) => {
+            buffer.push(CommandKind::PlaceTrain(place));
+        }
+        // The click was a real attempt at a real verb. It gets a real answer.
+        Err(refusal) => refuse(&mut talk, &service, &refusal),
     }
 }
 
@@ -294,6 +419,21 @@ mod tests {
 
     /// One east-west line with a stop on it, and a yard holding one transit.
     fn world() -> (TrainYard, StationRegistry, TrackNetwork, rail_sim::StationId) {
+        let (yard, stations, network, station, _) = world_with_works();
+        (yard, stations, network, station)
+    }
+
+    /// The same railway, plus a sawmill sitting off it with no platform.
+    ///
+    /// The works is the thing a freight player points at, so it has to be in
+    /// the fixture that tests where freight clicks land.
+    fn world_with_works() -> (
+        TrainYard,
+        StationRegistry,
+        TrackNetwork,
+        rail_sim::StationId,
+        IndustryRegistry,
+    ) {
         let terrain = rail_sim::TrackTerrain::new(16, 16, (0..16 * 16).map(|_| (false, 0i8)));
         let mut network = TrackNetwork::new();
         let mut money = Money::new(10_000_000);
@@ -311,9 +451,30 @@ mod tests {
         }
         let mut stations = StationRegistry::new();
         let station = stations.insert("Eastgate", TileCoord { x: 3, y: 4 }, GROUND_LAYER);
+        let mut industries = IndustryRegistry::new();
+        industries.insert(
+            "Marsh Sawmill",
+            TileCoord { x: 12, y: 12 },
+            Some(rail_sim::GoodKind::Lumber),
+            None,
+        );
         let mut yard = TrainYard::default();
         yard.buy(TrainKind::Transit);
-        (yard, stations, network, station)
+        (yard, stations, network, station, industries)
+    }
+
+    /// The refusal a click at `tile` produces, with the freight yard stocked.
+    fn refusal_for(
+        tile: TileCoord,
+        kind: TrainPlaceKind,
+        yard: &TrainYard,
+        stations: &StationRegistry,
+        industries: &IndustryRegistry,
+        network: &TrackNetwork,
+    ) -> String {
+        place_at_tile(tile, kind, yard, stations, industries, network)
+            .expect_err("this click should have been refused")
+            .message()
     }
 
     /// **The soft-lock.** A player with $1,500, a train already in the yard, and
@@ -403,12 +564,13 @@ mod tests {
 
     #[test]
     fn a_click_on_a_station_places_the_train_that_is_already_in_the_yard() {
-        let (yard, stations, network, station) = world();
+        let (yard, stations, network, station, industries) = world_with_works();
         let place = place_at_tile(
             TileCoord { x: 3, y: 4 },
-            TrainKind::Transit,
+            TrainPlaceKind::Transit,
             &yard,
             &stations,
+            &industries,
             &network,
         )
         .expect("a station under the click and a train in the yard");
@@ -418,42 +580,149 @@ mod tests {
 
     #[test]
     fn a_click_next_to_the_platform_still_places() {
-        let (yard, stations, network, station) = world();
+        let (yard, stations, network, station, industries) = world_with_works();
         let place = place_at_tile(
             TileCoord { x: 4, y: 5 },
-            TrainKind::Transit,
+            TrainPlaceKind::Transit,
             &yard,
             &stations,
+            &industries,
             &network,
         )
         .expect("a platform is smaller than a finger");
         assert_eq!(place.at_station, station);
     }
 
+    /// **Report A, the one a freight player actually hits.** A goods train is
+    /// *for* the works, so that is where the click goes — and there is no
+    /// platform there, so nothing happened and nothing was said. The refusal
+    /// now names the works and the rule that governs it.
     #[test]
-    fn a_click_on_open_ground_places_nothing() {
-        let (yard, stations, network, _) = world();
-        assert!(place_at_tile(
-            TileCoord { x: 12, y: 12 },
-            TrainKind::Transit,
-            &yard,
-            &stations,
-            &network,
-        )
-        .is_none());
+    fn clicking_the_works_with_a_goods_train_names_the_missing_platform() {
+        let (mut yard, stations, network, _, industries) = world_with_works();
+        yard.buy(TrainKind::Transport);
+
+        assert_eq!(
+            refusal_for(
+                TileCoord { x: 12, y: 12 },
+                TrainPlaceKind::Transport,
+                &yard,
+                &stations,
+                &industries,
+                &network,
+            ),
+            "Freight boards at a goods platform - Marsh Sawmill has none yet"
+        );
+    }
+
+    /// Off the works and off any platform, the rule is still stated — and it is
+    /// stated differently for freight, because "click a station" is not the
+    /// advice a goods train needs.
+    #[test]
+    fn a_click_on_open_ground_says_where_trains_do_board() {
+        let (mut yard, stations, network, _, industries) = world_with_works();
+        yard.buy(TrainKind::Transport);
+        let nowhere = TileCoord { x: 1, y: 14 };
+
+        assert_eq!(
+            refusal_for(
+                nowhere,
+                TrainPlaceKind::Transit,
+                &yard,
+                &stations,
+                &industries,
+                &network,
+            ),
+            "Trains board at a station - click a platform to place one"
+        );
+        assert_eq!(
+            refusal_for(
+                nowhere,
+                TrainPlaceKind::Transport,
+                &yard,
+                &stations,
+                &industries,
+                &network,
+            ),
+            "Freight boards at a goods platform - place one against an industry"
+        );
     }
 
     #[test]
-    fn an_empty_yard_places_nothing() {
-        let (_, stations, network, _) = world();
-        assert!(place_at_tile(
-            TileCoord { x: 3, y: 4 },
-            TrainKind::Transit,
-            &TrainYard::default(),
-            &stations,
-            &network,
-        )
-        .is_none());
+    fn an_empty_yard_says_the_yard_is_empty_rather_than_nothing_at_all() {
+        let (_, stations, network, _, industries) = world_with_works();
+        assert_eq!(
+            refusal_for(
+                TileCoord { x: 3, y: 4 },
+                TrainPlaceKind::Transport,
+                &TrainYard::default(),
+                &stations,
+                &industries,
+                &network,
+            ),
+            "No goods train in the yard - buy one before placing it"
+        );
+    }
+
+    #[test]
+    fn a_platform_the_rails_have_not_reached_says_so_by_name() {
+        let (yard, mut stations, network, _, industries) = world_with_works();
+        stations.insert("Fell End", TileCoord { x: 13, y: 13 }, GROUND_LAYER);
+        assert_eq!(
+            refusal_for(
+                TileCoord { x: 13, y: 13 },
+                TrainPlaceKind::Transit,
+                &yard,
+                &stations,
+                &industries,
+                &network,
+            ),
+            "Fell End has no rails yet - run track to the platform"
+        );
+    }
+
+    /// 03 §3: the shipped font has no glyphs beyond ASCII, and a refusal that
+    /// draws as tofu is a refusal the player cannot read.
+    #[test]
+    fn every_refusal_is_a_readable_sentence() {
+        let all = [
+            PlaceRefusal::YardEmpty(TrainPlaceKind::Transit),
+            PlaceRefusal::YardEmpty(TrainPlaceKind::Transport),
+            PlaceRefusal::IndustryWithNoPlatform("Marsh Sawmill".into()),
+            PlaceRefusal::NotAStop(TrainPlaceKind::Transit),
+            PlaceRefusal::NotAStop(TrainPlaceKind::Transport),
+            PlaceRefusal::StopWithNoRails("Fell End".into()),
+        ];
+        for refusal in all {
+            let line = refusal.message();
+            assert!(line.is_ascii(), "{refusal:?} draws tofu: {line}");
+            assert!(line.contains(" - "), "{refusal:?} states no rule: {line}");
+        }
+    }
+
+    /// Four clicks on the same wrong tile are one mistake. The feed says it
+    /// once, so the rest of Town Talk is still readable.
+    #[test]
+    fn the_same_refusal_does_not_repeat_itself_down_the_feed() {
+        let mut talk = ComplaintFeed::default();
+        let service = StationService::default();
+        let refusal = PlaceRefusal::NotAStop(TrainPlaceKind::Transport);
+        for _ in 0..4 {
+            refuse(&mut talk, &service, &refusal);
+        }
+        assert_eq!(talk.len(), 1);
+
+        // A *different* refusal is different news and still gets through.
+        refuse(
+            &mut talk,
+            &service,
+            &PlaceRefusal::YardEmpty(TrainPlaceKind::Transport),
+        );
+        assert_eq!(talk.len(), 2);
+        assert_eq!(
+            talk.iter().next().map(|e| e.display_line()),
+            Some("No goods train in the yard - buy one before placing it".into())
+        );
     }
 
     #[test]

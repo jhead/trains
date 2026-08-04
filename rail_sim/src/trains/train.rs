@@ -9,9 +9,16 @@ use crate::stations::{GoodKind, IndustryId};
 
 use super::profile::TrainProfile;
 
-/// Cost to buy a transit (passenger) train: $500.
+/// Cost to buy a transit (passenger) train: **$3,000**.
 pub const TRANSIT_COST_CENTS: i64 = 300_000;
-/// Cost to buy a transport (goods) train: $750.
+/// Cost to buy a transport (goods) train: **$4,500**.
+///
+/// Half as much again as a transit, against a
+/// [starting balance](crate::money::STARTING_CASH_CENTS) of $10,000 that also
+/// has to cover track and platforms. A player who could afford their first
+/// passenger train can very easily not afford their first goods train, which is
+/// why [`apply_train_commands`](super::apply::apply_train_commands) says so out
+/// loud rather than declining in silence.
 pub const TRANSPORT_COST_CENTS: i64 = 450_000;
 
 pub fn buy_cost(kind: TrainKind) -> i64 {

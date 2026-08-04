@@ -65,6 +65,8 @@ pub enum WindowId {
     Alerts,
     Goals,
     Neighbours,
+    /// Every train the player owns, placed or still in the yard.
+    Trains,
     /// Opened by selecting something in the world, not by a button.
     Inspector,
 }
@@ -77,6 +79,7 @@ impl WindowId {
         Self::Alerts,
         Self::Goals,
         Self::Neighbours,
+        Self::Trains,
         Self::Inspector,
     ];
 
@@ -88,6 +91,7 @@ impl WindowId {
             Self::Alerts => "Alerts",
             Self::Goals => "Goals",
             Self::Neighbours => "Neighbours",
+            Self::Trains => "Trains",
             Self::Inspector => "Inspector",
         }
     }
@@ -105,6 +109,7 @@ impl WindowId {
             Self::Alerts => Vec2::new(-(320.0 + SPACE_2), top),
             Self::Goals => Vec2::new(-(264.0 + SPACE_2), top + 96.0),
             Self::Neighbours => Vec2::new(-(320.0 + SPACE_2), top + 200.0),
+            Self::Trains => Vec2::new(SPACE_2 + 340.0, top),
             Self::Inspector => Vec2::new(-(280.0 + SPACE_2), top),
         }
     }

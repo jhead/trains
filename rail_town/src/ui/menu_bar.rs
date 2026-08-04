@@ -105,6 +105,7 @@ const WINDOW_SLOTS: &[(WindowId, ControlAction, bool)] = &[
     (WindowId::Alerts, ControlAction::WindowAlerts, true),
     (WindowId::Goals, ControlAction::WindowGoals, true),
     (WindowId::Neighbours, ControlAction::WindowNeighbours, false),
+    (WindowId::Trains, ControlAction::WindowTrains, true),
 ];
 
 /// Build verbs, in row order, with the action that also arms them. The label

@@ -54,6 +54,18 @@ pub enum TrainEdit {
 /// *the town speaking about that stop* for
 /// [`ComplaintFeed::town_spoke_recently`], and a train entering service must not
 /// silence the district's own news. The tile is enough for click-to-locate.
+/// What the interface calls a kind, so a sim sentence and a panel row agree.
+///
+/// The two words are the ones on the menu row and in the Inspector. A player
+/// who has just pressed the *Transport* plate has to be able to match the line
+/// that comes back to the thing they pressed.
+fn kind_label(kind: TrainKind) -> &'static str {
+    match kind {
+        TrainKind::Transit => "Transit",
+        TrainKind::Transport => "Transport",
+    }
+}
+
 fn say(feed: &mut ComplaintFeed, kind: TalkKind, tick: u64, tile: Option<TileCoord>, line: String) {
     feed.push(ComplaintEntry {
         kind,
@@ -95,32 +107,78 @@ pub fn apply_train_commands(
                     .try_debit(&mut money, MoneyCategory::RollingStock, cost)
                     .is_err()
                 {
+                    // **The freight report's first silence.** A goods train
+                    // costs half again what a transit does, so the player who
+                    // can still afford one kind and not the other presses the
+                    // key, watches nothing happen, and has no way to tell a
+                    // refused purchase from a broken verb. No figure: the sim
+                    // has no money formatter (see the sale line below).
+                    say(
+                        &mut talk,
+                        TalkKind::Warning,
+                        tick,
+                        None,
+                        format!(
+                            "Not enough in the bank for a {} train",
+                            kind_label(b.kind)
+                        ),
+                    );
                     continue;
                 }
                 let id = yard.buy(b.kind);
-                // The yard is invisible on the map, so this line is the only
-                // thing telling the player their money became a train and what
-                // to do with it next.
+                // The Trains window now lists the yard, so this is no longer the
+                // *only* thing telling the player their money became a train —
+                // but it is still the one that arrives on its own. It names the
+                // kind because a player who owns one of each has to know which
+                // of them just turned up.
                 say(
                     &mut talk,
                     TalkKind::Opportunity,
                     tick,
                     None,
-                    format!("Train {} delivered - click a station to place it", id.0),
+                    format!(
+                        "{} train {} delivered - click a station to place it",
+                        kind_label(b.kind),
+                        id.0
+                    ),
                 );
                 edits.write(TrainEdit::Bought { id, kind: b.kind });
             }
             CommandKind::PlaceTrain(p) => {
+                // Deliberately silent: a train that is not in the yard is one
+                // the player already placed, and the only way to get here is a
+                // second click inside the same tick as the first. Saying "that
+                // train is not in the yard" to somebody who just placed it
+                // would be a complaint about a success.
                 let Some(kind) = yard.take(p.train) else {
                     continue;
                 };
                 let Some(station) = stations.get(p.at_station) else {
-                    // Refund into yard if station vanished.
+                    // Refund into yard if station vanished. The stop is gone, so
+                    // there is no name to put in the sentence — but the money is
+                    // still stock, and the player has to be told where it went.
                     yard.return_train(p.train, kind);
+                    say(
+                        &mut talk,
+                        TalkKind::Warning,
+                        tick,
+                        None,
+                        format!("That stop is gone - Train {} is back in the yard", p.train.0),
+                    );
                     continue;
                 };
                 let Some(track) = track_for_station(&network, station.tile, station.layer) else {
                     yard.return_train(p.train, kind);
+                    say(
+                        &mut talk,
+                        TalkKind::Warning,
+                        tick,
+                        Some(station.tile),
+                        format!(
+                            "{} has no rails yet - Train {} waits in the yard",
+                            station.name, p.train.0
+                        ),
+                    );
                     continue;
                 };
                 let mut entity = commands.spawn((
@@ -143,7 +201,12 @@ pub fn apply_train_commands(
                     TalkKind::Praise,
                     tick,
                     Some(station.tile),
-                    format!("Train {} entering service at {}", p.train.0, station.name),
+                    format!(
+                        "{} train {} entering service at {}",
+                        kind_label(kind),
+                        p.train.0,
+                        station.name
+                    ),
                 );
                 edits.write(TrainEdit::Placed {
                     id: p.train,
@@ -304,7 +367,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l == "Train 1 delivered - click a station to place it"),
+                .any(|l| l == "Transit train 1 delivered - click a station to place it"),
             "Town Talk should announce the purchase: {lines:?}"
         );
         assert!(lines.iter().all(|l| l.is_ascii()), "{lines:?}");
@@ -332,12 +395,132 @@ mod tests {
         let lines = talk_lines(&app);
         assert_eq!(
             lines.first().map(String::as_str),
-            Some("Train 1 entering service at Eastgate"),
+            Some("Transit train 1 entering service at Eastgate"),
             "the newest line is the train entering service: {lines:?}"
         );
         assert_eq!(
             app.world_mut().query::<&Train>().iter(app.world()).count(),
             1
+        );
+    }
+
+    /// **Report A, the sim half.** *"Cannot seem to place a Transport/freight
+    /// train, it doesn't put anything on the track. It might be spending money
+    /// and placing it but I cannot see it."*
+    ///
+    /// A goods train costs half as much again as a passenger one, so the first
+    /// wall a mid-game player hits is a purchase they can no longer afford —
+    /// and the old code answered it with `continue`. Nothing moved, nothing was
+    /// said, and the verb read as broken rather than refused.
+    #[test]
+    fn a_purchase_the_bank_cannot_cover_says_so_instead_of_going_quiet() {
+        let (mut app, _, _) = world();
+        app.world_mut()
+            .insert_resource(Money::new(TRANSPORT_COST_CENTS - 1));
+        push(
+            &mut app,
+            CommandKind::BuyTrain(BuyTrain {
+                kind: TrainKind::Transport,
+            }),
+        );
+
+        assert!(
+            app.world().resource::<TrainYard>().unplaced().is_empty(),
+            "nothing was bought"
+        );
+        let lines = talk_lines(&app);
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("Not enough in the bank for a Transport train"),
+            "a refused purchase has to name itself: {lines:?}"
+        );
+        assert!(lines.iter().all(|l| l.is_ascii()), "{lines:?}");
+
+        // ... and it names the kind, so a player who can afford one and not the
+        // other is told which is which.
+        app.world_mut().insert_resource(Money::new(0));
+        push(
+            &mut app,
+            CommandKind::BuyTrain(BuyTrain {
+                kind: TrainKind::Transit,
+            }),
+        );
+        assert_eq!(
+            talk_lines(&app).first().map(String::as_str),
+            Some("Not enough in the bank for a Transit train")
+        );
+    }
+
+    /// Freight is not a second-class verb: both kinds get the same two lines,
+    /// with the same shape, naming themselves.
+    #[test]
+    fn a_goods_train_is_delivered_and_enters_service_as_loudly_as_a_transit() {
+        let (mut app, east, _) = world();
+        push(
+            &mut app,
+            CommandKind::BuyTrain(BuyTrain {
+                kind: TrainKind::Transport,
+            }),
+        );
+        assert_eq!(
+            talk_lines(&app).first().map(String::as_str),
+            Some("Transport train 1 delivered - click a station to place it")
+        );
+
+        push(
+            &mut app,
+            CommandKind::PlaceTrain(PlaceTrain {
+                train: TrainId(1),
+                at_station: east,
+            }),
+        );
+        assert_eq!(
+            talk_lines(&app).first().map(String::as_str),
+            Some("Transport train 1 entering service at Eastgate")
+        );
+        // The thing the player said they could not see: an entity on the map.
+        assert_eq!(
+            app.world_mut().query::<&Train>().iter(app.world()).count(),
+            1,
+            "the goods train is on the track"
+        );
+    }
+
+    /// A placement the world cannot honour puts the stock back **and says so**.
+    /// Silently returning it to an invisible yard is how a player ends up
+    /// believing they paid for nothing.
+    #[test]
+    fn a_stop_with_no_rails_sends_the_train_back_to_the_yard_out_loud() {
+        let (mut app, _, _) = world();
+        // A stop far from the line laid in `world()`.
+        let stranded = app
+            .world_mut()
+            .resource_mut::<StationRegistry>()
+            .insert("Fell End", TileCoord { x: 25, y: 25 }, GROUND_LAYER);
+        push(
+            &mut app,
+            CommandKind::BuyTrain(BuyTrain {
+                kind: TrainKind::Transport,
+            }),
+        );
+        push(
+            &mut app,
+            CommandKind::PlaceTrain(PlaceTrain {
+                train: TrainId(1),
+                at_station: stranded,
+            }),
+        );
+
+        assert_eq!(
+            app.world().resource::<TrainYard>().unplaced().len(),
+            1,
+            "the stock is still the player's"
+        );
+        let lines = talk_lines(&app);
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("Fell End has no rails yet - Train 1 waits in the yard"),
+            "{lines:?}"
         );
     }
 

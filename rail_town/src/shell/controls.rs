@@ -89,6 +89,7 @@ pub enum ControlAction {
     WindowAlerts,
     WindowGoals,
     WindowNeighbours,
+    WindowTrains,
     Unwind,
 }
 
@@ -172,6 +173,7 @@ impl ControlAction {
         Self::WindowAlerts,
         Self::WindowGoals,
         Self::WindowNeighbours,
+        Self::WindowTrains,
         Self::Unwind,
     ];
 
@@ -207,7 +209,8 @@ impl ControlAction {
             | Self::Ledger
             | Self::WindowAlerts
             | Self::WindowGoals
-            | Self::WindowNeighbours => ControlGroup::Windows,
+            | Self::WindowNeighbours
+            | Self::WindowTrains => ControlGroup::Windows,
             Self::Unwind => ControlGroup::System,
         }
     }
@@ -251,6 +254,7 @@ impl ControlAction {
             Self::WindowAlerts => "Alerts",
             Self::WindowGoals => "Goals",
             Self::WindowNeighbours => "Neighbours",
+            Self::WindowTrains => "Trains",
             Self::Unwind => "Unwind / pause menu",
         }
     }
@@ -298,6 +302,11 @@ impl ControlAction {
             Self::WindowAlerts => Binding::key(KeyCode::KeyC),
             Self::WindowGoals => Binding::key(KeyCode::KeyO),
             Self::WindowNeighbours => Binding::key(KeyCode::KeyN),
+            // `R` for rolling stock. `T` is the transit verb's and `N` is the
+            // Neighbours panel's, so the obvious two initials were both taken;
+            // `R` was free and is the trade's own word for what the window
+            // lists. The conflict-free test holds it there.
+            Self::WindowTrains => Binding::key(KeyCode::KeyR),
             Self::Unwind => Binding::key(KeyCode::Escape),
         }
     }
@@ -605,7 +614,7 @@ mod tests {
             .copied()
             .filter(|a| a.group() == ControlGroup::Windows)
             .collect();
-        assert_eq!(windows.len(), 6, "six windows carry a key");
+        assert_eq!(windows.len(), 7, "seven windows carry a key");
         for window in windows {
             let binding = controls.key_for(window);
             for other in ControlAction::ALL {

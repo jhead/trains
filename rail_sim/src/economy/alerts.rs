@@ -23,7 +23,25 @@ pub const ALERT_CASH_LOW_MINUTES: i64 = 3;
 pub enum AlertKind {
     StationServiceLow,
     StationOverwhelmed,
-    TrainsParked,
+    /// Rolling stock the player has paid for and never put on the map.
+    ///
+    /// # What this used to be, and why it could never fire
+    ///
+    /// It was `TrainsParked`, raised from [`TrainLocation::parked`]. Nothing in
+    /// the shipping tree ever sets that flag — the only writer is a test helper
+    /// — and [`apply_train_opex`](crate::economy::apply_train_opex) clears it
+    /// on every train on every tick regardless, because *"trains are never
+    /// parked for lack of money"* is a deliberate economy rule. So the alert,
+    /// its key, and the health strip's parked count all described a state the
+    /// game cannot enter.
+    ///
+    /// The obvious real state to spend them on is the one a playtester was
+    /// actually blind to: *"It might be spending money and placing it but I
+    /// cannot see it."* Stock sitting in [`TrainYard`](crate::TrainYard) is
+    /// invisible on the map, is costing the player nothing but earning nothing
+    /// either, and is fixed by one click — which is exactly the shape of an
+    /// alert.
+    TrainsIdle,
     CashLow,
     /// New settlement / industry still outside the rail network.
     NewDemand,
@@ -38,7 +56,7 @@ impl AlertKind {
         match self {
             Self::StationServiceLow => "Service low",
             Self::StationOverwhelmed => "Station overwhelmed",
-            Self::TrainsParked => "Trains parked",
+            Self::TrainsIdle => "Trains in the yard",
             Self::CashLow => "Cash low",
             Self::NewDemand => "New demand",
             Self::Gridlock => "Gridlock",
@@ -69,7 +87,7 @@ pub struct Alert {
 pub enum AlertKey {
     StationService(StationId),
     StationWaiting(StationId),
-    TrainsParked,
+    TrainsIdle,
     CashLow,
     NewSettlement(StationId),
     NewIndustry(IndustryId),
@@ -159,6 +177,7 @@ pub fn refresh_alerts(
     service: Res<StationService>,
     network: Res<TrackNetwork>,
     demand: Res<DemandSpawner>,
+    yard: Res<crate::trains::TrainYard>,
     // Optional so a partial world — a save-restore harness, a headless
     // embedder — can still refresh the rest of the board.
     occupancy: Option<Res<crate::trains::TileOccupancy>>,
@@ -222,31 +241,24 @@ pub fn refresh_alerts(
         }
     }
 
-    let mut parked_focus = AlertFocus::None;
-    let mut parked_count = 0u32;
-    for (train, loc) in trains.iter() {
-        if loc.parked {
-            parked_count += 1;
-            if matches!(parked_focus, AlertFocus::None) {
-                if let Some(piece) = network.piece(loc.track) {
-                    parked_focus = AlertFocus::Tile(piece.tile);
-                } else {
-                    parked_focus = AlertFocus::Train(train.id);
-                }
-            }
-        }
-    }
-    if parked_count > 0 {
-        let key = AlertKey::TrainsParked;
+    // Stock bought and never placed. See [`AlertKind::TrainsIdle`] for what
+    // this replaced and why that could not fire.
+    //
+    // The focus is `None` on purpose: an unplaced train has no tile to fly to,
+    // and the honest destination is the Trains window, which the message names.
+    let idle = yard.unplaced().len() as u32;
+    if idle > 0 {
+        let key = AlertKey::TrainsIdle;
         active.push(key);
         board.upsert(
             key,
-            AlertKind::TrainsParked,
+            AlertKind::TrainsIdle,
             format!(
-                "Can't afford opex - {parked_count} train{} parked",
-                if parked_count == 1 { "" } else { "s" }
+                "{idle} train{} bought and not placed - open Trains to place {}",
+                if idle == 1 { "" } else { "s" },
+                if idle == 1 { "it" } else { "them" }
             ),
-            parked_focus,
+            AlertFocus::None,
         );
     }
 
@@ -402,6 +414,74 @@ mod tests {
         assert_eq!(gridlock_rings(&occupancy), vec![TrainId(3)]);
     }
 
+    /// The state [`AlertKind::TrainsIdle`] was moved onto, asserted **reachable**
+    /// — which is the whole point of moving it. The old `TrainsParked` wiring
+    /// read `TrainLocation::parked`, a flag nothing outside a test helper ever
+    /// sets and `apply_train_opex` clears every tick, so the alert and the
+    /// health strip's parked count both promised a state the game cannot enter.
+    #[test]
+    fn stock_sitting_in_the_yard_raises_an_alert_and_placing_it_clears_it() {
+        use bevy_app::App;
+        use bevy_ecs::prelude::IntoScheduleConfigs;
+
+        let mut app = App::new();
+        app.init_resource::<AlertBoard>()
+            .init_resource::<Money>()
+            .init_resource::<StationRegistry>()
+            .init_resource::<StationService>()
+            .init_resource::<TrackNetwork>()
+            .init_resource::<DemandSpawner>()
+            .init_resource::<crate::trains::TrainYard>()
+            .add_systems(bevy_app::Update, refresh_alerts.into_configs());
+
+        app.update();
+        assert!(
+            app.world().resource::<AlertBoard>().is_empty(),
+            "an empty yard is not news"
+        );
+
+        let bought = {
+            let mut yard = app.world_mut().resource_mut::<crate::trains::TrainYard>();
+            yard.buy(crate::commands::TrainKind::Transport);
+            yard.buy(crate::commands::TrainKind::Transit)
+        };
+        app.update();
+        let board = app.world().resource::<AlertBoard>();
+        let alert = board.iter().next().expect("the yard speaks up");
+        assert_eq!(alert.kind, AlertKind::TrainsIdle);
+        assert_eq!(
+            alert.message,
+            "2 trains bought and not placed - open Trains to place them"
+        );
+        assert!(alert.message.is_ascii());
+
+        // One placed, one still waiting: the count follows.
+        app.world_mut()
+            .resource_mut::<crate::trains::TrainYard>()
+            .take(bought);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<AlertBoard>()
+                .iter()
+                .next()
+                .map(|a| a.message.as_str()),
+            Some("1 train bought and not placed - open Trains to place it")
+        );
+
+        // Yard empty: the alert goes away on its own.
+        let last = app
+            .world()
+            .resource::<crate::trains::TrainYard>()
+            .unplaced()[0]
+            .0;
+        app.world_mut()
+            .resource_mut::<crate::trains::TrainYard>()
+            .take(last);
+        app.update();
+        assert!(app.world().resource::<AlertBoard>().is_empty());
+    }
+
     /// The alert waits out the persistence window, then fires; a ring that
     /// breaks first never interrupts anyone.
     #[test]
@@ -417,6 +497,7 @@ mod tests {
             .init_resource::<StationService>()
             .init_resource::<TrackNetwork>()
             .init_resource::<DemandSpawner>()
+            .init_resource::<crate::trains::TrainYard>()
             .init_resource::<crate::trains::TileOccupancy>()
             .add_systems(bevy_app::Update, refresh_alerts.into_configs());
 

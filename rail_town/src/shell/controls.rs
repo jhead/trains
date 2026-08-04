@@ -82,6 +82,7 @@ pub enum ControlAction {
     OverlayOff,
     FollowSelection,
     ResetZoom,
+    ToggleProjection,
     WindowNetwork,
     WindowTownTalk,
     Ledger,
@@ -164,6 +165,7 @@ impl ControlAction {
         Self::OverlayOff,
         Self::FollowSelection,
         Self::ResetZoom,
+        Self::ToggleProjection,
         Self::WindowNetwork,
         Self::WindowTownTalk,
         Self::Ledger,
@@ -198,7 +200,8 @@ impl ControlAction {
             | Self::OverlayDensity
             | Self::OverlayOff
             | Self::FollowSelection
-            | Self::ResetZoom => ControlGroup::View,
+            | Self::ResetZoom
+            | Self::ToggleProjection => ControlGroup::View,
             Self::WindowNetwork
             | Self::WindowTownTalk
             | Self::Ledger
@@ -241,6 +244,7 @@ impl ControlAction {
             Self::OverlayOff => "Overlay: off",
             Self::FollowSelection => "Follow selection",
             Self::ResetZoom => "Reset zoom",
+            Self::ToggleProjection => "Isometric view",
             Self::WindowNetwork => "Network",
             Self::WindowTownTalk => "Town Talk",
             Self::Ledger => "Ledger",
@@ -285,6 +289,9 @@ impl ControlAction {
             Self::OverlayOff => Binding::key(KeyCode::F4),
             Self::FollowSelection => Binding::key(KeyCode::KeyF),
             Self::ResetZoom => Binding::key(KeyCode::KeyZ),
+            // `I` for isometric, and one of the five letters the table still
+            // had free. A test keeps the whole table conflict-free.
+            Self::ToggleProjection => Binding::key(KeyCode::KeyI),
             Self::WindowNetwork => Binding::key(KeyCode::KeyH),
             Self::WindowTownTalk => Binding::key(KeyCode::KeyY),
             Self::Ledger => Binding::key(KeyCode::KeyK),

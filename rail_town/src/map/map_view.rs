@@ -6,12 +6,12 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use rail_map::{map_center_world, world_to_tile, MapGrid, TILE_SIZE};
+use rail_map::{top_down_map_center, top_down_world_to_tile, MapGrid, TILE_SIZE};
 
 use crate::input::{ControlAction, KeyBindings};
 use crate::map::camera::{
-    ortho_scale_for_zoom, zoom_factor_at, CameraFocusRequest, CameraZoomIndex, MapCamera,
-    DEFAULT_ZOOM_INDEX,
+    default_zoom_index_for, ortho_scale_for_zoom, zoom_factor_at, CameraFocusRequest,
+    CameraZoomIndex, MapCamera,
 };
 use crate::palette::{BG1, OUTLINE};
 use crate::track::TrackToolState;
@@ -38,7 +38,7 @@ impl Default for MapViewState {
     fn default() -> Self {
         Self {
             active: false,
-            saved_zoom_index: DEFAULT_ZOOM_INDEX,
+            saved_zoom_index: default_zoom_index_for(rail_map::projection()),
             saved_translation: Vec3::ZERO,
         }
     }
@@ -120,7 +120,10 @@ pub fn toggle_map_view(
         state.saved_zoom_index = zoom_index.0;
         state.saved_translation = transform.translation;
         state.active = true;
-        let (cx, cy) = map_center_world(map.width, map.height);
+        // The plate's extent, not the world's: the Map View looks at the
+        // schematic, and the schematic is laid out in tile order whichever way
+        // the world is being drawn.
+        let (cx, cy) = top_down_map_center(map.width, map.height);
         transform.translation.x = cx.round();
         transform.translation.y = cy.round();
         ortho.scale = map_view_ortho_scale();
@@ -196,11 +199,16 @@ pub fn map_view_click_fly(
     let Ok(world) = camera.viewport_to_world_2d(cam_gt, cursor) else {
         return;
     };
-    let tile = world_to_tile(world.x, world.y);
+    // The click lands on the *plate*, which is a plan drawing — so it resolves
+    // in plate coordinates. Where the camera then has to fly is that tile's
+    // place in whichever projection the world is drawn in, which is the one
+    // conversion that makes the view work in both.
+    let tile = top_down_world_to_tile(world.x, world.y);
     if !map.contains(tile) {
         return;
     }
-    focus.0 = Some(Vec2::new(world.x, world.y));
+    let (wx, wy) = rail_map::tile_to_world(tile);
+    focus.0 = Some(Vec2::new(wx, wy));
 }
 
 /// If a focus request arrives while Map View is open, restore play zoom first.
@@ -234,10 +242,50 @@ pub fn exit_map_view_before_focus(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rail_sim::ids::TileCoord;
 
     #[test]
     fn map_view_scale_is_four_texels_per_tile() {
         assert!((map_view_ortho_scale() - (TILE_SIZE / 4.0)).abs() < f32::EPSILON);
         assert!((TILE_SIZE / map_view_ortho_scale() - 4.0).abs() < f32::EPSILON);
+    }
+
+    /// The Map View works in both projections because the plate is a plan
+    /// drawing and the *fly* is the one thing that has to cross back.
+    ///
+    /// A click resolves in plate coordinates — always tile order, always the
+    /// same answer — and the camera is then sent to where that tile stands in
+    /// whichever projection the world is drawn in. Without the second half, a
+    /// click in isometric would fly the camera to a top-down coordinate and land
+    /// somewhere off the map entirely.
+    #[test]
+    fn a_click_resolves_on_the_plate_and_flies_to_the_world() {
+        let tile = TileCoord { x: 12, y: 41 };
+        // The middle of that tile on the plate, which is the same point however
+        // the world is drawn.
+        let plate = {
+            let (x, y) = rail_map::top_down_tile_to_world(tile);
+            Vec2::new(x, y)
+        };
+
+        for projection in [rail_map::Projection::TopDown, rail_map::Projection::Iso] {
+            let _guard = crate::map::tests::ProjectionGuard::new(projection);
+            assert_eq!(
+                top_down_world_to_tile(plate.x, plate.y),
+                tile,
+                "the plate must read the same in {projection:?}"
+            );
+            // Where the fly sends the camera, and what is under it when it
+            // arrives — which has to be the tile that was clicked.
+            let (wx, wy) = rail_map::tile_to_world(tile);
+            assert_eq!(rail_map::world_to_tile(wx, wy), tile);
+            if projection == rail_map::Projection::Iso {
+                assert_ne!(
+                    Vec2::new(wx, wy),
+                    plate,
+                    "isometric must not fly to the plate's own coordinate"
+                );
+            }
+        }
     }
 }

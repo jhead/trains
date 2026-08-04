@@ -7,7 +7,7 @@ use rail_sim::{StationRegistry, StationService, TileOccupancy, TownDensity, Trac
 
 use super::score::{color_for_strength, strength_for};
 use super::{ActiveOverlay, OverlayKind};
-use crate::map::{MapViewState, SCHEMATIC_OVERLAY_Z};
+use crate::map::{MapViewState, TileMark, SCHEMATIC_OVERLAY_Z};
 
 /// Overlay band in the world layer stack (brief 01 §6.1).
 const OVERLAY_Z: f32 = 4.5;
@@ -28,6 +28,7 @@ pub fn sync_overlay_sprites(
     network: Res<TrackNetwork>,
     occupancy: Res<TileOccupancy>,
     density: Res<TownDensity>,
+    mark: Option<Res<TileMark>>,
     existing: Query<(Entity, &OverlayTileSprite)>,
 ) {
     let _perf = crate::overlays::perf::scope("sync_overlay_sprites");
@@ -40,6 +41,11 @@ pub fn sync_overlay_sprites(
     if overlay.0 == OverlayKind::None {
         return;
     }
+    // Headless tests boot without the terrain plugin, so there is no mask to
+    // tint; an overlay cell is presentation only and simply does not draw.
+    let Some(mark) = mark else {
+        return;
+    };
 
     let mut tiles: Vec<TileCoord> = Vec::new();
     match overlay.0 {
@@ -91,7 +97,9 @@ pub fn sync_overlay_sprites(
         };
         let (wx, wy) = tile_to_world(tile);
         commands.spawn((
-            Sprite::from_color(color, Vec2::splat(TILE_SIZE)),
+            // An overlay cell is one tile: a square from above, a diamond in
+            // isometric.
+            mark.sprite(color, 1.0, Vec2::splat(TILE_SIZE)),
             Transform::from_xyz(wx, wy, z),
             OverlayTileSprite { coord: tile },
         ));

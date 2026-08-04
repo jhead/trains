@@ -176,6 +176,17 @@ impl PendingWorld {
     pub fn is_rebuilding(&self) -> bool {
         self.rebuilding
     }
+
+    /// Ask for the presentation rebuild without changing the world.
+    ///
+    /// The rebuild is not really *about* the world — it is "everything drawn is
+    /// stale, derive it again". Flipping the projection (`map::projection`)
+    /// leaves the world untouched and every sprite in it wrong, which is the
+    /// same condition a load leaves behind, so it asks the same way rather than
+    /// growing a second path that could drift from this one.
+    pub fn mark_rebuilding(&mut self) {
+        self.rebuilding = true;
+    }
 }
 
 /// The shell's world-rebuild work. Anything the app adds to reconstruct

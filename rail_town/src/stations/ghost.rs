@@ -6,8 +6,9 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use rail_map::{tile_to_world, TILE_SIZE};
+use rail_map::tile_to_world;
 
+use crate::map::TileMark;
 use crate::palette::{BG0, HI, OUTLINE, WARN};
 use crate::ui::kit;
 
@@ -66,6 +67,7 @@ pub fn setup_station_hud(mut commands: Commands) {
 pub fn sync_station_ghosts(
     mut commands: Commands,
     state: Res<StationToolState>,
+    mark: Option<Res<TileMark>>,
     existing: Query<Entity, With<StationGhost>>,
 ) {
     for entity in &existing {
@@ -74,6 +76,10 @@ pub fn sync_station_ghosts(
     if !state.active {
         return;
     }
+    // The ring is tile-shaped, so it takes the tile's shape in either view.
+    let Some(mark) = mark else {
+        return;
+    };
     let Some(preview) = state.preview.as_ref() else {
         return;
     };
@@ -84,7 +90,7 @@ pub fn sync_station_ghosts(
         let (wx, wy) = tile_to_world(tile);
         commands.spawn((
             StationGhost,
-            Sprite::from_color(tint.with_alpha(0.22), Vec2::splat(TILE_SIZE * 0.9)),
+            mark.square(tint.with_alpha(0.22), 0.9),
             Transform::from_xyz(wx, wy, 3.2),
         ));
     }
@@ -92,7 +98,7 @@ pub fn sync_station_ghosts(
         let (wx, wy) = tile_to_world(tile);
         commands.spawn((
             StationGhost,
-            Sprite::from_color(tint.with_alpha(0.6), Vec2::splat(TILE_SIZE * 0.75)),
+            mark.square(tint.with_alpha(0.6), 0.75),
             Transform::from_xyz(wx, wy, 3.4),
         ));
     }

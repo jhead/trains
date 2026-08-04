@@ -10,6 +10,8 @@ mod border;
 mod hash;
 mod input;
 mod inspect;
+// Env-gated screenshot harness for comparing the two views. Off by default.
+mod isoshot;
 mod lines;
 mod map;
 mod onboarding;
@@ -29,6 +31,7 @@ use bevy::prelude::*;
 use border::BorderPresentationPlugin;
 use input::InputMapPlugin;
 use inspect::InspectPlugin;
+use isoshot::IsoShotPlugin;
 use lines::LinesPlugin;
 use map::MapPlugin;
 use onboarding::OnboardingPlugin;
@@ -116,6 +119,7 @@ fn main() {
         // Offline blob store: MP-1 trades entirely with echo neighbours, and
         // an unset endpoint is the shipping default.
         .insert_resource(ManifestService::offline())
+        .add_plugins(IsoShotPlugin)
         .insert_resource(ClearColor(BG0))
         .run();
 }

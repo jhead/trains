@@ -149,6 +149,13 @@
       const boot = document.getElementById("boot");
       const failed = document.getElementById("failed");
 
+      // Right-drag is the demolish gesture (brief 04 §4), and the browser's
+      // context menu swallows it. Scoped to the canvas, so the rest of the
+      // page — and everything else in the browser — keeps its menu.
+      document
+        .getElementById("rail-town")
+        .addEventListener("contextmenu", (e) => e.preventDefault());
+
       // Bevy hands control to its own loop and never resolves `init`, so the
       // overlay is cleared on the first painted frame instead of on a promise.
       const clear = () => {

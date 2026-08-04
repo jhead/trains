@@ -75,16 +75,19 @@ pub use lines::{
 };
 pub use money::{InsufficientFunds, Money, STARTING_CASH_CENTS};
 pub use peeps::{
-    advance_abstract_flow, advance_journeys, advance_peep_waits, begin_flow_window, day_index,
-    district_capacity, gave_up_minutes, minute_of_day, mood_from_experience, peeps_move_away,
-    rebalance_peep_detail, spawn_peep_households, BodyType, ComplaintEntry, ComplaintFeed,
+    accumulate_path_wear, advance_abstract_flow, advance_journeys, advance_peep_waits,
+    begin_flow_window, day_index, district_capacity, gave_up_minutes, level_for, level_threshold,
+    minute_of_day, mood_from_experience, peeps_move_away, raw_level, rebalance_peep_detail,
+    regrow_paths, spawn_peep_households, BodyType, ComplaintEntry, ComplaintFeed,
     DistrictFlow, DistrictFlowState, Facing, Household, HouseholdId, HouseholdRegistry, Journey,
-    JourneyLeg, JourneyMemory, JourneyOutcome, JourneyRecord, JourneyStage, Mood, Peep, PeepBudget,
+    JourneyLeg, JourneyMemory, JourneyOutcome, JourneyRecord, JourneyStage, Mood, PathLevelChange,
+    PathWear, Peep, PeepBudget,
     PeepDetail, PeepFocus, PeepId, PeepPosition, PeepRole, PeepSpawnState, PeepsPlugin, Routine,
     TalkKind, TownTalkEntry, TownTalkFeed, VacatedHomes, WaitingAtStation, BAD_JOURNEYS_TO_LEAVE,
     COMPLAINT_DEDUPE_TICKS, COMPLAINT_WAIT_SECS, DAY_MINUTES, GAVE_UP_WAIT_FLAG, MAX_COMPLAINTS,
-    MAX_DETAILED_PEEPS, MAX_TOWN_TALK, MEMORY_DEPTH, PEEPS_PER_STATION, SIM_SECONDS_PER_TICK,
-    TICKS_PER_DAY,
+    MAX_DETAILED_PEEPS, MAX_PENDING_CHANGES, MAX_TOWN_TALK, MEMORY_DEPTH, PEEPS_PER_STATION,
+    REGROWTH_INTERVAL_TICKS, REGROWTH_PER_STEP, SIM_SECONDS_PER_TICK, TICKS_PER_DAY, WEAR_BARE,
+    WEAR_FAINT, WEAR_LEVELS, WEAR_MAX, WEAR_PER_FOOTFALL, WEAR_RELEASE, WEAR_WORN,
 };
 pub use save::{
     autosave, delete_slot, list_slots, load_from_slot, queue_autosave, queue_save, save_to_slot,

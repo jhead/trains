@@ -32,6 +32,7 @@ mod camera;
 pub mod iso_depth;
 pub mod iso_sort;
 mod map_view;
+pub mod paths;
 pub mod projection;
 mod schematic;
 mod terrain;
@@ -53,8 +54,10 @@ use schematic::{
     mark_schematic_dirty, rebake_schematic, setup_schematic, sync_schematic_trains,
     sync_schematic_visibility, SchematicState,
 };
-use terrain::chunk::{rebuild_dirty_terrain, setup_terrain_atlas, TerrainDirty};
-use terrain::iso::{rebuild_iso_terrain, setup_iso_atlas, IsoTerrainState};
+use terrain::chunk::{
+    mark_worn_chunks_dirty, rebuild_dirty_terrain, setup_terrain_atlas, TerrainDirty,
+};
+use terrain::iso::{rebuild_iso_terrain, setup_iso_atlas, sync_iso_paths, IsoTerrainState};
 
 pub use camera::{ortho_scale_for_zoom, CameraFocusRequest, MapCamera};
 pub use map_view::MapViewState;
@@ -132,6 +135,15 @@ impl Plugin for MapPlugin {
                     // builds.
                     toggle_projection_hotkey.in_set(crate::input::PlayerVerbSet),
                     apply_projection_setting.after(toggle_projection_hotkey),
+                    // Desire paths, in each renderer's own idiom: from above a
+                    // worn tile is a chunk to re-composite, in isometric it is
+                    // a sprite of its own. Both read *level transitions* and
+                    // never wear itself, so both are idle on the frames — very
+                    // nearly all of them — where no tile changed step.
+                    mark_worn_chunks_dirty
+                        .after(apply_projection_setting)
+                        .before(rebuild_dirty_terrain)
+                        .run_if(drawing_top_down),
                     rebuild_dirty_terrain
                         .after(apply_projection_setting)
                         .run_if(drawing_top_down),
@@ -142,6 +154,12 @@ impl Plugin for MapPlugin {
                     // in `Update`, so a spawner that ran this frame is already
                     // covered, and before `PostUpdate`'s depth sort.
                     anchor_world_sprites.after(apply_projection_setting),
+                    // After the terrain rebuild, which owns despawning
+                    // everything that module draws — finding no path sprites
+                    // is how this learns it has to draw them all again.
+                    sync_iso_paths
+                        .after(rebuild_iso_terrain)
+                        .run_if(drawing_iso),
                     map_view_click_fly.in_set(crate::input::PlayerVerbSet),
                     exit_map_view_before_focus.after(map_view_click_fly),
                     apply_camera_focus.after(exit_map_view_before_focus),

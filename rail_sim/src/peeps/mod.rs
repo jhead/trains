@@ -20,6 +20,7 @@
 //! | [`flow`] | District-level flow for the abstracted majority |
 //! | [`resident`] | Identity, spawning, wait / mood, moving away |
 //! | [`walk`] | Terrain-aware walking routes over walkable ground |
+//! | [`wear`] | Desire paths — ground that remembers being walked on |
 //! | [`complaints`] | The public Town Talk feed |
 //!
 //! # Reading peeps from presentation
@@ -38,6 +39,7 @@ mod names;
 mod resident;
 mod routine;
 mod walk;
+mod wear;
 
 pub use budget::{
     rebalance_peep_detail, select_detailed, PeepBudget, PeepDetail, PeepFocus,
@@ -82,6 +84,11 @@ pub use walk::{
     ensure_walk_routes, find_walk_route, find_walk_route_within, walk_step, WalkRoute, WalkRouter,
     WalkStep, WalkWorld, NO_ROUTE_TALK_COOLDOWN_TICKS, WALK_CLIMB_COST, WALK_MAX_HEIGHT,
     WALK_MAX_STEP_GRADE, WALK_ROUTES_PER_TICK, WALK_SEARCH_LIMIT, WALK_STEP_COST,
+};
+pub use wear::{
+    accumulate_path_wear, level_for, level_threshold, raw_level, regrow_paths, PathLevelChange,
+    PathWear, MAX_PENDING_CHANGES, REGROWTH_INTERVAL_TICKS, REGROWTH_PER_STEP, WEAR_BARE,
+    WEAR_FAINT, WEAR_LEVELS, WEAR_MAX, WEAR_PER_FOOTFALL, WEAR_RELEASE, WEAR_WORN,
 };
 
 /// Back-compat alias for the pre-journey spawn system name.
@@ -130,6 +137,7 @@ impl Plugin for PeepsPlugin {
             .init_resource::<PeepFocus>()
             .init_resource::<VacatedHomes>()
             .init_resource::<WalkRouter>()
+            .init_resource::<PathWear>()
             .add_systems(
                 FixedUpdate,
                 (
@@ -141,6 +149,11 @@ impl Plugin for PeepsPlugin {
                     rebalance_peep_detail,
                     advance_peep_waits,
                     advance_journeys,
+                    // Straight after the walking, so the tiles read are the
+                    // ones this tick's movement produced — and before anybody
+                    // moves away, so a departing household's last steps count.
+                    accumulate_path_wear,
+                    regrow_paths,
                     advance_abstract_flow,
                     peeps_move_away,
                 )

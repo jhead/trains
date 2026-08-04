@@ -41,10 +41,19 @@
 //!
 //! # Versioning
 //!
-//! Every file carries [`SCHEMA_VERSION`]. A save from another schema fails with
-//! [`SaveError::VersionMismatch`] — a different message to the player than
+//! Every file carries [`SCHEMA_VERSION`]. A save from a *newer* schema fails
+//! with [`SaveError::VersionMismatch`] — a different message to the player than
 //! [`SaveError::Checksum`], which means the file is damaged. Bump the version
 //! whenever the blob shape changes.
+//!
+//! Schemas from [`MIN_READABLE_SCHEMA`] up are **migrated on load** rather than
+//! refused. Migration is not free and is not automatic: it needs a frozen mirror
+//! of the old shape, because positional bincode has no field names to fall back
+//! on. Schema 4 → 5 (desire paths) is cheap only because it added one field to
+//! the top level and reshaped nothing nested; see
+//! [`WorldSnapshotV4`](snapshot::WorldSnapshotV4) for the caveat that comes with
+//! that. Saving always writes the current schema, so a migrated world is v5 the
+//! next time it is written.
 //!
 //! # Extending the snapshot
 //!
@@ -101,8 +110,9 @@ pub use slots::{
 };
 pub use snapshot::{
     BudgetSnapshot, ClockSnapshot, EconomySnapshot, MapDescriptor, MapGenOptions, MapSnapshot,
-    PeepSnapshot, PeepsSnapshot, RestoreReport, ServiceScoreSnapshot, StationsSnapshot,
-    TalkKindSnapshot, TerrainChunk, TownSnapshot, TownTalkSnapshot, TrainSnapshot, TrainsSnapshot,
-    WorldSnapshot, GENERATOR_VERSION, SCHEMA_VERSION,
+    PathsSnapshot, PeepSnapshot, PeepsSnapshot, RestoreReport, ServiceScoreSnapshot,
+    StationsSnapshot, TalkKindSnapshot, TerrainChunk, TownSnapshot, TownTalkSnapshot, TrainSnapshot,
+    TrainsSnapshot, WorldSnapshot, WorldSnapshotV4, GENERATOR_VERSION, MIN_READABLE_SCHEMA,
+    SCHEMA_VERSION,
 };
 pub use storage::{save_root_display, set_save_root, SAVE_DIR_ENV, SAVE_EXTENSION};

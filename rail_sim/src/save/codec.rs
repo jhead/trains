@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::error::{SaveError, SaveResult};
-use super::snapshot::{WorldSnapshot, SCHEMA_VERSION};
+use super::snapshot::{WorldSnapshot, WorldSnapshotV4, MIN_READABLE_SCHEMA, SCHEMA_VERSION};
 
 /// File magic — "Rail Town SaVe".
 pub const SAVE_MAGIC: [u8; 4] = *b"RTSV";
@@ -143,8 +143,38 @@ pub fn encode_save(meta: &SaveMeta, snapshot: &WorldSnapshot) -> SaveResult<Vec<
     Ok(out)
 }
 
-/// Validate the envelope and split it into header bytes and payload bytes.
-fn split(bytes: &[u8]) -> SaveResult<(&[u8], &[u8])> {
+/// Write a world in schema 4's envelope and shape — **test only**.
+///
+/// The v4 → v5 migration is only worth anything if it is proved against bytes
+/// laid out the way the shipped v4 build laid them out. Encoding a
+/// [`WorldSnapshotV4`] through the same bincode config the real encoder uses is
+/// how that is done without checking a binary fixture into the repo.
+#[cfg(test)]
+pub fn encode_save_v4(meta: &SaveMeta, snapshot: &WorldSnapshotV4) -> SaveResult<Vec<u8>> {
+    let header = bincode::serde::encode_to_vec(meta, config())
+        .map_err(|e| SaveError::Encode(e.to_string()))?;
+    let payload = bincode::serde::encode_to_vec(snapshot, config())
+        .map_err(|e| SaveError::Encode(e.to_string()))?;
+
+    let mut out = Vec::with_capacity(PREFIX_LEN + header.len() + payload.len() + CHECKSUM_LEN);
+    out.extend_from_slice(&SAVE_MAGIC);
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // flags
+    out.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&payload);
+
+    let checksum = crc32(&out);
+    out.extend_from_slice(&checksum.to_le_bytes());
+    Ok(out)
+}
+
+/// Validate the envelope and split it into version, header bytes, payload bytes.
+///
+/// Versions from [`MIN_READABLE_SCHEMA`] up to [`SCHEMA_VERSION`] pass; the
+/// caller decides how to read each one. Anything newer is refused outright — a
+/// build cannot guess at a shape that had not been designed when it shipped.
+fn split(bytes: &[u8]) -> SaveResult<(u16, &[u8], &[u8])> {
     if bytes.len() < PREFIX_LEN + CHECKSUM_LEN {
         return Err(SaveError::Corrupt("file is shorter than a save header"));
     }
@@ -154,7 +184,7 @@ fn split(bytes: &[u8]) -> SaveResult<(&[u8], &[u8])> {
     }
 
     let version = u16::from_le_bytes(bytes[4..6].try_into().expect("checked length"));
-    if version != SCHEMA_VERSION {
+    if !(MIN_READABLE_SCHEMA..=SCHEMA_VERSION).contains(&version) {
         return Err(SaveError::VersionMismatch {
             found: version,
             expected: SCHEMA_VERSION,
@@ -180,30 +210,57 @@ fn split(bytes: &[u8]) -> SaveResult<(&[u8], &[u8])> {
         return Err(SaveError::Corrupt("header runs past the end of the file"));
     }
 
-    Ok((&bytes[PREFIX_LEN..header_end], &bytes[header_end..body_end]))
+    Ok((
+        version,
+        &bytes[PREFIX_LEN..header_end],
+        &bytes[header_end..body_end],
+    ))
 }
 
 /// Read only the header — used to list slots cheaply.
 pub fn decode_meta(bytes: &[u8]) -> SaveResult<SaveMeta> {
-    let (header, _) = split(bytes)?;
+    let (_, header, _) = split(bytes)?;
     let (meta, _) = bincode::serde::decode_from_slice::<SaveMeta, _>(header, config())
         .map_err(|e| SaveError::Decode(e.to_string()))?;
     Ok(meta)
 }
 
-/// Read the header and the whole world.
+/// Read the header and the whole world, migrating an older schema on the way.
+///
+/// The envelope's version is the authority on how to read the payload, and the
+/// snapshot's own `schema_version` must agree with it — a file whose two
+/// versions disagree is not a file this build is going to guess about.
 pub fn decode_save(bytes: &[u8]) -> SaveResult<(SaveMeta, WorldSnapshot)> {
-    let (header, payload) = split(bytes)?;
+    let (version, header, payload) = split(bytes)?;
     let (meta, _) = bincode::serde::decode_from_slice::<SaveMeta, _>(header, config())
         .map_err(|e| SaveError::Decode(e.to_string()))?;
-    let (snapshot, _) = bincode::serde::decode_from_slice::<WorldSnapshot, _>(payload, config())
-        .map_err(|e| SaveError::Decode(e.to_string()))?;
-    if snapshot.schema_version != SCHEMA_VERSION {
-        return Err(SaveError::VersionMismatch {
-            found: snapshot.schema_version,
-            expected: SCHEMA_VERSION,
-        });
-    }
+
+    let snapshot = match version {
+        4 => {
+            let (old, _) =
+                bincode::serde::decode_from_slice::<WorldSnapshotV4, _>(payload, config())
+                    .map_err(|e| SaveError::Decode(e.to_string()))?;
+            if old.schema_version != 4 {
+                return Err(SaveError::VersionMismatch {
+                    found: old.schema_version,
+                    expected: 4,
+                });
+            }
+            old.upgrade()
+        }
+        _ => {
+            let (snapshot, _) =
+                bincode::serde::decode_from_slice::<WorldSnapshot, _>(payload, config())
+                    .map_err(|e| SaveError::Decode(e.to_string()))?;
+            if snapshot.schema_version != SCHEMA_VERSION {
+                return Err(SaveError::VersionMismatch {
+                    found: snapshot.schema_version,
+                    expected: SCHEMA_VERSION,
+                });
+            }
+            snapshot
+        }
+    };
     Ok((meta, snapshot))
 }
 

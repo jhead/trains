@@ -41,8 +41,8 @@ use crate::lines::LineRegistry;
 use crate::money::Money;
 use crate::peeps::{
     ComplaintEntry, ComplaintFeed, DistrictFlow, DistrictFlowState, Household, HouseholdRegistry,
-    Journey, JourneyMemory, Peep, PeepBudget, PeepDetail, PeepId, PeepPosition, PeepSpawnState,
-    Routine, TalkKind, WaitingAtStation, SIM_SECONDS_PER_TICK,
+    Journey, JourneyMemory, PathWear, Peep, PeepBudget, PeepDetail, PeepId, PeepPosition,
+    PeepSpawnState, Routine, TalkKind, WaitingAtStation, SIM_SECONDS_PER_TICK,
 };
 use crate::stations::{
     Industry, IndustryRegistry, Station, StationRegistry, StationService, StationServiceScore,
@@ -55,10 +55,21 @@ use crate::WorldAnchorsSeeded;
 
 /// Save schema version. Bump on any change to the blob shape.
 ///
-/// A save written by a different version is refused with
+/// A save written by a *newer* version is refused with
 /// [`SaveError::VersionMismatch`](super::SaveError::VersionMismatch); there is
-/// no silent partial read.
-pub const SCHEMA_VERSION: u16 = 4;
+/// no silent partial read. Older versions down to [`MIN_READABLE_SCHEMA`] are
+/// migrated on load — see [`super::codec`].
+pub const SCHEMA_VERSION: u16 = 5;
+
+/// Oldest schema this build can still open.
+///
+/// Version 4 is here because desire paths ([`docs/design/16-desire-paths.md`])
+/// added one field to the top level of [`WorldSnapshot`] and changed nothing
+/// nested. That is the cheap kind of schema change — a v4 payload decodes
+/// through [`WorldSnapshotV4`], gains an empty wear map and comes back as a v5
+/// world with unmarked ground, which is exactly the truth about it. A change
+/// that reshaped anything nested would not get this treatment.
+pub const MIN_READABLE_SCHEMA: u16 = 4;
 
 /// Terrain generator revision recorded with the map.
 ///
@@ -269,6 +280,29 @@ pub struct TrainSnapshot {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TownSnapshot {
     pub density: Vec<(TileCoord, f32)>,
+}
+
+// ---------------------------------------------------------------------------
+// Desire paths
+// ---------------------------------------------------------------------------
+
+/// Ground the town has worn, sparse and sorted ([16 §7]).
+///
+/// Persistent paths are most of the point of the feature: a world that forgot
+/// its habits on every load would be a world with no memory, which is the
+/// opposite of what desire paths are for.
+///
+/// Only non-zero tiles travel, ascending by row-major index, so the blob is
+/// small (a town with two thousand worn tiles costs about 12 KB) and
+/// deterministic by construction. Drawn *levels* are deliberately absent — they
+/// are recomputed from wear on restore, so the file carries the cause and never
+/// a cache of the effect.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PathsSnapshot {
+    pub width: u32,
+    pub height: u32,
+    /// `(row-major tile index, wear)`, ascending by index, no zero entries.
+    pub wear: Vec<(u32, u16)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +557,9 @@ pub struct WorldSnapshot {
     pub trains: TrainsSnapshot,
     pub town: TownSnapshot,
     pub peeps: PeepsSnapshot,
+    /// Where the town has worn the ground. **Added in schema 5** — a v4 world
+    /// loads with this empty, which is a true statement about it.
+    pub paths: PathsSnapshot,
     pub economy: EconomySnapshot,
     pub demand: DemandSpawner,
     /// Goal set and progress. A goals world that lost this on load would
@@ -557,6 +594,7 @@ impl Default for WorldSnapshot {
             trains: TrainsSnapshot::default(),
             town: TownSnapshot::default(),
             peeps: PeepsSnapshot::default(),
+            paths: PathsSnapshot::default(),
             economy: EconomySnapshot::default(),
             demand: DemandSpawner::default(),
             goals: GoalBoard::default(),
@@ -564,6 +602,131 @@ impl Default for WorldSnapshot {
             clock: ClockSnapshot::default(),
             money_cents: 0,
             anchors_seeded: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Schema 4 compatibility
+// ---------------------------------------------------------------------------
+
+/// [`WorldSnapshot`] as schema 4 laid it out, for reading old saves.
+///
+/// Positional bincode has no field names in it, so a v4 payload can only be
+/// read by a type with v4's *exact* field sequence. This is that type, and it is
+/// deliberately a mirror of the top level only: schema 5 added
+/// [`WorldSnapshot::paths`] and touched nothing nested, so every field below is
+/// the same type it always was and stays in step automatically.
+///
+/// **If a future schema reshapes anything nested, this shortcut stops working**
+/// and that version needs its own frozen copy of whatever it changed. The test
+/// `a_schema_4_save_still_loads` is what notices.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldSnapshotV4 {
+    pub schema_version: u16,
+    pub map: MapSnapshot,
+    pub track: TrackNetwork,
+    pub stations: StationsSnapshot,
+    pub lines: LineRegistry,
+    pub trains: TrainsSnapshot,
+    pub town: TownSnapshot,
+    pub peeps: PeepsSnapshot,
+    pub economy: EconomySnapshot,
+    pub demand: DemandSpawner,
+    pub goals: GoalBoard,
+    pub borders: BorderRegistry,
+    pub clock: ClockSnapshot,
+    pub money_cents: i64,
+    pub anchors_seeded: bool,
+}
+
+impl WorldSnapshotV4 {
+    /// Read this old world forward into the current one.
+    ///
+    /// Exhaustively destructured with no `..` rest pattern, on purpose: a field
+    /// added to v4's shape by accident will not compile rather than silently
+    /// going missing on every old save anyone opens.
+    pub fn upgrade(self) -> WorldSnapshot {
+        let Self {
+            schema_version: _,
+            map,
+            track,
+            stations,
+            lines,
+            trains,
+            town,
+            peeps,
+            economy,
+            demand,
+            goals,
+            borders,
+            clock,
+            money_cents,
+            anchors_seeded,
+        } = self;
+
+        WorldSnapshot {
+            schema_version: SCHEMA_VERSION,
+            map,
+            track,
+            stations,
+            lines,
+            trains,
+            town,
+            peeps,
+            // The ground of a world whose habits were never recorded. Sized
+            // from its own map, so the first tick does not have to resize it.
+            paths: PathsSnapshot::default(),
+            economy,
+            demand,
+            goals,
+            borders,
+            clock,
+            money_cents,
+            anchors_seeded,
+        }
+    }
+
+    /// Capture the current world in v4's shape — test-only, so the migration is
+    /// proved against bytes this crate really wrote rather than against a
+    /// hand-rolled fixture that could drift.
+    #[cfg(test)]
+    pub fn capture(world: &World) -> Self {
+        let now = WorldSnapshot::capture(world);
+        let WorldSnapshot {
+            schema_version: _,
+            map,
+            track,
+            stations,
+            lines,
+            trains,
+            town,
+            peeps,
+            paths: _,
+            economy,
+            demand,
+            goals,
+            borders,
+            clock,
+            money_cents,
+            anchors_seeded,
+        } = now;
+        Self {
+            schema_version: 4,
+            map,
+            track,
+            stations,
+            lines,
+            trains,
+            town,
+            peeps,
+            economy,
+            demand,
+            goals,
+            borders,
+            clock,
+            money_cents,
+            anchors_seeded,
         }
     }
 }
@@ -606,6 +769,7 @@ impl WorldSnapshot {
             trains: capture_trains(world),
             town: capture_town(world),
             peeps: capture_peeps(world),
+            paths: capture_paths(world),
             economy: EconomySnapshot {
                 jobs: world.get_resource::<JobBoard>().cloned().unwrap_or_default(),
                 ledger: world.get_resource::<MoneyLedger>().cloned().unwrap_or_default(),
@@ -656,6 +820,7 @@ impl WorldSnapshot {
         restore_trains(self, world);
         restore_town(self, world);
         restore_peeps(self, world);
+        restore_paths(self, world);
 
         world.insert_resource(self.economy.jobs.clone());
         world.insert_resource(self.economy.ledger.clone());
@@ -702,6 +867,17 @@ fn capture_map(world: &World) -> MapSnapshot {
         gen: descriptor.map(|d| d.gen).unwrap_or_default(),
         terrain,
     }
+}
+
+fn capture_paths(world: &World) -> PathsSnapshot {
+    world
+        .get_resource::<PathWear>()
+        .map(|paths| PathsSnapshot {
+            width: paths.width(),
+            height: paths.height(),
+            wear: paths.to_entries(),
+        })
+        .unwrap_or_default()
 }
 
 fn capture_stations(world: &World, service_tick: u64) -> StationsSnapshot {
@@ -1063,6 +1239,20 @@ fn restore_town(snapshot: &WorldSnapshot, world: &mut World) {
         density.set(*tile, *value);
     }
     world.insert_resource(density);
+}
+
+/// Put the worn ground back, and tell presentation to redraw all of it.
+///
+/// A v4 save carries an empty section, which lands here as a clean map of the
+/// world's size — the ground of a world whose habits were never recorded.
+fn restore_paths(snapshot: &WorldSnapshot, world: &mut World) {
+    let mut paths = PathWear::default();
+    paths.restore_from(
+        snapshot.paths.width,
+        snapshot.paths.height,
+        &snapshot.paths.wear,
+    );
+    world.insert_resource(paths);
 }
 
 /// Advance a household registry's id counter to `target`, leaving no families.

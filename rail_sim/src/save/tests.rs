@@ -18,8 +18,9 @@ use crate::lines::LineRegistry;
 use crate::money::Money;
 use crate::peeps::{
     BodyType, ComplaintEntry, ComplaintFeed, DistrictFlow, HouseholdRegistry, Journey,
-    JourneyMemory, JourneyOutcome, JourneyRecord, JourneyStage, Mood, Peep, PeepBudget, PeepDetail,
-    PeepId, PeepPosition, PeepSpawnState, Routine, TalkKind, WaitingAtStation,
+    JourneyMemory, JourneyOutcome, JourneyRecord, JourneyStage, Mood, PathWear, Peep, PeepBudget,
+    PeepDetail, PeepId, PeepPosition, PeepSpawnState, Routine, TalkKind, WaitingAtStation,
+    WEAR_MAX, WEAR_PER_FOOTFALL,
 };
 use crate::stations::{
     GoodKind, IndustryRegistry, StationRegistry, StationService, StationServiceScore, StationTier,
@@ -32,7 +33,7 @@ use crate::WorldAnchorsSeeded;
 
 use super::codec::{decode_save, encode_save, SaveMeta};
 use super::slots::{delete_slot, list_slots, load_from_slot, save_to_slot, SaveSlot};
-use super::snapshot::{MapDescriptor, WorldSnapshot};
+use super::snapshot::{MapDescriptor, WorldSnapshot, SCHEMA_VERSION};
 use super::storage::use_test_root;
 
 const MAP_W: u32 = 12;
@@ -469,6 +470,21 @@ fn lived_in_world() -> World {
         );
     }
     world.resource_mut::<JobBoard>().spawn_cooldown = 17;
+
+    // Ground the town has worn: a short lane at three different depths, so a
+    // round trip has to carry wear values and not merely "there was a path".
+    let mut paths = PathWear::new(MAP_W, MAP_H);
+    for (tile, crossings) in [
+        (TileCoord { x: 2, y: 2 }, 1u32),  // below every threshold
+        (TileCoord { x: 3, y: 2 }, 5),     // Faint
+        (TileCoord { x: 4, y: 2 }, 11),    // Worn
+        (TileCoord { x: 5, y: 2 }, 40),    // saturated
+    ] {
+        for _ in 0..crossings {
+            paths.add_footfall(tile);
+        }
+    }
+    world.insert_resource(paths);
 
     world
 }
@@ -910,6 +926,136 @@ fn town_density_survives_including_fractions() {
     assert_eq!(density.get(TileCoord { x: 1, y: 3 }), 0.75);
     assert_eq!(density.get(TileCoord { x: 5, y: 2 }), 0.125);
     assert_eq!(density.get(TileCoord { x: 11, y: 7 }), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Desire paths (brief 16 §7)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn worn_ground_survives_a_save() {
+    let world = lived_in_world();
+    let snapshot = WorldSnapshot::capture(&world);
+
+    // Only worn tiles travel, ascending by index, with no zero entries.
+    assert_eq!(snapshot.paths.width, MAP_W);
+    assert_eq!(snapshot.paths.height, MAP_H);
+    assert_eq!(snapshot.paths.wear.len(), 4);
+    assert!(
+        snapshot.paths.wear.windows(2).all(|w| w[0].0 < w[1].0),
+        "the wear blob must be sorted: {:?}",
+        snapshot.paths.wear
+    );
+    assert!(snapshot.paths.wear.iter().all(|(_, w)| *w > 0));
+
+    let bytes = encode_save(&SaveMeta::from_snapshot(&snapshot, "Paths"), &snapshot)
+        .expect("encode");
+    let (_, loaded) = decode_save(&bytes).expect("decode");
+
+    let mut fresh = World::new();
+    loaded.restore(&mut fresh);
+    let paths = fresh.resource::<PathWear>();
+
+    // Values, not merely presence — and the levels they imply.
+    assert_eq!(paths.wear_at(TileCoord { x: 2, y: 2 }), WEAR_PER_FOOTFALL);
+    assert_eq!(paths.level_at(TileCoord { x: 2, y: 2 }), 0);
+    assert_eq!(paths.wear_at(TileCoord { x: 3, y: 2 }), 5 * WEAR_PER_FOOTFALL);
+    assert_eq!(paths.level_at(TileCoord { x: 3, y: 2 }), 1);
+    assert_eq!(paths.wear_at(TileCoord { x: 4, y: 2 }), 11 * WEAR_PER_FOOTFALL);
+    assert_eq!(paths.level_at(TileCoord { x: 4, y: 2 }), 2);
+    assert_eq!(paths.wear_at(TileCoord { x: 5, y: 2 }), WEAR_MAX);
+    assert_eq!(paths.level_at(TileCoord { x: 5, y: 2 }), 3);
+
+    // Ground nobody has crossed stays clean.
+    assert_eq!(paths.wear_at(TileCoord { x: 9, y: 6 }), 0);
+    assert_eq!(paths.worn_count(), 4);
+
+    // A world that has just come back must redraw all of it.
+    assert!(paths.needs_resync());
+}
+
+/// The one that protects the owner's live playtest worlds.
+#[test]
+fn a_schema_4_save_still_loads() {
+    use super::codec::encode_save_v4;
+    use super::snapshot::{MIN_READABLE_SCHEMA, WorldSnapshotV4};
+
+    assert_eq!(MIN_READABLE_SCHEMA, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
+
+    let world = lived_in_world();
+    let old = WorldSnapshotV4::capture(&world);
+    assert_eq!(old.schema_version, 4);
+
+    let meta = SaveMeta::from_snapshot(&WorldSnapshot::capture(&world), "A v4 world");
+    let bytes = encode_save_v4(&meta, &old).expect("encode v4");
+    // The envelope really does say 4, or this test is proving nothing.
+    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 4);
+
+    let (read_meta, loaded) = decode_save(&bytes).expect("a v4 save must still open");
+    assert_eq!(read_meta.label, "A v4 world");
+    assert_eq!(
+        loaded.schema_version, SCHEMA_VERSION,
+        "a migrated world is a current world"
+    );
+
+    // Everything v4 knew about comes back untouched…
+    let now = WorldSnapshot::capture(&world);
+    assert_eq!(loaded.stations, now.stations);
+    assert_eq!(loaded.peeps, now.peeps);
+    assert_eq!(loaded.track, now.track);
+    assert_eq!(loaded.trains, now.trains);
+    assert_eq!(loaded.lines, now.lines);
+    assert_eq!(loaded.economy, now.economy);
+    assert_eq!(loaded.goals, now.goals);
+    assert_eq!(loaded.borders, now.borders);
+    assert_eq!(loaded.clock, now.clock);
+    assert_eq!(loaded.money_cents, now.money_cents);
+    assert_eq!(loaded.map, now.map);
+    assert_eq!(loaded.town, now.town);
+    assert_eq!(loaded.demand, now.demand);
+    assert_eq!(loaded.anchors_seeded, now.anchors_seeded);
+
+    // …and its ground is unmarked, which is the truth about a world whose
+    // habits were never recorded.
+    assert_eq!(loaded.paths, Default::default());
+
+    // It restores, and it plays.
+    let mut fresh = World::new();
+    let report = loaded.restore(&mut fresh);
+    assert!(report.is_clean(), "restore warnings: {:?}", report.warnings);
+    assert_eq!(fresh.resource::<PathWear>().worn_count(), 0);
+
+    // Saved again, it is a v5 world with a wear section of its own.
+    let resaved = WorldSnapshot::capture(&fresh);
+    assert_eq!(resaved.schema_version, SCHEMA_VERSION);
+    let bytes = encode_save(&SaveMeta::from_snapshot(&resaved, "Migrated"), &resaved)
+        .expect("encode");
+    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), SCHEMA_VERSION);
+    assert!(decode_save(&bytes).is_ok());
+}
+
+#[test]
+fn a_schema_from_the_future_is_still_refused() {
+    let snapshot = WorldSnapshot::default();
+    let mut bytes = encode_save(&SaveMeta::from_snapshot(&snapshot, "Tomorrow"), &snapshot)
+        .expect("encode");
+    bytes[4..6].copy_from_slice(&(SCHEMA_VERSION + 1).to_le_bytes());
+    let end = bytes.len() - 4;
+    let fixed = super::codec::crc32(&bytes[..end]);
+    bytes[end..].copy_from_slice(&fixed.to_le_bytes());
+
+    let err = decode_save(&bytes).unwrap_err();
+    assert!(err.is_version_mismatch(), "got {err:?}");
+
+    // And so is anything older than the oldest schema this build can read.
+    let mut bytes = encode_save(&SaveMeta::from_snapshot(&snapshot, "Ancient"), &snapshot)
+        .expect("encode");
+    bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+    let end = bytes.len() - 4;
+    let fixed = super::codec::crc32(&bytes[..end]);
+    bytes[end..].copy_from_slice(&fixed.to_le_bytes());
+    assert!(decode_save(&bytes).unwrap_err().is_version_mismatch());
 }
 
 #[test]

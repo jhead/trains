@@ -14,9 +14,13 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rail_map::{MapGrid, TILE_SIZE};
 use rail_sim::ids::TileCoord;
+use rail_sim::PathWear;
 
-use super::atlas::{TerrainAtlas, CELL, TRANSITION_BASE};
+use crate::map::paths::{path_tones, path_variant_for};
+
+use super::atlas::{path_cell, TerrainAtlas, CELL, TRANSITION_BASE};
 use super::autotile::resolve_tile;
+use super::material::{material_of, shade_for};
 
 /// Tiles per chunk edge (brief 01 §2.5).
 pub const CHUNK_TILES: u32 = 16;
@@ -89,7 +93,6 @@ impl TerrainDirty {
     ///
     /// Autotiling reads a tile's diagonals, so an edit on a chunk seam dirties
     /// its neighbours too.
-    #[allow(dead_code)] // Entry point for terraforming / bridges in later slices.
     pub fn mark_tile(&mut self, coord: TileCoord) {
         for dy in -1..=1 {
             for dx in -1..=1 {
@@ -147,7 +150,14 @@ fn chunk_center(map: &MapGrid, cx: u32, cy: u32) -> (f32, f32) {
 /// bottom-up. Layers stamp in resolve order; the base is opaque and copies
 /// wholesale, overlays test alpha per texel (the art is never partly
 /// transparent, so there is nothing to blend).
-fn composite(map: &MapGrid, atlas: &TerrainAtlas, cx: u32, cy: u32, data: &mut [u8]) {
+fn composite(
+    map: &MapGrid,
+    atlas: &TerrainAtlas,
+    paths: &PathWear,
+    cx: u32,
+    cy: u32,
+    data: &mut [u8],
+) {
     let (tiles_w, tiles_h) = chunk_extent(map, cx, cy);
     let stride = (tiles_w * CELL) as usize * 4;
     let row_bytes = CELL as usize * 4;
@@ -161,7 +171,11 @@ fn composite(map: &MapGrid, atlas: &TerrainAtlas, cx: u32, cy: u32, data: &mut [
                 y: (cy * CHUNK_TILES + ty) as i32,
             };
             let draw = resolve_tile(map, coord);
-            for &cell in draw.layers() {
+            // The path is the last thing laid down: it is what the town did to
+            // the ground *after* the ground was what it is, so it goes over the
+            // transitions and contours rather than under them.
+            let worn = path_layer(map, paths, coord);
+            for &cell in draw.layers().iter().chain(worn.iter()) {
                 let cell = cell as usize;
                 let opaque = cell < TRANSITION_BASE;
                 for row in 0..CELL {
@@ -183,7 +197,31 @@ fn composite(map: &MapGrid, atlas: &TerrainAtlas, cx: u32, cy: u32, data: &mut [
     }
 }
 
-fn chunk_image(map: &MapGrid, atlas: &TerrainAtlas, cx: u32, cy: u32) -> Image {
+/// The path cell a tile draws, if it draws one at all.
+///
+/// `None` on clean ground, and on ground with no grass to wear — beach sand,
+/// the mountain band, water (brief 16 §3.2).
+fn path_layer(map: &MapGrid, paths: &PathWear, coord: TileCoord) -> Option<u16> {
+    let level = paths.level_at(coord);
+    if level == 0 {
+        return None;
+    }
+    let tile = map.get(coord)?;
+    if tile.water {
+        return None;
+    }
+    let shade = shade_for(tile.kind, tile.height);
+    path_tones(material_of(tile.kind), shade)?;
+    Some(path_cell(shade, level, path_variant_for(coord)) as u16)
+}
+
+fn chunk_image(
+    map: &MapGrid,
+    atlas: &TerrainAtlas,
+    paths: &PathWear,
+    cx: u32,
+    cy: u32,
+) -> Image {
     let (tiles_w, tiles_h) = chunk_extent(map, cx, cy);
     let mut image = Image::new_fill(
         Extent3d {
@@ -200,7 +238,7 @@ fn chunk_image(map: &MapGrid, atlas: &TerrainAtlas, cx: u32, cy: u32) -> Image {
     // never mipmapped (brief 01 §2.1).
     image.sampler = ImageSampler::nearest();
     if let Some(data) = image.data.as_mut() {
-        composite(map, atlas, cx, cy, data);
+        composite(map, atlas, paths, cx, cy, data);
     }
     image
 }
@@ -211,6 +249,7 @@ fn spawn_chunks(
     images: &mut Assets<Image>,
     map: &MapGrid,
     atlas: &TerrainAtlas,
+    paths: &PathWear,
     dirty: &mut TerrainDirty,
 ) -> (u32, u32) {
     let cols = map.width.div_ceil(CHUNK_TILES);
@@ -222,7 +261,7 @@ fn spawn_chunks(
 
     for cy in 0..rows {
         for cx in 0..cols {
-            let handle = images.add(chunk_image(map, atlas, cx, cy));
+            let handle = images.add(chunk_image(map, atlas, paths, cx, cy));
             let (wx, wy) = chunk_center(map, cx, cy);
             commands.spawn((
                 TerrainChunk { cx, cy },
@@ -281,10 +320,14 @@ pub fn rebuild_dirty_terrain(
     mut commands: Commands,
     map: Res<MapGrid>,
     atlas: Option<Res<TerrainAtlas>>,
+    paths: Option<Res<PathWear>>,
     mut dirty: ResMut<TerrainDirty>,
     mut images: ResMut<Assets<Image>>,
     chunks: Query<(Entity, &TerrainChunk, &Sprite)>,
 ) {
+    // A world with no sim attached (a rendering test) draws clean ground.
+    let empty = PathWear::default();
+    let paths = paths.as_deref().unwrap_or(&empty);
     let _perf = crate::overlays::perf::scope("rebuild_dirty_terrain");
     // No chunks at all is the other entry point into a full build: either
     // startup has not run yet, or the player has just flipped back from the
@@ -319,7 +362,8 @@ pub fn rebuild_dirty_terrain(
             images.remove(&sprite.image);
             commands.entity(entity).despawn();
         }
-        let (cols, rows) = spawn_chunks(&mut commands, &mut images, &map, &atlas, &mut dirty);
+        let (cols, rows) =
+            spawn_chunks(&mut commands, &mut images, &map, &atlas, paths, &mut dirty);
         dirty.clear();
         info!(
             "terrain: {cols}x{rows} chunks composited in {:?}",
@@ -338,9 +382,35 @@ pub fn rebuild_dirty_terrain(
         let Some(data) = image.data.as_mut() else {
             continue;
         };
-        composite(&map, &atlas, chunk.cx, chunk.cy, data);
+        composite(&map, &atlas, paths, chunk.cx, chunk.cy, data);
     }
     dirty.clear();
+}
+
+/// Mark the chunks whose paths changed level, and nothing else.
+///
+/// The sim publishes *level transitions* rather than wear, so this is idle on
+/// almost every frame of a living town: a tile whose wear climbed from 700 to
+/// 701 produces no event and costs nothing here. That is the whole reason wear
+/// is quantised — see [`TerrainDirty`] for what keying a re-composite on raw
+/// change detection cost the last time.
+///
+/// Runs before [`rebuild_dirty_terrain`], so a level that moved this frame is
+/// drawn this frame.
+pub fn mark_worn_chunks_dirty(paths: Option<ResMut<PathWear>>, mut dirty: ResMut<TerrainDirty>) {
+    let Some(mut paths) = paths else {
+        return;
+    };
+    let (changes, resync) = paths.drain_changes();
+    if resync {
+        // A fresh world, a loaded save, or more transitions than the sim was
+        // willing to queue: redraw the lot rather than guess.
+        dirty.mark_all();
+        return;
+    }
+    for change in changes {
+        dirty.mark_tile(change.tile);
+    }
 }
 
 #[cfg(test)]
@@ -353,9 +423,19 @@ mod tests {
     }
 
     fn composite_chunk(map: &MapGrid, atlas: &TerrainAtlas, cx: u32, cy: u32) -> Vec<u8> {
+        composite_worn(map, atlas, &PathWear::default(), cx, cy)
+    }
+
+    fn composite_worn(
+        map: &MapGrid,
+        atlas: &TerrainAtlas,
+        paths: &PathWear,
+        cx: u32,
+        cy: u32,
+    ) -> Vec<u8> {
         let (w, h) = chunk_extent(map, cx, cy);
         let mut data = vec![0u8; (w * CELL) as usize * (h * CELL) as usize * 4];
-        composite(map, atlas, cx, cy, &mut data);
+        composite(map, atlas, paths, cx, cy, &mut data);
         data
     }
 
@@ -601,12 +681,18 @@ mod tests {
         app.add_plugins(MinimalPlugins);
         app.init_resource::<Assets<Image>>();
         app.init_resource::<TerrainDirty>();
+        // Sized, not defaulted: a `PathWear` of no size records no footfalls,
+        // and a test that never wears anything passes for the wrong reason.
+        app.insert_resource(PathWear::new(width, height));
         app.insert_resource(generate_map(width, height, DEFAULT_MAP_SEED));
         // No separate spawn step: the atlas is baked at startup and
         // `rebuild_dirty_terrain` composites whatever it finds missing, which
         // is the path a flip back into this view takes as well.
         app.add_systems(Startup, setup_terrain_atlas);
-        app.add_systems(Update, rebuild_dirty_terrain);
+        app.add_systems(
+            Update,
+            (mark_worn_chunks_dirty, rebuild_dirty_terrain).chain(),
+        );
         app
     }
 
@@ -722,6 +808,198 @@ mod tests {
         assert!(!dirty.any);
         dirty.mark_all();
         assert!(dirty.is_dirty(3, 3));
+    }
+
+    // ── Desire paths (brief 16 §3.4, §4) ───────────────────────────────────
+
+    /// Grassland flat enough that every tile is band-0 grass.
+    fn grassland(w: u32, h: u32) -> MapGrid {
+        let mut map = MapGrid::empty(w, h, 1);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let tile = map.get_mut(TileCoord { x, y }).unwrap();
+                tile.water = false;
+                tile.height = 0;
+                tile.kind = rail_map::TerrainKind::Plains;
+            }
+        }
+        map
+    }
+
+    fn worn(map: &MapGrid, tile: TileCoord, level: u8) -> PathWear {
+        let mut paths = PathWear::new(map.width, map.height);
+        let footfalls = match level {
+            1 => 4,
+            2 => 10,
+            _ => 40,
+        };
+        for _ in 0..footfalls {
+            paths.add_footfall(tile);
+        }
+        assert_eq!(paths.level_at(tile), level, "fixture built the wrong level");
+        paths
+    }
+
+    #[test]
+    fn a_worn_tile_is_drawn_from_above() {
+        let map = grassland(16, 16);
+        let a = atlas();
+        let clean = composite_chunk(&map, &a, 0, 0);
+
+        for level in 1..=3u8 {
+            let tile = TileCoord { x: 8, y: 8 };
+            let data = composite_worn(&map, &a, &worn(&map, tile, level), 0, 0);
+            assert_ne!(
+                data, clean,
+                "level {level} drew nothing at all onto the ground"
+            );
+
+            // The mark is on that tile and nowhere else. Row 0 of the image is
+            // the chunk's north edge, so tile row `ty` starts at image row
+            // `(15 - ty) * CELL`.
+            let width = (16 * CELL) as usize;
+            let mut off_tile = 0usize;
+            let mut on_tile = 0usize;
+            for row in 0..(16 * CELL) as usize {
+                for col in 0..width {
+                    let o = (row * width + col) * 4;
+                    if data[o..o + 4] == clean[o..o + 4] {
+                        continue;
+                    }
+                    let tx = col as u32 / CELL;
+                    let ty = 15 - row as u32 / CELL;
+                    if (tx, ty) == (8, 8) {
+                        on_tile += 1;
+                    } else {
+                        off_tile += 1;
+                    }
+                }
+            }
+            assert!(on_tile > 100, "level {level} barely marked its tile");
+            assert_eq!(off_tile, 0, "level {level} leaked onto its neighbours");
+        }
+    }
+
+    #[test]
+    fn a_deeper_path_covers_more_of_its_tile() {
+        let map = grassland(16, 16);
+        let a = atlas();
+        let clean = composite_chunk(&map, &a, 0, 0);
+        let tile = TileCoord { x: 4, y: 4 };
+
+        let marked = |level: u8| {
+            let data = composite_worn(&map, &a, &worn(&map, tile, level), 0, 0);
+            data.chunks_exact(4)
+                .zip(clean.chunks_exact(4))
+                .filter(|(a, b)| a != b)
+                .count()
+        };
+        let (faint, worn_, bare) = (marked(1), marked(2), marked(3));
+        assert!(
+            faint < worn_ && worn_ < bare,
+            "coverage does not deepen: {faint} / {worn_} / {bare}"
+        );
+        // Bare is trodden earth, not a full repaint — grass still clings on.
+        assert!(bare < (CELL * CELL) as usize, "bare covered the whole tile");
+    }
+
+    #[test]
+    fn water_and_bare_ground_never_draw_a_path() {
+        let mut map = grassland(8, 8);
+        // A river tile, a beach tile and a mountain tile, all walked over.
+        for (x, kind, height, water) in [
+            (1i32, rail_map::TerrainKind::Water, -4i8, true),
+            (3, rail_map::TerrainKind::Beach, 0, false),
+            (5, rail_map::TerrainKind::Mountain, 16, false),
+        ] {
+            let tile = map.get_mut(TileCoord { x, y: 4 }).unwrap();
+            tile.kind = kind;
+            tile.height = height;
+            tile.water = water;
+        }
+        let a = atlas();
+        let clean = composite_chunk(&map, &a, 0, 0);
+
+        for x in [1i32, 3, 5] {
+            let data = composite_worn(&map, &a, &worn(&map, TileCoord { x, y: 4 }, 3), 0, 0);
+            assert_eq!(
+                data, clean,
+                "ground at x = {x} has no grass to wear, but drew a path"
+            );
+        }
+    }
+
+    /// The budget, counted rather than asserted: wear that changes no level
+    /// must cost no re-composite at all.
+    #[test]
+    fn wear_that_changes_no_level_does_not_recomposite() {
+        let mut app = test_app(32, 32);
+        app.update();
+        assert!(!app.world().resource::<TerrainDirty>().any);
+        let before: Vec<Handle<Image>> = chunk_sprites(&mut app).into_iter().map(|c| c.1).collect();
+
+        // Three footfalls on each of a hundred tiles: a great deal of wear,
+        // not one level crossed.
+        for _ in 0..3 {
+            let mut paths = app.world_mut().resource_mut::<PathWear>();
+            for y in 0..10i32 {
+                for x in 0..10i32 {
+                    paths.add_footfall(TileCoord { x, y });
+                }
+            }
+        }
+        let paths = app.world().resource::<PathWear>();
+        assert_eq!(paths.worn_count(), 100, "the fixture wore nothing");
+        assert!(paths.drawn_tiles().next().is_none(), "a level was crossed");
+        for _ in 0..8 {
+            app.update();
+            assert!(
+                !app.world().resource::<TerrainDirty>().any,
+                "sub-threshold wear dirtied the terrain"
+            );
+        }
+        let after: Vec<Handle<Image>> = chunk_sprites(&mut app).into_iter().map(|c| c.1).collect();
+        assert_eq!(before, after, "chunk images must not have been rebuilt");
+    }
+
+    /// …and the other half of the contract: a level that moves is drawn.
+    #[test]
+    fn crossing_a_level_redraws_exactly_the_chunk_that_changed() {
+        let mut app = test_app(32, 32);
+        app.update();
+        assert!(!app.world().resource::<TerrainDirty>().any);
+
+        {
+            let mut paths = app.world_mut().resource_mut::<PathWear>();
+            for _ in 0..4 {
+                paths.add_footfall(TileCoord { x: 20, y: 4 });
+            }
+            assert_eq!(paths.level_at(TileCoord { x: 20, y: 4 }), 1);
+        }
+        // The system has to see the change before it can act on it.
+        app.update();
+        // It ran and cleared itself in the same frame.
+        assert!(!app.world().resource::<TerrainDirty>().any);
+
+        // The tile is inside chunk (1, 0) and not on a seam, so only that one
+        // chunk was ever marked.
+        let mut dirty = TerrainDirty::default();
+        dirty.resize(2, 2);
+        dirty.mark_tile(TileCoord { x: 20, y: 4 });
+        assert!(dirty.is_dirty(1, 0));
+        assert!(!dirty.is_dirty(0, 0));
+        assert!(!dirty.is_dirty(1, 1));
+    }
+
+    #[test]
+    fn a_resync_redraws_the_whole_map() {
+        let mut app = test_app(32, 32);
+        app.update();
+        app.world_mut().resource_mut::<PathWear>().request_resync();
+        app.update();
+        // Marked everything, composited it, and cleared itself.
+        assert!(!app.world().resource::<TerrainDirty>().any);
+        assert!(!app.world().resource::<PathWear>().needs_resync());
     }
 
     #[test]

@@ -17,6 +17,7 @@
 //! | `133..137` | cliff corners — diagonal-only drops |
 //! | `137..141` | terrace contours — the shadow at the foot of a band step |
 //! | `141..171` | sun lips — 5 materials × 3 fill steps × the two sunlit edges |
+//! | `171..207` | desire paths — 3 fill steps × 3 wear levels × 4 mask variants |
 //!
 //! Ramps are four steps but only three of them are *fills*: a material's
 //! reserved cap (`SNOW`, `WATER_F`) has no base cell and no lip cell of its own.
@@ -26,6 +27,8 @@ use bevy::prelude::Resource;
 use rail_map::TILE_SIZE;
 
 use crate::palette::{OUTLINE, ROCK_D, ROCK_M, SNOW, WATER_F};
+
+use crate::map::paths::{path_mark, PathMark, PATH_DUST, PATH_FILL, PATH_VARIANTS};
 
 use super::material::{
     rgba, world_hash, Material, BOUNDARY_COUNT, FILL_SHADES, MATERIALS, MATERIAL_COUNT, VARIANTS,
@@ -47,7 +50,10 @@ pub const CLIFF_BASE: usize = TRANSITION_BASE + BOUNDARY_COUNT * TRANSITION_PIEC
 pub const CLIFF_CORNER_BASE: usize = CLIFF_BASE + 8;
 pub const TERRACE_BASE: usize = CLIFF_CORNER_BASE + 4;
 pub const SUN_LIP_BASE: usize = TERRACE_BASE + 4;
-pub const CELL_COUNT: usize = SUN_LIP_BASE + MATERIAL_COUNT * FILL_SHADES * 2;
+pub const PATH_BASE: usize = SUN_LIP_BASE + MATERIAL_COUNT * FILL_SHADES * 2;
+/// Wear levels that draw anything — clean ground has no cell (brief 16 §3.3).
+pub const PATH_LEVELS: usize = 3;
+pub const CELL_COUNT: usize = PATH_BASE + FILL_SHADES * PATH_LEVELS * PATH_VARIANTS;
 
 /// Directions, image-space: row 0 is north, column 0 is west.
 pub const DIR_N: usize = 0;
@@ -90,6 +96,21 @@ pub fn sun_lip_cell(material: Material, shade: usize, dir: usize) -> usize {
     SUN_LIP_BASE
         + (material.index() * FILL_SHADES + shade.min(FILL_SHADES - 1)) * 2
         + usize::from(dir == DIR_W)
+}
+
+/// Worn ground, keyed on the fill shade it lies on rather than on the material.
+///
+/// The path ramp is a pure function of the ground's own fill step (see
+/// [`crate::map::paths`]), so grass and hills at the same shade share a cell —
+/// which is why this is 36 cells rather than 180.
+///
+/// `level` is 1..=3; clean ground has no cell, because it draws nothing.
+#[inline]
+pub fn path_cell(shade: usize, level: u8, variant: usize) -> usize {
+    let level = (level.clamp(1, PATH_LEVELS as u8) as usize) - 1;
+    PATH_BASE
+        + (shade.min(FILL_SHADES - 1) * PATH_LEVELS + level) * PATH_VARIANTS
+        + variant.min(PATH_VARIANTS - 1)
 }
 
 // ── Atlas ──────────────────────────────────────────────────────────────────
@@ -144,6 +165,14 @@ impl TerrainAtlas {
                 for dir in [DIR_S, DIR_W] {
                     let index = sun_lip_cell(material, shade, dir);
                     paint_sun_lip(&mut atlas.cell(index), material, shade, dir);
+                }
+            }
+        }
+        for shade in 0..FILL_SHADES {
+            for level in 1..=PATH_LEVELS as u8 {
+                for variant in 0..PATH_VARIANTS {
+                    let index = path_cell(shade, level, variant);
+                    paint_path(&mut atlas.cell(index), shade, level, variant);
                 }
             }
         }
@@ -631,6 +660,26 @@ fn paint_sun_lip(cell: &mut Cell, material: Material, shade: usize, dir: usize) 
     }
 }
 
+/// Worn ground: bare earth scattered through the tile, thinning at the corners.
+///
+/// An alpha-tested overlay like every cell past [`TRANSITION_BASE`], so the
+/// grass the mask leaves behind is the tile's own art showing through rather
+/// than a second copy of it. The scatter is what makes the edge soft without
+/// the alpha ramp brief 01 §2 forbids — every texel is either grass or earth.
+fn paint_path(cell: &mut Cell, shade: usize, level: u8, variant: usize) {
+    let fill = rgba(PATH_FILL[shade.min(FILL_SHADES - 1)]);
+    let dust = rgba(PATH_DUST[shade.min(FILL_SHADES - 1)]);
+    for y in 0..CELL {
+        for x in 0..CELL {
+            match path_mark(level, variant, x, y, CELL, CELL) {
+                Some(PathMark::Fill) => cell.set(x as i32, y as i32, fill),
+                Some(PathMark::Dust) => cell.set(x as i32, y as i32, dust),
+                None => {}
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,12 +704,27 @@ mod tests {
     fn cell_ranges_do_not_overlap() {
         assert_eq!(BASE_CELLS, 45);
         assert_eq!(CLIFF_BASE, 125);
-        assert_eq!(CELL_COUNT, 171);
+        assert_eq!(PATH_BASE, 171);
+        assert_eq!(CELL_COUNT, 207);
         assert!(base_cell(Material::Rock, FILL_SHADES - 1, VARIANTS - 1) < TRANSITION_BASE);
         assert!(transition_cell(BOUNDARY_COUNT - 1, TRANSITION_PIECES - 1) < CLIFF_BASE);
         assert!(cliff_cell(DIR_W, 1) < CLIFF_CORNER_BASE);
         assert!(cliff_corner_cell(3) < TERRACE_BASE);
-        assert!(terrace_cell(DIR_W) < CELL_COUNT);
+        assert!(terrace_cell(DIR_W) < SUN_LIP_BASE);
+        assert!(sun_lip_cell(Material::Rock, FILL_SHADES - 1, DIR_W) < PATH_BASE);
+        assert!(path_cell(FILL_SHADES - 1, PATH_LEVELS as u8, PATH_VARIANTS - 1) < CELL_COUNT);
+
+        // Every path cell is distinct, and every one of them is alpha-tested
+        // rather than opaque — a path shows the grass it has not worn away.
+        let cells: std::collections::HashSet<usize> = (0..FILL_SHADES)
+            .flat_map(|shade| {
+                (1..=PATH_LEVELS as u8).flat_map(move |level| {
+                    (0..PATH_VARIANTS).map(move |v| path_cell(shade, level, v))
+                })
+            })
+            .collect();
+        assert_eq!(cells.len(), FILL_SHADES * PATH_LEVELS * PATH_VARIANTS);
+        assert!(cells.iter().all(|&c| c >= TRANSITION_BASE && c < CELL_COUNT));
     }
 
     #[test]
@@ -926,11 +990,14 @@ mod tests {
     fn atlas_uses_only_palette_colours() {
         use crate::palette::{
             GRASS_D, GRASS_L, GRASS_M, HILL_D, HILL_L, HILL_M, ROCK_L, SAND_D, SAND_L, SAND_M,
-            WATER_D, WATER_L, WATER_M,
+            TIE_L, TIE_M, WATER_D, WATER_L, WATER_M,
         };
+        // `TIE_M` / `TIE_L` are the desire-path ramp: the palette's warm twins
+        // of the grass and hill fills, borrowed from the sleeper colours
+        // because bare trodden earth is exactly what a sleeper is made of.
         let allowed: std::collections::HashSet<[u8; 4]> = [
             WATER_D, WATER_M, WATER_L, WATER_F, SAND_D, SAND_M, SAND_L, GRASS_D, GRASS_M, GRASS_L,
-            HILL_D, HILL_M, HILL_L, ROCK_D, ROCK_M, ROCK_L, SNOW, OUTLINE,
+            HILL_D, HILL_M, HILL_L, ROCK_D, ROCK_M, ROCK_L, SNOW, OUTLINE, TIE_M, TIE_L,
         ]
         .into_iter()
         .map(rgba)

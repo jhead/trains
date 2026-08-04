@@ -41,10 +41,15 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rail_map::{tile_to_world, MapGrid, ISO_LIFT};
 use rail_sim::ids::TileCoord;
+use rail_sim::PathWear;
 
 use crate::map::iso_depth::{depth_z, TERRAIN_LAYER};
+use crate::map::paths::{
+    path_mark, path_tones, path_variant_for, PathMark, PATH_DUST, PATH_FILL, PATH_VARIANTS,
+};
 use crate::palette::OUTLINE;
 
+use super::atlas::PATH_LEVELS;
 use super::material::{
     material_of, rgba, shade_for, world_hash, Material, BAND_STEP, FILL_SHADES, MATERIALS,
     MATERIAL_COUNT, VARIANTS,
@@ -138,12 +143,22 @@ const FACE_CELLS: u32 = (MATERIAL_COUNT * FILL_SHADES) as u32 * 2;
 const TOP_COLS: u32 = 24;
 const TOP_ROWS: u32 = TOP_CELLS.div_ceil(TOP_COLS);
 const FACE_Y: u32 = TOP_ROWS * TOP_H;
+
+/// Worn-ground diamonds: 3 fill shades x 3 wear levels x 4 mask variants.
+///
+/// Keyed on the ground's *fill shade* rather than its material, because the
+/// path ramp is a pure function of that (see [`crate::map::paths`]) — which is
+/// what keeps this 36 cells instead of 180.
+const PATH_CELLS: u32 = (FILL_SHADES * PATH_LEVELS * PATH_VARIANTS) as u32;
+const PATH_Y: u32 = FACE_Y + FACE_H;
+const PATH_ROWS: u32 = PATH_CELLS.div_ceil(TOP_COLS);
+
 const ATLAS_W: u32 = if TOP_COLS * TOP_W > FACE_CELLS * FACE_W {
     TOP_COLS * TOP_W
 } else {
     FACE_CELLS * FACE_W
 };
-const ATLAS_H: u32 = FACE_Y + FACE_H;
+const ATLAS_H: u32 = PATH_Y + PATH_ROWS * TOP_H;
 
 #[inline]
 fn top_index(material: Material, shade: usize, variant: usize) -> u32 {
@@ -173,6 +188,26 @@ pub fn face_rect(material: Material, shade: usize, side: Side, depth: u32) -> Re
     let x = (face_index(material, shade, side) * FACE_W) as f32;
     let rows = TOP_H / 2 + depth.min(MAX_FACE);
     Rect::new(x, FACE_Y as f32, x + FACE_W as f32, (FACE_Y + rows) as f32)
+}
+
+#[inline]
+fn path_index(shade: usize, level: u8, variant: usize) -> u32 {
+    let level = (level.clamp(1, PATH_LEVELS as u8) as usize) - 1;
+    ((shade.min(FILL_SHADES - 1) * PATH_LEVELS + level) * PATH_VARIANTS
+        + variant.min(PATH_VARIANTS - 1)) as u32
+}
+
+#[inline]
+fn path_origin(shade: usize, level: u8, variant: usize) -> (u32, u32) {
+    let i = path_index(shade, level, variant);
+    ((i % TOP_COLS) * TOP_W, PATH_Y + (i / TOP_COLS) * TOP_H)
+}
+
+/// Sub-rect of the atlas for a tile's worn ground. `level` is 1..=3; clean
+/// ground has no cell, because it draws nothing at all.
+pub fn path_rect(shade: usize, level: u8, variant: usize) -> Rect {
+    let (x, y) = path_origin(shade, level, variant);
+    Rect::new(x as f32, y as f32, (x + TOP_W) as f32, (y + TOP_H) as f32)
 }
 
 // ── Painting ───────────────────────────────────────────────────────────────
@@ -370,6 +405,29 @@ fn paint_face(canvas: &mut Canvas, material: Material, shade: usize, side: Side)
     }
 }
 
+/// One tile's worn ground: bare earth scattered over the diamond, thinning at
+/// the rim so a lane's edge is ragged rather than a drawn outline.
+///
+/// Painted into the same 64 x 32 diamond the ground uses, from the same mask
+/// the chunk compositor stamps from above, so one lane is the same lane in
+/// either projection. Everything the mask leaves alone stays transparent and
+/// the tile's own grass shows through.
+fn paint_path(canvas: &mut Canvas, shade: usize, level: u8, variant: usize) {
+    let (ox, oy) = path_origin(shade, level, variant);
+    let fill = rgba(PATH_FILL[shade.min(FILL_SHADES - 1)]);
+    let dust = rgba(PATH_DUST[shade.min(FILL_SHADES - 1)]);
+    for row in 0..TOP_H {
+        let half = diamond_half(row);
+        for x in (TOP_W / 2 - half)..(TOP_W / 2 + half) {
+            match path_mark(level, variant, x, row, TOP_W, TOP_H) {
+                Some(PathMark::Fill) => canvas.put(ox + x, oy + row, fill),
+                Some(PathMark::Dust) => canvas.put(ox + x, oy + row, dust),
+                None => {}
+            }
+        }
+    }
+}
+
 fn build_atlas() -> Image {
     let mut canvas = Canvas::new();
     for material in MATERIALS {
@@ -379,6 +437,13 @@ fn build_atlas() -> Image {
             }
             paint_face(&mut canvas, material, shade, Side::West);
             paint_face(&mut canvas, material, shade, Side::South);
+        }
+    }
+    for shade in 0..FILL_SHADES {
+        for level in 1..=PATH_LEVELS as u8 {
+            for variant in 0..PATH_VARIANTS {
+                paint_path(&mut canvas, shade, level, variant);
+            }
         }
     }
     let mut image = Image::new(
@@ -636,6 +701,133 @@ pub fn rebuild_iso_terrain(
     );
 }
 
+/// A drawn desire path, and the tile it belongs to.
+///
+/// Also carries [`IsoTerrain`], for two reasons that both matter: it opts the
+/// sprite out of [`iso_depth_sort`](crate::map::iso_sort::iso_depth_sort) — a
+/// path sets its own z at spawn like the ground it lies on — and it means the
+/// projection flip and the map-swap rebuild sweep paths up along with
+/// everything else this module owns, without either of them having to know
+/// paths exist.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct IsoPath(pub TileCoord);
+
+/// z above the tile's own diamond, and far below the next layer.
+///
+/// A path is not a *thing on* the ground, it is the ground being different, so
+/// it sits as close to the terrain as a distinct sprite can: one thousandth,
+/// against the 0.015 that separates one layer from the next.
+const PATH_LIFT: f32 = 0.001;
+
+/// The path sprite a tile should draw, if it should draw one.
+fn path_sprite(map: &MapGrid, atlas: &Handle<Image>, coord: TileCoord, level: u8) -> Option<Sprite> {
+    if level == 0 {
+        return None;
+    }
+    let tile = map.get(coord)?;
+    if tile.water {
+        return None;
+    }
+    let shade = shade_for(tile.kind, tile.height);
+    // Ground with no grass on it has nothing to wear (brief 16 §3.2).
+    path_tones(material_of(tile.kind), shade)?;
+    Some(Sprite {
+        image: atlas.clone(),
+        rect: Some(path_rect(shade, level, path_variant_for(coord))),
+        ..default()
+    })
+}
+
+fn path_transform(coord: TileCoord) -> Transform {
+    let (sx, sy) = tile_to_world(coord);
+    Transform::from_xyz(sx, sy, depth_z(coord.x + coord.y, TERRAIN_LAYER) + PATH_LIFT)
+}
+
+/// Draw the paths the sim says are there, and nothing more.
+///
+/// **This is the system the whole quantisation exists for.** The sim publishes
+/// level transitions rather than wear, so on almost every frame of a living
+/// town `changes` is empty and this returns having done nothing at all — no
+/// query iteration, no lookup table, no allocation. A tile whose wear climbed
+/// from 700 to 701 costs exactly one branch.
+///
+/// Runs after [`rebuild_iso_terrain`], which despawns everything this module
+/// owns when the map itself moves; finding no path sprites is how this learns
+/// that it has to draw them all again.
+pub fn sync_iso_paths(
+    mut commands: Commands,
+    map: Res<MapGrid>,
+    atlas: Option<Res<IsoTerrainAtlas>>,
+    paths: Option<ResMut<PathWear>>,
+    existing: Query<(Entity, &IsoPath)>,
+) {
+    let _perf = crate::overlays::perf::scope("sync_iso_paths");
+    let (Some(atlas), Some(mut paths)) = (atlas, paths) else {
+        return;
+    };
+    let (changes, mut resync) = paths.drain_changes();
+
+    // Nothing drawn but something to draw: a flip into this view, or a map
+    // swap that took the paths with the terrain.
+    //
+    // Deliberately *not* keyed on `map.is_changed()`. Bevy change detection
+    // answers "did anybody write this resource", and the border slice's portal
+    // mirror writes `MapGrid` every frame — keying on it would despawn and
+    // respawn every path sprite in town, every frame, which is precisely the
+    // shape of the regression `chunk::TerrainDirty` carries scar tissue for. A
+    // terrain change that matters despawns this module's sprites through
+    // `rebuild_iso_terrain`, and an empty query is how that arrives here.
+    resync |= existing.is_empty() && paths.drawn_tiles().next().is_some();
+
+    if resync {
+        for (entity, _) in &existing {
+            commands.entity(entity).despawn();
+        }
+        let batch: Vec<(IsoTerrain, IsoPath, Sprite, Transform)> = paths
+            .drawn_tiles()
+            .filter_map(|(tile, level)| {
+                let sprite = path_sprite(&map, &atlas.0, tile, level)?;
+                Some((IsoTerrain, IsoPath(tile), sprite, path_transform(tile)))
+            })
+            .collect();
+        commands.spawn_batch(batch);
+        return;
+    }
+    if changes.is_empty() {
+        return;
+    }
+
+    // Only now, with something genuinely to do, is the lookup worth building.
+    let drawn: std::collections::HashMap<(i32, i32), Entity> = existing
+        .iter()
+        .map(|(entity, path)| ((path.0.x, path.0.y), entity))
+        .collect();
+
+    for change in changes {
+        let key = (change.tile.x, change.tile.y);
+        match (drawn.get(&key), path_sprite(&map, &atlas.0, change.tile, change.level)) {
+            // Grew, shrank, or simply changed step: re-point the atlas rect.
+            (Some(&entity), Some(sprite)) => {
+                commands.entity(entity).insert(sprite);
+            }
+            // Newly worn ground.
+            (None, Some(sprite)) => {
+                commands.spawn((
+                    IsoTerrain,
+                    IsoPath(change.tile),
+                    sprite,
+                    path_transform(change.tile),
+                ));
+            }
+            // Grassed back over, or ground that never draws a path at all.
+            (Some(&entity), None) => {
+                commands.entity(entity).despawn();
+            }
+            (None, None) => {}
+        }
+    }
+}
+
 /// Drop every diamond and cliff face — the flip out of isometric.
 pub fn despawn_iso_terrain(
     commands: &mut Commands,
@@ -662,6 +854,13 @@ mod tests {
                 }
                 paint_face(&mut c, material, shade, Side::West);
                 paint_face(&mut c, material, shade, Side::South);
+            }
+        }
+        for shade in 0..FILL_SHADES {
+            for level in 1..=PATH_LEVELS as u8 {
+                for variant in 0..PATH_VARIANTS {
+                    paint_path(&mut c, shade, level, variant);
+                }
             }
         }
         c
@@ -759,8 +958,10 @@ mod tests {
                     255,
                     "{side:?} face column {col} has no rim"
                 );
+                // The bottom of the *face band* — which is no longer the bottom
+                // of the atlas, now that the path diamonds sit below it.
                 assert_eq!(
-                    texel(&c, ox + col, ATLAS_H - 1)[3],
+                    texel(&c, ox + col, FACE_Y + FACE_H - 1)[3],
                     255,
                     "{side:?} face column {col} does not reach the bottom"
                 );
@@ -1072,6 +1273,15 @@ mod tests {
 
     /// Composite the map into an RGBA buffer, far row first.
     fn composite_iso(map: &MapGrid, atlas: &Canvas, view: (i32, i32, u32, u32)) -> Vec<u8> {
+        composite_iso_worn(map, atlas, &PathWear::default(), view)
+    }
+
+    fn composite_iso_worn(
+        map: &MapGrid,
+        atlas: &Canvas,
+        paths: &PathWear,
+        view: (i32, i32, u32, u32),
+    ) -> Vec<u8> {
         let (vx, vy, vw, vh) = view;
         // `BG0`, so the plinth reads against the same ground the game clears to.
         let bg = rgba(crate::palette::BG0);
@@ -1128,6 +1338,16 @@ mod tests {
                 sx - TOP_W as f32 / 2.0,
                 top,
             );
+            // The worn ground, straight over its own diamond — exactly what
+            // `sync_iso_paths` spawns at `PATH_LIFT` above the tile.
+            let level = paths.level_at(coord);
+            if level > 0 && !tile.water && path_tones(material, shade).is_some() {
+                blit(
+                    path_rect(shade, level, path_variant_for(coord)),
+                    sx - TOP_W as f32 / 2.0,
+                    top,
+                );
+            }
             for side in [Side::West, Side::South] {
                 let depth = face_depth(map, coord, side, floor).min(MAX_FACE);
                 if depth == 0 {
@@ -1401,6 +1621,364 @@ mod tests {
         }
         write_png(std::path::Path::new(path), out_w, out_h, &scaled).expect("write the screenshot");
         eprintln!("wrote {path}");
+    }
+
+    // ── Desire paths (brief 16 §3.4) ───────────────────────────────────────
+
+    /// A lane of worn tiles running east across the middle of a map, at every
+    /// wear level, so a picture of it shows the whole ladder at once.
+    fn worn_lane(map: &MapGrid) -> PathWear {
+        let mut paths = PathWear::new(map.width, map.height);
+        let y = map.height as i32 / 2;
+        for (i, x) in (4..map.width as i32 - 4).enumerate() {
+            let footfalls = match i % 9 {
+                0..=2 => 4,   // Faint
+                3..=5 => 10,  // Worn
+                _ => 40,      // Bare
+            };
+            for _ in 0..footfalls {
+                paths.add_footfall(TileCoord { x, y });
+            }
+        }
+        paths
+    }
+
+    /// Writes a picture of a worn lane in isometric.
+    ///
+    /// `cargo test -p rail_town --bin rail_town -- --ignored dump_iso_paths_screenshot --nocapture`
+    #[ignore = "writes a file; run it deliberately to look at the paths"]
+    #[test]
+    fn dump_iso_paths_screenshot() {
+        let _iso = iso();
+        let map = generate_map(64, 64, DEFAULT_MAP_SEED);
+        rail_map::set_iso_heights(&map);
+        let atlas = canvas();
+        let paths = worn_lane(&map);
+
+        let (cx, cy) = rail_map::map_center_world(map.width, map.height);
+        let (vw, vh) = (1920u32, 1080u32);
+        let view = (
+            (cx - vw as f32 / 2.0) as i32,
+            (-cy - vh as f32 / 2.0) as i32,
+            vw,
+            vh,
+        );
+        let pixels = composite_iso_worn(&map, &atlas, &paths, view);
+        assert!(pixels.chunks_exact(4).all(|p| p[3] == 255));
+
+        let path = std::path::Path::new("/tmp/rail_town_iso_paths.png");
+        write_png(path, vw, vh, &pixels).expect("write the screenshot");
+        eprintln!("wrote {}", path.display());
+
+        // A 3x nearest-neighbour crop of the lane, because the whole point of
+        // three wear steps is that they are three *different* steps, and at 1:1
+        // in a 1920-wide frame that is a judgement nobody can actually make.
+        let (zw, zh, zoom) = (480u32, 120u32, 3u32);
+        let (ox, oy) = (vw / 2 - zw / 2, vh / 2 - zh / 2);
+        let mut crop = vec![0u8; (zw * zoom * zh * zoom) as usize * 4];
+        for y in 0..zh * zoom {
+            for x in 0..zw * zoom {
+                let s = (((oy + y / zoom) * vw + ox + x / zoom) * 4) as usize;
+                let d = ((y * zw * zoom + x) * 4) as usize;
+                crop[d..d + 4].copy_from_slice(&pixels[s..s + 4]);
+            }
+        }
+        let zoomed = std::path::Path::new("/tmp/rail_town_iso_paths_zoom.png");
+        write_png(zoomed, zw * zoom, zh * zoom, &crop).expect("write the zoom");
+        eprintln!("wrote {}", zoomed.display());
+        rail_map::clear_iso_heights();
+    }
+
+    #[test]
+    fn a_bridge_deck_and_a_beach_never_draw_a_path_in_isometric() {
+        let _iso = iso();
+        let mut app = paths_app(24, 24);
+        {
+            let mut map = app.world_mut().resource_mut::<MapGrid>();
+            for (x, kind, height, water) in [
+                (4i32, TerrainKind::Water, -4i8, true),
+                (8, TerrainKind::Beach, 0, false),
+                (12, TerrainKind::Mountain, 16, false),
+            ] {
+                *map.get_mut(TileCoord { x, y: 6 }).unwrap() = Tile {
+                    height,
+                    water,
+                    kind,
+                };
+            }
+        }
+        // Walk all of them to saturation, and one ordinary grass tile too.
+        for x in [4i32, 8, 12, 16] {
+            wear(&mut app, TileCoord { x, y: 6 }, 40);
+        }
+        app.update();
+        assert_eq!(
+            path_sprites(&mut app),
+            vec![TileCoord { x: 16, y: 6 }],
+            "only ground with grass on it may draw a path"
+        );
+    }
+
+    /// The same lane, measured rather than looked at.
+    #[test]
+    fn a_worn_lane_changes_the_picture_in_isometric() {
+        let _iso = iso();
+        let map = flat_grass(24, 24);
+        rail_map::set_iso_heights(&map);
+        let atlas = canvas();
+        let (cx, cy) = rail_map::map_center_world(map.width, map.height);
+        let (vw, vh) = (900u32, 600u32);
+        let view = (
+            (cx - vw as f32 / 2.0) as i32,
+            (-cy - vh as f32 / 2.0) as i32,
+            vw,
+            vh,
+        );
+
+        let clean = composite_iso(&map, &atlas, view);
+        let worn = composite_iso_worn(&map, &atlas, &worn_lane(&map), view);
+        let changed = clean
+            .chunks_exact(4)
+            .zip(worn.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 2_000, "the lane barely marked the ground: {changed}");
+
+        // Every texel the lane changed is a path colour and nothing else.
+        let allowed: std::collections::HashSet<[u8; 4]> = (0..FILL_SHADES)
+            .flat_map(|s| [rgba(PATH_FILL[s]), rgba(PATH_DUST[s])])
+            .collect();
+        for (a, b) in clean.chunks_exact(4).zip(worn.chunks_exact(4)) {
+            if a == b {
+                continue;
+            }
+            let px = [b[0], b[1], b[2], b[3]];
+            assert!(allowed.contains(&px), "a path drew off its own ramp: {px:?}");
+        }
+        rail_map::clear_iso_heights();
+    }
+
+    /// Flat plains, so every tile is band-0 grass and can take a path. A
+    /// generated map would put water and mountain under the test's fixtures.
+    fn flat_grass(w: u32, h: u32) -> MapGrid {
+        let mut map = MapGrid::empty(w, h, 1);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                *map.get_mut(TileCoord { x, y }).unwrap() = Tile {
+                    height: 0,
+                    water: false,
+                    kind: TerrainKind::Plains,
+                };
+            }
+        }
+        map
+    }
+
+    fn paths_app(width: u32, height: u32) -> App {
+        let mut app = terrain_app(width, height);
+        app.insert_resource(flat_grass(width, height));
+        // Sized, not defaulted: a `PathWear` of no size records no footfalls,
+        // and a test that never wears anything passes for the wrong reason.
+        app.insert_resource(PathWear::new(width, height));
+        app.add_systems(Update, sync_iso_paths.after(rebuild_iso_terrain));
+        app
+    }
+
+    fn path_sprites(app: &mut App) -> Vec<TileCoord> {
+        let mut tiles: Vec<TileCoord> = app
+            .world_mut()
+            .query::<&IsoPath>()
+            .iter(app.world())
+            .map(|p| p.0)
+            .collect();
+        tiles.sort_by_key(|t| (t.y, t.x));
+        tiles
+    }
+
+    fn wear(app: &mut App, tile: TileCoord, footfalls: u32) {
+        let mut paths = app.world_mut().resource_mut::<PathWear>();
+        let before = paths.wear_at(tile);
+        for _ in 0..footfalls {
+            paths.add_footfall(tile);
+        }
+        assert!(
+            paths.wear_at(tile) > before,
+            "the fixture recorded no wear at {tile:?} — is the map sized?"
+        );
+    }
+
+    #[test]
+    fn a_worn_tile_gets_a_sprite_and_a_clean_one_does_not() {
+        let _iso = iso();
+        let mut app = paths_app(32, 32);
+        app.update();
+        assert!(path_sprites(&mut app).is_empty(), "clean ground drew a path");
+
+        // Under the threshold: still nothing.
+        let tile = TileCoord { x: 6, y: 6 };
+        wear(&mut app, tile, 3);
+        app.update();
+        assert!(path_sprites(&mut app).is_empty(), "sub-threshold wear drew");
+
+        // Over it: exactly one sprite, on that tile.
+        wear(&mut app, tile, 1);
+        app.update();
+        assert_eq!(path_sprites(&mut app), vec![tile]);
+
+        // It draws from the shared atlas, so it batches with the ground.
+        let atlas = app.world().resource::<IsoTerrainAtlas>().0.clone();
+        let sprite = app
+            .world_mut()
+            .query_filtered::<&Sprite, With<IsoPath>>()
+            .iter(app.world())
+            .next()
+            .expect("a path sprite")
+            .clone();
+        assert_eq!(sprite.image, atlas);
+        let rect = sprite.rect.expect("a path samples one cell");
+        assert!(rect.min.y >= PATH_Y as f32, "a path sampled the ground's cells");
+    }
+
+    #[test]
+    fn deepening_a_path_repoints_the_same_sprite() {
+        let _iso = iso();
+        let mut app = paths_app(32, 32);
+        let tile = TileCoord { x: 9, y: 9 };
+        wear(&mut app, tile, 4);
+        app.update();
+        let faint = app
+            .world_mut()
+            .query_filtered::<&Sprite, With<IsoPath>>()
+            .iter(app.world())
+            .next()
+            .expect("a path sprite")
+            .rect;
+
+        wear(&mut app, tile, 6);
+        app.update();
+        let sprites: Vec<Rect> = app
+            .world_mut()
+            .query_filtered::<&Sprite, With<IsoPath>>()
+            .iter(app.world())
+            .filter_map(|s| s.rect)
+            .collect();
+        assert_eq!(sprites.len(), 1, "a deeper path spawned a second sprite");
+        assert_ne!(Some(sprites[0]), faint, "the sprite kept its old art");
+    }
+
+    #[test]
+    fn ground_that_grasses_over_loses_its_sprite() {
+        let _iso = iso();
+        let mut app = paths_app(32, 32);
+        let tile = TileCoord { x: 3, y: 11 };
+        wear(&mut app, tile, 4);
+        app.update();
+        assert_eq!(path_sprites(&mut app), vec![tile]);
+
+        // Regrow it all the way back to clean ground.
+        {
+            let mut paths = app.world_mut().resource_mut::<PathWear>();
+            for _ in 0..400 {
+                paths.regrow();
+            }
+            assert_eq!(paths.level_at(tile), 0);
+        }
+        app.update();
+        assert!(path_sprites(&mut app).is_empty(), "the path outlived its wear");
+    }
+
+    /// The budget: wear that crosses no threshold must not touch a sprite.
+    #[test]
+    fn wear_that_changes_no_level_spawns_nothing() {
+        let _iso = iso();
+        let mut app = paths_app(32, 32);
+        app.update();
+
+        for _ in 0..3 {
+            for y in 0..10i32 {
+                for x in 0..10i32 {
+                    wear(&mut app, TileCoord { x, y }, 1);
+                }
+            }
+        }
+        for _ in 0..8 {
+            app.update();
+            assert!(
+                path_sprites(&mut app).is_empty(),
+                "sub-threshold wear drew a path"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resync_redraws_every_path() {
+        let _iso = iso();
+        let mut app = paths_app(32, 32);
+        let tiles = [TileCoord { x: 2, y: 2 }, TileCoord { x: 5, y: 7 }];
+        for tile in tiles {
+            wear(&mut app, tile, 4);
+        }
+        app.update();
+        assert_eq!(path_sprites(&mut app), vec![tiles[0], tiles[1]]);
+
+        // What a save-load looks like from here.
+        app.world_mut().resource_mut::<PathWear>().request_resync();
+        app.update();
+        assert_eq!(path_sprites(&mut app), vec![tiles[0], tiles[1]]);
+        assert!(!app.world().resource::<PathWear>().needs_resync());
+    }
+
+    #[test]
+    fn every_path_cell_of_the_atlas_is_painted() {
+        let c = canvas();
+        for shade in 0..FILL_SHADES {
+            for level in 1..=PATH_LEVELS as u8 {
+                for variant in 0..PATH_VARIANTS {
+                    let r = path_rect(shade, level, variant);
+                    // The centre of a diamond is the densest part of the mask,
+                    // so at every level something is drawn there.
+                    let mut painted = 0;
+                    for dy in 0..8u32 {
+                        for dx in 0..16u32 {
+                            let px = texel(
+                                &c,
+                                r.min.x as u32 + TOP_W / 2 - 8 + dx,
+                                r.min.y as u32 + TOP_H / 2 - 4 + dy,
+                            );
+                            if px[3] != 0 {
+                                painted += 1;
+                            }
+                        }
+                    }
+                    assert!(
+                        painted > 8,
+                        "shade {shade} level {level} variant {variant} is blank"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A path is a mask over the ground, never a second opaque diamond.
+    #[test]
+    fn a_path_cell_leaves_the_grass_it_has_not_worn() {
+        let c = canvas();
+        for shade in 0..FILL_SHADES {
+            let r = path_rect(shade, 1, 0);
+            let mut clear = 0;
+            for row in 0..TOP_H {
+                let half = diamond_half(row);
+                for x in (TOP_W / 2 - half)..(TOP_W / 2 + half) {
+                    if texel(&c, r.min.x as u32 + x, r.min.y as u32 + row)[3] == 0 {
+                        clear += 1;
+                    }
+                }
+            }
+            assert!(
+                clear > 300,
+                "a faint path at shade {shade} left only {clear} texels of grass"
+            );
+        }
     }
 
     #[test]

@@ -213,7 +213,12 @@ pub fn apply_camera_focus(
 /// second route to the same verb (03 §10.3, and the Controls tab says so), and
 /// a player who rebinds `WASD` still expects them to work.
 pub fn camera_pan(
-    time: Res<Time>,
+    // Real time, not the default `Time`: in `Update` that alias is the
+    // *virtual* clock, which `sim_bridge` scales with the game speed — so
+    // panning ran faster at 2x/3x and froze entirely on pause, and the camera
+    // is the player's eye, not part of the world. `camera_zoom` below already
+    // reads the real clock for the same reason.
+    time: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     mut q: Query<&mut Transform, With<MapCamera>>,

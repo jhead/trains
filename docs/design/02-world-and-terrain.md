@@ -84,7 +84,7 @@ Flat cost per tile is the single change that most completely disables the routin
 | Gentle slope, or cross-contour on plains | 1.5× | mild |
 | Hills | 3× | noticeable |
 | Steep hillside, cut-and-fill | 6× | you think about it |
-| Bridge, per tile, scaling with span | 8–56× | a commitment, then a project |
+| Bridge, per tile, scaling with span | 8–90× | a commitment, then a project |
 | Tunnel, per tile | 15× | a project |
 | Cliff face, mountain | — | refused |
 
@@ -106,7 +106,7 @@ Tight curves slow trains meaningfully. A straight run is fast; a wiggly cheap ro
 
 A short bridge is routine. A long bridge is a major expense with a span limit, and beyond that limit the answer is to go around, or to find the narrows. Crossing points should be scarce enough to be worth scouting and plentiful enough that no map has exactly one answer.
 
-Playtest (2026-08-04): *"if we're going to have rivers, we must be able to build bridges."* Binding: any river the generator draws must be bridgeable **somewhere the player is standing** — the span limit covers ordinary trunk widths (spans up to six, priced steeply: 8/14/20× for one to three, 30/42/56× for four to six), with narrows remaining the cheap crossing worth scouting. A watercourse the limit refuses everywhere is a wall wearing a river costume, and walls are rock's job.
+Playtest (2026-08-04): *"if we're going to have rivers, we must be able to build bridges."* Binding: any river the generator draws must be bridgeable **somewhere the player is standing** — the span limit covers ordinary trunk widths and then some (spans up to eight: a cheap tier of 8/14/20× for one to three, then 30/42/56/72/90× for four to eight), with narrows remaining the cheap crossing worth scouting. The premium rungs answer the second playtest round's ask for genuinely large spans — a full eight-tile crossing runs 720× base, a project the railway saves toward, not an opening move. A watercourse the limit refuses everywhere is a wall wearing a river costume, and walls are rock's job.
 
 ---
 

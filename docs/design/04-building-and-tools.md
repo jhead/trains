@@ -84,7 +84,7 @@ Every rejection is communicated in three channels at once — visual on the offe
 | Condition | Ghost | Reason chip |
 | --- | --- | --- |
 | Too steep | Offending tiles `warn`, cliff face highlighted | *Too steep — 8% exceeds 4% limit* |
-| Water too wide | Span drawn `warn` with the width called out | *Span too wide — 7 tiles, max 4* |
+| Water too wide | Span drawn `warn` with the width called out | *Span too wide — 9 tiles, max 8* |
 | Curve too tight | The tight corner pulses `warn` | *Curve too tight here* |
 | Occupied | Existing track flashes | *Track already here* |
 | Can't afford | Whole ghost `warn`, cost in `warn` | *Short by $240* |

@@ -94,7 +94,7 @@ impl TownTalkVerbosity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplaySettings {
     pub window_mode: WindowModeChoice,
-    /// Integer UI scale, `1`–`3`, or `0` for [`UI_SCALE_AUTO`].
+    /// Integer UI scale, `1`–[`UI_SCALE_MAX`], or `0` for [`UI_SCALE_AUTO`].
     ///
     /// **Never fractional** (design 03 §2). Every metric in the kit is a whole
     /// number of texels, so a whole-number scale keeps every border, gap and
@@ -114,8 +114,13 @@ pub struct DisplaySettings {
     /// either way, and flipping it mid-session is a presentation rebuild and
     /// nothing else (`map::projection`). It lives here because the settings file
     /// is a flat key-value document with no schema — an absent key reads as the
-    /// default, so an old profile opens top-down and an older build ignores the
-    /// key entirely. Nothing about it reaches a save.
+    /// default, and an older build ignores the key entirely. Nothing about it
+    /// reaches a save.
+    ///
+    /// **Defaults to isometric** since the owner's verdict on the toggle ("all
+    /// in on iso mode... that's where I want to focus build effort"): the
+    /// primary view is the one a new player should meet first, and top-down is
+    /// one keypress away. A profile that explicitly stored `false` keeps it.
     pub isometric: bool,
     pub vsync: bool,
     /// `0` means uncapped.
@@ -161,7 +166,7 @@ impl Default for DisplaySettings {
             window_mode: WindowModeChoice::Windowed,
             ui_scale: UI_SCALE_AUTO,
             world_zoom_default: 2,
-            isometric: false,
+            isometric: true,
             vsync: true,
             frame_cap: 0,
             tile_grid: false,

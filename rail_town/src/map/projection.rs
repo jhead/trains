@@ -401,7 +401,15 @@ mod tests {
         .init_resource::<rail_sim::LineRegistry>()
         .init_resource::<rail_sim::DemandSpawner>()
         .init_resource::<PendingWorld>()
-        .insert_resource(Settings::default())
+        .insert_resource({
+            // These tests assert *transitions*, so they pin their own starting
+            // view instead of inheriting the shipping default — which is a
+            // product decision (isometric, since the owner went all-in) and
+            // has already flipped once without any transition changing.
+            let mut settings = Settings::default();
+            settings.display.isometric = false;
+            settings
+        })
         .add_message::<rail_sim::TrackEdit>()
         .add_message::<rail_sim::StationEdit>()
         .add_plugins(super::super::MapPlugin {
@@ -825,6 +833,9 @@ mod tests {
     fn everything_standing_on_the_ground_moves_with_the_ground() {
         let _guard = crate::map::tests::ProjectionGuard::new(MapProjection::TopDown);
         let mut app = game_app(7_707);
+        // Pin the starting view: the shipping default is isometric now, and a
+        // transition test that inherits it would measure a no-op flip.
+        set_iso(&mut app, false);
         settle(&mut app);
 
         let flat = anchored(&mut app);

@@ -356,13 +356,13 @@ pub struct VoiceRender {
     next_event: u32,
     ctl: u32,
 
-    /// The composed piece and its plucked strings — only for
-    /// [`VoiceKind::Music`].
+    /// The world's four composed pieces and the voices that play them — only
+    /// for [`VoiceKind::Music`].
     ///
-    /// Boxed and optional so the six ambience beds do not each carry twelve
-    /// unused delay lines. The allocation happens in [`Decodable::decoder`],
-    /// which `bevy_audio` calls from the ECS when the sink is created, never on
-    /// the audio callback.
+    /// Boxed and optional so the seven ambience beds do not each carry a bank
+    /// of unused oscillators and delay lines. The composing and the allocation
+    /// both happen in [`Decodable::decoder`], which `bevy_audio` calls from the
+    /// ECS when the sink is created, never on the audio callback.
     score: Option<Box<super::score::Score>>,
     /// The cue number the score is following, read every control block.
     cue: u32,
@@ -761,17 +761,17 @@ impl VoiceRender {
         self.out_lp.lp(dry, pole_coeff(cut, SR))
     }
 
-    /// The score. All of the composition and all of the plucked-string
-    /// synthesis live in [`super::score`]; this is only the wiring.
+    /// The score. All of the composition and all of the synthesis live in
+    /// [`super::score`]; this is only the wiring.
     ///
     /// The parameter mapping, once, so both sides can be read against it:
     ///
     /// | Control | Meaning for the score |
     /// | --- | --- |
-    /// | `cue` | which cue is playing; a change restarts the piece |
+    /// | `cue` | which cue is playing; a change starts the *next* piece at bar one |
     /// | `tone` | warmth — how the network is doing |
     /// | `density` | how much of the composition survives the thinning |
-    /// | `color` | the dusk variant, `0` day and `1` evening |
+    /// | `color` | the dusk reading, `0` day and `1` evening |
     ///
     /// A slow breath goes on top. It is a tenth of a decibel and it is there
     /// for the same reason a real player is never quite steady.
@@ -1026,11 +1026,12 @@ mod tests {
     }
 
     #[test]
-    fn the_score_is_plucked_but_never_percussive() {
-        // A pluck is allowed an attack — that is what makes it a string rather
-        // than a pad — but the *envelope* must never arrive at once. Measured
-        // over 10 ms windows, which is what the ear integrates a transient
-        // over; the raw sample slope of a 440 Hz partial says nothing.
+    fn the_score_is_struck_but_never_percussive() {
+        // A struck note is allowed an attack — that is what makes the melody an
+        // instrument rather than a pad — but the *envelope* must never arrive
+        // at once. Measured over 10 ms windows, which is what the ear
+        // integrates a transient over; the raw sample slope of a 440 Hz partial
+        // says nothing.
         let voice = LiveVoice::new(VoiceKind::Music, 4);
         full(&voice.params);
         let mut render = voice.decoder();

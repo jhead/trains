@@ -6,22 +6,25 @@
 //! ambience carries the gaps, which is the point — silence is a texture, not a
 //! bug, and a score you notice arriving is a score you will resent by hour two.
 //!
-//! # Every cue opens with the theme
+//! # Every cue opens at bar one, and no two cues in a row are the same piece
 //!
-//! The score is a fixed four-and-a-half minute composition. If the generator ran
-//! free underneath the envelope, each cue would fade in wherever the piece
-//! happened to be, and the piece would never be recognised. So the director
-//! numbers its cues and writes the number to
+//! A world is composed as four short pieces, each with its own key, motif and
+//! progression. If the generator ran free underneath the envelope, each cue
+//! would fade in wherever it happened to be. So the director numbers its cues
+//! and writes the number to
 //! [`VoiceParams::set_cue`](super::voice::VoiceParams::set_cue); the audio
-//! thread treats a change as "start at bar one" and a zero as "stop, and cost
-//! nothing until asked again". A player therefore hears the same opening phrase
-//! every time the music comes back, which is the whole of recognisability.
+//! thread reads a change as "start the next piece from bar one" and a zero as
+//! "stop, and cost nothing until asked again". The cue number is also what
+//! selects the piece -- [`Score::piece_for`](super::score::Score::piece_for)
+//! rotates through the four -- so the music always begins somewhere a listener
+//! can follow, and never begins the same way twice running. The playtest note
+//! that started this was "it's really repetitive"; the counter is the fix.
 //!
 //! # The seed
 //!
-//! The map's own seed, so a world has its own tune and always the same one.
-//! Change the map, and the next silence is used to rebuild the voice around the
-//! new seed. Nothing is ever re-seeded while a cue is audible.
+//! The map's own seed, so a world has its own four tunes and always the same
+//! four. Change the map, and the next silence is used to rebuild the voice
+//! around the new seed. Nothing is ever re-seeded while a cue is audible.
 //!
 //! # Context
 //!
@@ -203,14 +206,18 @@ pub fn drive_music(
                 let dusk = f32::from(tod.phase == DayPhase::Dusk);
                 let cue = director.cue;
                 if let Some(voice) = director.voice.as_ref() {
-                    // Warmth: brighter strings and a more open instrument when
-                    // the network is doing well.
+                    // Warmth: a more open bell and a brighter pad when the
+                    // network is doing well.
                     voice.params.set_tone(0.30 + 0.60 * thriving);
                     // Density: how much of the composition survives. A thin town
-                    // gets the bass, the chord changes and the tune; a thriving
-                    // one gets the inner voices too.
-                    voice.params.set_density(0.50 + 0.45 * thriving);
-                    // The dusk piece: the same music an octave lower and darker.
+                    // gets the pad, the downbeat and the tune; a thriving one
+                    // gets the walking bass and the plucked arpeggio too. The
+                    // range reaches low enough that the thinning is actually
+                    // audible rather than theoretical.
+                    voice.params.set_density(0.38 + 0.57 * thriving);
+                    // The dusk reading: the same music, softer and darker. Not
+                    // lower - the octave drop this used to do is most of what
+                    // made the old score read as gloom.
                     voice.params.set_color(dusk);
                     voice.params.set_depth(0.5);
                     voice.params.set_cue(cue);

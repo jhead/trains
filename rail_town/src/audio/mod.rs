@@ -45,7 +45,7 @@
 //! | [`trains`] | §3.2 the sounds the network makes |
 //! | [`ui_sound`] | §5 interface, and the aggregated money chime |
 //! | [`music`] | §4 when the score plays |
-//! | [`score`] | §4 what it plays — the composition and the strings |
+//! | [`score`] | §4 what it plays — the composition and the instruments |
 //!
 //! # Wiring
 //!

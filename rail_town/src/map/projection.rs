@@ -926,6 +926,102 @@ mod tests {
         );
     }
 
+    /// A sprite's place in the *world* cannot depend on how the world is being
+    /// looked at.
+    ///
+    /// # Why the sweep above was not enough
+    ///
+    /// `no_world_sprite_stands_off_the_map` asks whether a sprite lands on the
+    /// map at all, which catches a projection written out by hand — those miss
+    /// by seventeen tiles. It cannot catch a sprite that is misplaced *within*
+    /// its own tile, and that is a whole second half of the same class: an
+    /// offset computed on the ground and then added to an already-projected
+    /// position walks along the screen's axes instead of the ground's, which in
+    /// isometric is 45 degrees and a factor of two away from where it was meant
+    /// to go. `atmosphere::water`'s foam lips did exactly that — inset out to a
+    /// tile's northern edge, drawn on its north-east corner — and every one of
+    /// them sat on a legal tile, so the sweep passed while the sea was visibly
+    /// wrong.
+    ///
+    /// The property that catches both, and needs no list of types: unproject
+    /// each sprite back onto the ground plane in one view, do it again in the
+    /// other, and ask whether it came back to the same **tile**. Anything that
+    /// caches a projected position, or adds a ground distance after projecting,
+    /// answers with two different pieces of ground.
+    ///
+    /// The tolerance is a tile, and it is there for the sprites that genuinely
+    /// carry a *screen*-space lift — a chimney plume standing above its roof, a
+    /// glint's shift of a texel or two — because a lift up the screen really is
+    /// a different piece of ground in the two views. Those are half a tile at
+    /// most. Nothing legitimate is further out, and the bug this is written for
+    /// was five tiles and more.
+    #[test]
+    fn no_world_sprite_changes_which_ground_it_stands_on_when_the_view_flips() {
+        let _guard = crate::map::tests::ProjectionGuard::new(MapProjection::TopDown);
+        let mut app = game_app(5_150);
+        set_iso(&mut app, false);
+        settle(&mut app);
+
+        /// Every root world sprite, keyed on the entity so the two views can be
+        /// compared sprite by sprite, as the tile its position resolves to.
+        fn ground_tiles(app: &mut App) -> BTreeMap<Entity, TileCoord> {
+            app.world_mut()
+                .query_filtered::<(Entity, &Transform), (With<Sprite>, Without<ChildOf>)>()
+                .iter(app.world())
+                .map(|(entity, tf)| {
+                    let at = tf.translation;
+                    (entity, rail_map::world_to_tile(at.x, at.y))
+                })
+                .collect()
+        }
+
+        let flat = ground_tiles(&mut app);
+        assert!(flat.len() > 100, "the sweep saw almost nothing: {}", flat.len());
+
+        set_iso(&mut app, true);
+        let iso = ground_tiles(&mut app);
+        // The population is the one the sweep above already names: root world
+        // sprites the depth sorter adopted. The day tint rides the camera and
+        // the Map View plate is a drawing in tile order rather than a picture of
+        // the world, so neither is *on* the ground and neither is ever adopted.
+        let in_the_world: std::collections::HashSet<Entity> = app
+            .world_mut()
+            .query_filtered::<Entity, (With<Sprite>, With<IsoLayer>, Without<ChildOf>)>()
+            .iter(app.world())
+            .collect();
+
+        // Terrain is re-spawned by the flip and the sorter hands sprites back,
+        // so compare only the entities that lived through it — which is exactly
+        // the population this is about: the ones placed once and left alone.
+        let mut checked = 0;
+        let mut strays = Vec::new();
+        for (entity, before) in &flat {
+            let Some(after) = iso.get(entity) else {
+                continue;
+            };
+            if !in_the_world.contains(entity) {
+                continue;
+            }
+            checked += 1;
+            let drift = (after.x - before.x).abs().max((after.y - before.y).abs());
+            if drift > 1 {
+                strays.push((*entity, *before, *after));
+            }
+        }
+        assert!(
+            checked > 20,
+            "almost nothing survived the flip to check: {checked}"
+        );
+        assert!(
+            strays.is_empty(),
+            "{} of {checked} world sprites stand on different ground depending on \
+             the view; they are placed once and the projection is not reaching \
+             them (entity, top-down tile, iso tile): {:?}",
+            strays.len(),
+            &strays[..strays.len().min(5)]
+        );
+    }
+
     /// The other half: a thing that appears *while* isometric is on has to be
     /// right when it appears, not one flip later. A spawner that writes ground
     /// texels into a transform passes the flip test and fails this one.
@@ -1045,7 +1141,14 @@ mod tests {
         .add_plugins(crate::track::TrackPlugin)
         // The town is where the anchored sprites come from: `seed_rural` plants
         // the countryside, and the lot phase machine grows houses on it.
-        .add_plugins(crate::town::TownPresentationPlugin);
+        .add_plugins(crate::town::TownPresentationPlugin)
+        // ... and the atmosphere is where the rest of them come from: water
+        // glints, foam lips and chimney plumes are all placed once and left
+        // alone, which is the population the sweeps below are about. Leaving
+        // this out is how a misprojected foam lip shipped past a test whose
+        // whole claim is that it needs no list of types — the class was covered
+        // and the plugin that grows the class was not registered.
+        .add_plugins(crate::atmosphere::AtmospherePlugin);
         app.insert_resource(Settings::default());
         app
     }

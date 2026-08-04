@@ -80,15 +80,45 @@ pub const TICKS_PER_REAL_MINUTE: i64 = 64 * 60;
 ///
 /// Sized against what track *earns*, not what it cost to lay. The opening
 /// beat — twenty-odd tiles round a corner, two stops ten apart, one transit —
-/// grosses about `$1,070` a minute and spends `$210` of it holding its own
+/// grosses about `$1,240` a minute and spends `$210` of it holding its own
 /// ground. A straight sixteen-tile line between stops fifteen apart does much
-/// better, `$2,520` against the same `$160`, which is the super-linear fare
+/// better, `$2,770` against the same `$160`, which is the super-linear fare
 /// rewarding a better-shaped railway rather than a cheaper one.
 ///
 /// The same rate makes two hundred tiles carrying nothing cost `$2,000` a
-/// minute — against a healthy four-stop network's `$829` of margin, more than
+/// minute — against a healthy four-stop network's `$944` of margin, more than
 /// twice over. That is design 08 §3.1 working: *"track that isn't carrying
 /// enough starts costing more than it earns."*
+///
+/// # Track is the most aggressively maintained asset in the game, deliberately
+///
+/// Every asset has a build price and an upkeep, and the ratio between them is
+/// how many minutes of holding it costs what it cost to buy:
+///
+/// | asset | build | upkeep | re-buys itself in |
+/// | --- | --- | --- | --- |
+/// | ground tile | $100 | $10/min | **10 min** |
+/// | bridged tile | $800 | $40/min | **20 min** |
+/// | transit train | $3,000 | $140/min | 21 min |
+/// | halt | $400 | $10/min | 40 min |
+/// | station | $1,200 | $30/min | 40 min |
+/// | terminus | $2,600 | $55/min | 47 min |
+/// | interchange | $4,000 | $80/min | 50 min |
+///
+/// Track sits at two to five times the pressure of a platform, and that gap has
+/// been checked rather than inherited. It is the right way round: track is the
+/// thing a player can over-build fastest and most cheaply, so it is the thing
+/// whose *holding* has to hurt — design 08 §3.1's trap is specifically about
+/// track that stops carrying enough. Platforms are the opposite decision:
+/// expensive to commit to, cheap to keep, so a stop is a considered purchase
+/// rather than a standing threat. Flattening the two would take the teeth out of
+/// overextension and put them into a bill the player cannot act on.
+///
+/// A trim was considered when the compact three-stop line read as a treadmill
+/// and rejected on the measurement: that line was running at 2.1x its costs and
+/// failing on *payback*, so the defect was on the income side of the ledger and
+/// the fix belonged there. See
+/// [`PASSENGER_FARE_BOARDING_TILES`](super::PASSENGER_FARE_BOARDING_TILES).
 ///
 /// Do not tune this by eye. `rail_sim/tests/economy_arc.rs` measures both
 /// networks against a running sim and will say which way it moved.

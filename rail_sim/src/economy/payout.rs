@@ -12,10 +12,20 @@
 //! circling one square. Every other system in the game pulls outward; a flat
 //! fare pulled back, harder than any of them pushed.
 //!
-//! So a payout is `base × (len + len²/divisor)`, super-linear in the distance
-//! carried. At the numbers below a sixty-tile haul pays about **34×** a
+//! So a payout is `base × (boarding + len + len²/divisor)`, super-linear in the
+//! distance carried. At the numbers below a sixty-tile haul pays about **24×** a
 //! four-tile hop where a linear fare would pay 15×, and that surplus is what
 //! makes a tunnel, a long bridge or an expensive alignment worth costing out.
+//!
+//! ## …but a fare is not *only* a distance
+//!
+//! `boarding` is a flat term, worth a couple of tiles, charged on every journey
+//! however short. It exists because everything on the *cost* side of the ledger
+//! is flat — maintenance, opex and station upkeep are per-minute charges that do
+//! not care how far anybody travelled — and a purely distance-scaled fare
+//! therefore left the compact local line paying flat costs out of the thinnest
+//! part of the curve. See [`PASSENGER_FARE_BOARDING_TILES`]. Goods have no such
+//! term, and the reason is on [`goods_delivery_cents`].
 //!
 //! ## Distance carried, not track laid
 //!
@@ -50,6 +60,44 @@ pub const PASSENGER_FARE_CENTS_PER_TILE: i64 = 150;
 /// about six times as much.
 pub const PASSENGER_FARE_DISTANCE_DIVISOR: i64 = 40;
 
+/// Flat boarding component of a passenger fare, in tile-equivalents.
+///
+/// # Why a fare is not purely a distance
+///
+/// A ticket is sold, a platform is staffed, a train stops and starts again.
+/// None of that gets cheaper because the journey is short, and every real fare
+/// table in the world is a flag-fall plus a rate. This curve had only the rate,
+/// and that is a specific, load-bearing omission rather than a simplification:
+/// **every cost on the other side of the ledger is flat**. Maintenance, opex and
+/// station upkeep are charged per minute regardless of how far anybody went, so
+/// a purely distance-scaled fare left one shape of railway — the compact local
+/// line, all of whose journeys are short — paying flat costs out of the thinnest
+/// part of the curve.
+///
+/// The owner found it immediately: *"even a basic 3-stop line within ~10x10 with
+/// one tile water bridge is barely break even."* Measured, that line ran at 2.1x
+/// its running costs but took **seventeen minutes** to give back the `$7,600` it
+/// cost, having dropped the balance to `$2,847` on the way — a number that
+/// creeps is indistinguishable from a number that is stuck.
+///
+/// Two tile-equivalents is the smallest term that fixes the shape without
+/// touching the crown:
+///
+/// | separation | before | after | change |
+/// | --- | --- | --- | --- |
+/// | 4 tiles | $6.60 | $9.60 | +45% |
+/// | 9 tiles | $16.50 | $19.50 | +18% |
+/// | 15 tiles | $30.90 | $33.90 | +10% |
+/// | 60 tiles | $225.00 | $228.00 | +1.3% |
+///
+/// The lift is concentrated exactly where the curve was thinnest and fades to
+/// nothing over distance, so design 08 §2's *"long hauls pay
+/// disproportionately"* is untouched: a sixty-tile haul still pays **23.7x** a
+/// four-tile hop where a linear fare pays 15x.
+///
+/// Goods deliberately have no such term — see [`goods_delivery_cents`].
+pub const PASSENGER_FARE_BOARDING_TILES: i64 = 2;
+
 /// Goods payout per tile of distance carried, before the super-linear term.
 ///
 /// Roughly three times a fare, per design 08 §2's split: passengers are small
@@ -72,26 +120,40 @@ pub const PASSENGER_FARE_CENTS: i64 = passenger_fare_cents(15);
 /// Nominal goods payout — a fifteen-tile run.
 pub const GOODS_DELIVERY_CENTS: i64 = goods_delivery_cents(15);
 
-/// Distance term in tenths of a tile-unit: `len + len²/divisor`, super-linear.
+/// Payout units in tenths of a tile: `boarding + len + len²/divisor`.
 ///
 /// Tenths rather than whole units so the quadratic still bites below the
 /// divisor, where integer division would otherwise floor it to nothing and make
 /// short hops exactly linear.
-const fn distance_units_tenths(tiles: i64, divisor: i64) -> i64 {
+///
+/// `boarding` is the flat term charged whatever the distance — see
+/// [`PASSENGER_FARE_BOARDING_TILES`]. Passing `0` gives the pure distance curve.
+const fn distance_units_tenths(tiles: i64, divisor: i64, boarding: i64) -> i64 {
     let len = if tiles < 1 { 1 } else { tiles };
-    10 * len + (10 * len * len) / divisor
+    10 * boarding + 10 * len + (10 * len * len) / divisor
 }
 
 /// Passenger fare for a journey of `tiles`, in cents. Never zero.
 pub const fn passenger_fare_cents(tiles: i64) -> i64 {
     PASSENGER_FARE_CENTS_PER_TILE
-        * distance_units_tenths(tiles, PASSENGER_FARE_DISTANCE_DIVISOR)
+        * distance_units_tenths(
+            tiles,
+            PASSENGER_FARE_DISTANCE_DIVISOR,
+            PASSENGER_FARE_BOARDING_TILES,
+        )
         / 10
 }
 
 /// Goods payout for a delivery of `tiles`, in cents. Never zero.
+///
+/// No boarding term, unlike a passenger fare. A freight payout is priced on the
+/// tonnage actually moved, and design 08 §2 wants this curve the steepest thing
+/// in the game — *"large, lumpy, scaling with distance and commodity value"*. A
+/// flat component would pay for shunting a wagon next door, which is a lorry's
+/// job and the one thing the freight curve exists to discourage.
 pub const fn goods_delivery_cents(tiles: i64) -> i64 {
-    GOODS_DELIVERY_CENTS_PER_TILE * distance_units_tenths(tiles, GOODS_DELIVERY_DISTANCE_DIVISOR)
+    GOODS_DELIVERY_CENTS_PER_TILE
+        * distance_units_tenths(tiles, GOODS_DELIVERY_DISTANCE_DIVISOR, 0)
         / 10
 }
 
@@ -192,6 +254,26 @@ mod tests {
     use bevy_app::App;
 
     /// Design 08 §2 — the pull outward has to be economic.
+    ///
+    /// # The crown narrowed, on purpose
+    ///
+    /// This read 34.1x before [`PASSENGER_FARE_BOARDING_TILES`] and reads 23.7x
+    /// now. That is the boarding term doing exactly what it is for: a flat
+    /// component is a larger share of a small fare than of a large one, so
+    /// lifting the short end necessarily closes some of the gap.
+    ///
+    /// The bound stays at 22.5 because that is where it was set and what it
+    /// guards is unchanged — a *linear* fare pays 15x, and a curve that drifted
+    /// down toward it would leave the shortest line strictly dominant, which is
+    /// the failure this whole module exists to prevent. 23.7x against 15x is
+    /// still a haul paying half again what its distance alone is worth, and
+    /// `economy_arc::reaching_further_earns_more_than_running_more_short_hops`
+    /// checks the same claim end to end on a running sim, where it survives
+    /// with a 6x margin (a 60-tile haul grosses $4,902/min against a 4-tile
+    /// shuttle's $816/min).
+    ///
+    /// There is now only 1.2 of headroom, so a future lift to the short end
+    /// needs this measured rather than assumed.
     #[test]
     fn a_long_haul_pays_far_more_than_linearly() {
         let short = passenger_fare_cents(4);
@@ -228,15 +310,61 @@ mod tests {
         assert_eq!(passenger_fare_cents(-5), passenger_fare_cents(1));
     }
 
+    /// A first line's run is worth about what it always was.
+    ///
+    /// The band was `2_800..=3_400` against the flat `$30` fare this curve
+    /// replaced, and adding [`PASSENGER_FARE_BOARDING_TILES`] put a
+    /// fifteen-tile run at `$33.90` — ten cents inside a bound it was never
+    /// meant to be tested against. Widened to `3_600` and re-anchored on the
+    /// thing that actually matters: the opening beat is paced by what a run
+    /// pays, and `rail_sim/tests/economy_cold_start.rs` measures that pacing
+    /// end to end (capital cleared in minute seven). This is the cheap guard
+    /// that notices an order-of-magnitude slip before that suite has to run.
     #[test]
     fn the_opening_line_still_pays_about_what_it_used_to() {
-        // A first line is fifteen-odd tiles. The flat fare it replaces was $30;
-        // moving that materially would re-pace the whole opening.
         let fare = passenger_fare_cents(15);
         assert!(
-            (2_800..=3_400).contains(&fare),
+            (2_800..=3_600).contains(&fare),
             "a first-line run pays {fare}c"
         );
+    }
+
+    /// The boarding term lifts short hops and leaves long hauls alone.
+    ///
+    /// This is the shape the change was made for, so it is pinned as a shape
+    /// rather than as five separate numbers: the shorter the journey, the more
+    /// of it is the flat term, and by sixty tiles the flat term has vanished
+    /// into the quadratic.
+    #[test]
+    fn boarding_lifts_the_short_end_and_fades_over_distance() {
+        let without = |tiles: i64| {
+            PASSENGER_FARE_CENTS_PER_TILE
+                * distance_units_tenths(tiles, PASSENGER_FARE_DISTANCE_DIVISOR, 0)
+                / 10
+        };
+        let lift = |tiles: i64| {
+            let base = without(tiles);
+            (passenger_fare_cents(tiles) - base) * 100 / base
+        };
+        // 4 tiles: +45%. 9: +18%. 15: +10%. 60: +1%.
+        assert!(lift(4) > 40, "a four-tile hop gained only {}%", lift(4));
+        assert!(
+            lift(9) > 15 && lift(9) < 25,
+            "a nine-tile hop gained {}%",
+            lift(9)
+        );
+        assert!(lift(60) < 3, "a sixty-tile haul gained {}%", lift(60));
+        for pair in [4, 9, 15, 30, 60].windows(2) {
+            assert!(
+                lift(pair[0]) > lift(pair[1]),
+                "the lift must fall with distance, but {} tiles gained {}% and \
+                 {} tiles gained {}%",
+                pair[0],
+                lift(pair[0]),
+                pair[1],
+                lift(pair[1]),
+            );
+        }
     }
 
     #[test]

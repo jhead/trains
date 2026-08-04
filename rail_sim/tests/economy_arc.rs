@@ -336,10 +336,16 @@ fn demolish_dead_track(app: &mut App, from_y: i32) {
 /// is a sanity bound, not a tuning target: the mechanism it was standing in for
 /// — track that carries nothing costing more than it earns — is measured
 /// directly by [`dead_track_sinks_the_network_and_pruning_brings_it_back`], and
-/// the share is *supposed* to vary with shape. Measured across this file after
-/// the fix: 44% for a four-tile shuttle, 38% for the opening beat, 14% here,
-/// 65% for the mid network, 16% for a sixty-tile haul. That spread is the
-/// design — reaching further keeps more of what it earns.
+/// the share is *supposed* to vary with shape.
+///
+/// A later change — the flat boarding component in
+/// `rail_sim::economy::payout::PASSENGER_FARE_BOARDING_TILES` — moved every one
+/// of these again, downward and hardest at the short end, which is what a
+/// boarding term is for. Currently measured across this file: **30%** for a
+/// four-tile shuttle (was 44%), **33%** for the opening beat, **13%** here,
+/// **62%** for the mid network, **16%** for a sixty-tile haul. That spread is
+/// the design — reaching further keeps more of what it earns — and the floor
+/// still has three points under the tightest reading.
 #[test]
 fn an_early_network_clears_its_upkeep_with_room_to_expand() {
     let mut app = early_network();
@@ -625,6 +631,13 @@ fn reaching_further_earns_more_than_running_more_short_hops() {
 }
 
 /// The fare curve itself, stated as the ratio design 08 §2 asks for.
+///
+/// 34.1x before the fare gained a flat boarding component, 23.7x after — a
+/// deliberate narrowing, since a flat term is a bigger share of a small fare
+/// than a large one. The bound is unmoved: it guards the distance from a
+/// *linear* 15x, and that distance is still comfortable. See
+/// `rail_sim::economy::payout::PASSENGER_FARE_BOARDING_TILES` for the table and
+/// the reason.
 #[test]
 fn a_long_haul_fare_is_far_more_than_linear() {
     let short = passenger_fare_cents(4);

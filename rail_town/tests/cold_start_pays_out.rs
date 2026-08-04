@@ -474,3 +474,193 @@ fn the_opening_line_and_a_train_fit_inside_the_starting_balance() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The second shape, on generated ground
+// ---------------------------------------------------------------------------
+
+/// Tiles between the stops of the compact branch — a ten-by-ten footprint.
+const BRANCH_LEG: i32 = 5;
+
+/// Build a compact local branch off the home anchor and measure it.
+///
+/// Three stops in a ten-by-ten box, an L round a corner: the home town the
+/// player already has, plus two halts they build. Hanging it off the existing
+/// anchor is what a player actually does — a local branch grows out of the line
+/// they have, not in empty country — and it means the capital measured here is
+/// the two halts and the track, which is the decision in question.
+fn play_a_local_branch(seed: u64) -> Option<Opening> {
+    let map = generate_map(DEFAULT_MAP_WIDTH, DEFAULT_MAP_HEIGHT, seed);
+    let hints = map.anchor_hints();
+    let terrain = terrain_from_map(&map);
+    let home = *hints.first()?;
+
+    // An L in some quadrant: out along one axis, then along the other.
+    const STEPS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    let mut app = App::new();
+    let mut legs = None;
+    'search: for (dx, dy) in STEPS {
+        for (ex, ey) in STEPS {
+            if dx.abs() == ex.abs() && dy.abs() == ey.abs() {
+                continue; // second leg must turn the corner
+            }
+            let mid = TileCoord {
+                x: home.x + dx * BRANCH_LEG,
+                y: home.y + dy * BRANCH_LEG,
+            };
+            let end = TileCoord {
+                x: mid.x + ex * BRANCH_LEG,
+                y: mid.y + ey * BRANCH_LEG,
+            };
+            // Far enough from the other opening anchor that the platforms are
+            // legal and the branch is its own line rather than a second track
+            // between the same two towns.
+            if hints
+                .iter()
+                .skip(1)
+                .any(|h| haul_tiles(*h, mid) < 4 || haul_tiles(*h, end) < 4)
+            {
+                continue;
+            }
+            let (Some(first), Some(second)) = (route(&terrain, home, mid), route(&terrain, mid, end))
+            else {
+                continue;
+            };
+            legs = Some((first, second));
+            break 'search;
+        }
+    }
+    let (first, second) = legs?;
+
+    app.add_plugins(SimPlugin);
+    app.insert_resource(rail_sim::AnchorSites(hints.clone()));
+    app.insert_resource(terrain);
+    app.insert_resource(Money::new(STARTING_CASH_CENTS));
+    app.update();
+
+    {
+        let mut buffer = app.world_mut().resource_mut::<CommandBuffer>();
+        for tiles in [&first, &second] {
+            buffer.push(CommandKind::AutoFillPath(AutoFillPath {
+                tiles: tiles.clone(),
+                layer: GROUND_LAYER,
+            }));
+        }
+    }
+    run(&mut app, 2);
+
+    let (mid, end) = (*first.last()?, *second.last()?);
+    {
+        let mut buffer = app.world_mut().resource_mut::<CommandBuffer>();
+        for tile in [mid, end] {
+            buffer.push(CommandKind::PlaceStation(rail_sim::PlaceStation::new(
+                tile,
+                GROUND_LAYER,
+                rail_sim::StationTier::Halt,
+                None,
+            )));
+        }
+        buffer.push(CommandKind::BuyTrain(BuyTrain {
+            kind: TrainKind::Transit,
+        }));
+    }
+    run(&mut app, 2);
+    // A branch whose halts were refused is not the shape under test.
+    for tile in [mid, end] {
+        app.world()
+            .resource::<StationRegistry>()
+            .at(tile, GROUND_LAYER)?;
+    }
+
+    let bought = app
+        .world()
+        .resource::<TrainYard>()
+        .unplaced()
+        .first()
+        .map(|(id, _)| *id)?;
+    let home_id = station_at(&app, home)?;
+    app.world_mut()
+        .resource_mut::<CommandBuffer>()
+        .push(CommandKind::PlaceTrain(PlaceTrain {
+            train: bought,
+            at_station: home_id,
+        }));
+    run(&mut app, 1);
+
+    let laid = app.world().resource::<TrackNetwork>().len();
+    let upkeep_rate = {
+        let network = app.world().resource::<TrackNetwork>();
+        let stations = app.world().resource::<StationRegistry>();
+        track_maintenance_total(network)
+            + station_maintenance_billed(network, stations)
+            + TRANSIT_PROFILE.opex_cents_per_real_min
+    };
+
+    let mut minutes = Vec::new();
+    let mut previous = totals(&app);
+    for _ in 1..=OBSERVED_MINUTES {
+        run(&mut app, REAL_MINUTE);
+        let now = totals(&app);
+        minutes.push((now.0 - previous.0, now.1 - previous.1));
+        previous = now;
+    }
+
+    Some(Opening {
+        seed,
+        tiles: laid,
+        separation: haul_tiles(home, end),
+        upkeep_rate,
+        minutes,
+        paid_back: 0,
+    })
+}
+
+/// A compact three-stop local line pays on real terrain too.
+///
+/// The pinned numbers for this shape live in
+/// `rail_sim/tests/economy_cold_start.rs`, where the footprint is controlled and
+/// only the economy varies. This is the spot-check that the shape survives
+/// contact with a generated map, where a three-stop line inside a ten-by-ten box
+/// has to find buildable ground for all three legs.
+///
+/// The line is hung off the opening pair's home anchor: a player who has built
+/// their first line and wants a local branch off it starts exactly here.
+#[test]
+fn a_compact_local_branch_pays_on_generated_ground() {
+    eprintln!(
+        "{:>8}  {:>6}  {:>11}  {:>12}  {:>10}  {:>9}",
+        "seed", "tiles", "upkeep/min", "income min 3", "net min 3", "ratio"
+    );
+    let mut measured = 0;
+    for seed in SEEDS {
+        let Some(o) = play_a_local_branch(seed) else {
+            eprintln!("{seed:>8}  (no room for a compact branch here)");
+            continue;
+        };
+        measured += 1;
+        let (income, upkeep) = o.minutes[2];
+        eprintln!(
+            "{:>8}  {:>6}  {:>11}  {:>12}  {:>10}  {:>9}",
+            o.seed,
+            o.tiles,
+            format!("${}", o.upkeep_rate / 100),
+            format!("${}", income / 100),
+            format!("${}", (income - upkeep) / 100),
+            format!("{:.2}x", income as f64 / upkeep.max(1) as f64),
+        );
+        assert!(
+            income * 2 >= upkeep * 3,
+            "seed {}: a compact local branch earned ${}/min against ${}/min of \
+             running costs ({:.2}x) — a local line should be a living",
+            o.seed,
+            income / 100,
+            upkeep / 100,
+            income as f64 / upkeep.max(1) as f64,
+        );
+    }
+    assert!(
+        measured >= SEEDS.len() - 1,
+        "only {measured} of {} seeds had room for a compact branch",
+        SEEDS.len()
+    );
+}

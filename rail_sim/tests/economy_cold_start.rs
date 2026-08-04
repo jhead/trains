@@ -32,8 +32,9 @@ use rail_sim::ids::{StationId, TileCoord};
 use rail_sim::{
     passenger_fare_cents, station_maintenance_billed, track_maintenance_total, AutoFillTrack,
     BuyTrain, CommandBuffer, CommandKind, IndustryRegistry, JobBoard, JobKind, Money, MoneyCategory,
-    MoneyLedger, PlaceTrain, SimPlugin, StationRegistry, StationService, TrackNetwork, TrackTerrain,
-    TrainKind, TrainYard, WorldAnchorsSeeded, GROUND_LAYER, STARTING_CASH_CENTS, TRANSIT_PROFILE,
+    MoneyLedger, PlaceStation, PlaceTrain, SimPlugin, StationRegistry, StationService, StationTier,
+    TrackNetwork, TrackTerrain, TrainKind, TrainYard, WorldAnchorsSeeded, GROUND_LAYER,
+    STARTING_CASH_CENTS, TRANSIT_PROFILE,
 };
 
 /// Ticks in one real minute, as a loop count.
@@ -63,6 +64,18 @@ const CORNER: TileCoord = TileCoord { x: 30, y: 20 };
 /// generated terrain across the standard seeds.
 fn flat_terrain(w: u32, h: u32) -> TrackTerrain {
     TrackTerrain::new(w, h, (0..w * h).map(|_| (false, 2i8)))
+}
+
+/// The same ground with a one-tile stream through `wet`.
+fn terrain_with_stream(w: u32, h: u32, wet: TileCoord) -> TrackTerrain {
+    TrackTerrain::new(
+        w,
+        h,
+        (0..w * h).map(|i| {
+            let (x, y) = ((i % w) as i32, (i / w) as i32);
+            ((x, y) == (wet.x, wet.y), 2i8)
+        }),
+    )
 }
 
 /// A world at tick zero: real terrain, real seeded anchors, real starting cash.
@@ -476,5 +489,233 @@ fn upkeep_is_flat_while_the_railway_is() {
         "upkeep held at ${}/min across fifteen minutes and {} new anchors",
         first / 100,
         stations_before - 3
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The second shape: a compact three-stop local line
+// ---------------------------------------------------------------------------
+//
+// The opening pair is the *first* thing a player builds. This is the second,
+// and the owner reported it as "barely break even" on a build that already had
+// the demand fixes above: three stops inside a ten-by-ten footprint, an L round
+// a corner, one tile of water bridged.
+//
+// It sits in the worst region of every curve at once, which is why it is worth
+// pinning:
+//
+//   * fares are super-linear in **endpoint** separation, so short hops are paid
+//     worst of all — and a compact line is nothing but short hops;
+//   * the fare pays endpoint distance while the train runs *track* distance, so
+//     an L pays a nine-tile fare for eighteen tiles of running;
+//   * maintenance and opex are flat standing charges that do not care how short
+//     the line is;
+//   * the bridged tile carries `BRIDGE_MAINT_WEIGHT` = 4, so one tile of water
+//     costs what four tiles of ground do.
+
+/// The three stops, an L inside a ten-by-ten box.
+///
+/// Sited well clear of the seeded anchors and their industries — `MIN_STATION_
+/// SPACING` refuses a platform within three tiles of another stop, and a local
+/// line accidentally sharing a catchment with the opening pair would not be
+/// measuring itself.
+const LOCAL_A: TileCoord = TileCoord { x: 6, y: 46 };
+const LOCAL_B: TileCoord = TileCoord { x: 15, y: 46 };
+const LOCAL_C: TileCoord = TileCoord { x: 15, y: 55 };
+/// The stream, four tiles along the first leg.
+const LOCAL_FORD: TileCoord = TileCoord { x: 10, y: 46 };
+
+/// Build the owner's compact three-stop line through the real command path.
+///
+/// Tiers are what a player would actually pick: the one town gets a `Station`,
+/// the two lineside halts get `Halt`s. All three are **player-built and paid
+/// for**, which is the pessimistic reading — a real session would have had one
+/// or two of them free as seeded anchors, and the payback arithmetic for that
+/// variant is in the test below.
+fn build_the_local_line(app: &mut App, bridged: bool) {
+    for (from, to) in [(LOCAL_A, LOCAL_B), (LOCAL_B, LOCAL_C)] {
+        push(
+            app,
+            CommandKind::AutoFillTrack(AutoFillTrack {
+                from,
+                to,
+                layer: GROUND_LAYER,
+            }),
+        );
+    }
+    run(app, 2);
+    assert!(
+        !bridged
+            || app
+                .world()
+                .resource::<TrackNetwork>()
+                .iter()
+                .any(|p| p.is_bridge()),
+        "the stream should have been bridged"
+    );
+
+    for (tile, tier) in [
+        (LOCAL_A, StationTier::Station),
+        (LOCAL_B, StationTier::Halt),
+        (LOCAL_C, StationTier::Halt),
+    ] {
+        push(
+            app,
+            CommandKind::PlaceStation(PlaceStation::new(tile, GROUND_LAYER, tier, None)),
+        );
+    }
+    push(
+        app,
+        CommandKind::BuyTrain(BuyTrain {
+            kind: TrainKind::Transit,
+        }),
+    );
+    run(app, 2);
+
+    let bought = app
+        .world()
+        .resource::<TrainYard>()
+        .unplaced()
+        .first()
+        .map(|(id, _)| *id)
+        .expect("a transit in the yard");
+    let a = station_at(app, LOCAL_A);
+    push(
+        app,
+        CommandKind::PlaceTrain(PlaceTrain {
+            train: bought,
+            at_station: a,
+        }),
+    );
+    run(app, 1);
+}
+
+/// A world with no seeded anchors anywhere near the local line.
+///
+/// The generator's anchors are planted where they always are, so the demand
+/// spawner and the maintenance pass see a realistic world; none of them is on
+/// the player's line, so what this measures is that line and nothing else.
+fn local_line_world(bridged: bool) -> App {
+    let mut app = cold_start_world();
+    if bridged {
+        app.insert_resource(terrain_with_stream(64, 64, LOCAL_FORD));
+    }
+    build_the_local_line(&mut app, bridged);
+    app
+}
+
+/// What the ledger says a compact local line is worth, with and without water.
+fn measure_local_line(bridged: bool) -> (Vec<Minute>, i64, i64) {
+    let mut app = local_line_world(bridged);
+    for tile in [LOCAL_A, LOCAL_B, LOCAL_C] {
+        assert!(
+            app.world()
+                .resource::<StationRegistry>()
+                .at(tile, GROUND_LAYER)
+                .is_some(),
+            "the stop at {tile:?} was refused — the line is not three stops"
+        );
+    }
+    let capex = {
+        let ledger = app.world().resource::<MoneyLedger>();
+        -(ledger.total(MoneyCategory::Construction) + ledger.total(MoneyCategory::RollingStock))
+    };
+    let upkeep_rate = line_upkeep_per_real_min(&app);
+    let rows = measure_minutes(&mut app, 15);
+    (rows, capex, upkeep_rate)
+}
+
+/// **A compact three-stop local line is a living, not a treadmill.**
+///
+/// The owner's words, on a build that already had the demand fixes: *"even a
+/// basic 3-stop line within ~10x10 with one tile water bridge is barely break
+/// even."*
+///
+/// # The target, derived
+///
+/// A line like this should be **clearly profitable but modest**: it is a local
+/// branch, not a trunk. The bar is that steady operating income is at least
+/// **1.5x** its running costs, and that the capital comes back inside the
+/// opening pair's worst measured case — sixteen minutes, from
+/// `rail_town/tests/cold_start_pays_out.rs`. Below 1.5x the player is watching a
+/// number hover, which is the "treadmill" reading; far above it and a compact
+/// line would dominate the long haul the fare curve exists to reward.
+///
+/// # The arithmetic it has to beat
+///
+/// Nineteen tiles of track, one of them bridged, so the maintenance weight is
+/// `18 x 1 + 1 x 4 = 22`. Plus one `Station` and two `Halt`s, plus one transit:
+///
+/// ```text
+/// track   22 weight x $10/min  = $220/min
+/// stops   $30 + $10 + $10      =  $50/min
+/// train                        = $140/min
+///                                -------
+///                                $410/min
+/// ```
+///
+/// Capital is `$1,800` of ground, `$800` for the bridged tile, `$2,000` of
+/// platforms and `$3,000` of stock — `$7,600` of the opening `$10,000`. A
+/// session that inherited two of the three stops as seeded anchors pays
+/// `$1,600` less than that.
+#[test]
+fn a_compact_three_stop_local_line_is_a_living_not_a_treadmill() {
+    let (bridged, capex, upkeep_rate) = measure_local_line(true);
+    let (dry, dry_capex, dry_upkeep) = measure_local_line(false);
+
+    print_table("compact local: 3 stops in 10x10, one bridge", &bridged);
+    print_table("the same line with no water to cross", &dry);
+    eprintln!(
+        "\nbridged: ${} of capital, ${}/min to hold\n\
+         dry:     ${} of capital, ${}/min to hold\n\
+         the one bridged tile costs ${}/min and ${} to build",
+        capex / 100,
+        upkeep_rate / 100,
+        dry_capex / 100,
+        dry_upkeep / 100,
+        (upkeep_rate - dry_upkeep) / 100,
+        (capex - dry_capex) / 100,
+    );
+
+    let steady = bridged[2];
+    eprintln!(
+        "steady: ${}/min income against ${}/min upkeep = {:.2}x",
+        steady.income / 100,
+        steady.upkeep / 100,
+        steady.income as f64 / steady.upkeep.max(1) as f64,
+    );
+
+    // Clearly profitable, not knife-edge: 1.5x its running costs, held.
+    for row in bridged.iter().skip(2) {
+        assert!(
+            row.income * 2 >= row.upkeep * 3,
+            "minute {}: a compact local line earned ${}/min against ${}/min of \
+             running costs ({:.2}x) — that is the treadmill the owner reported, \
+             not a living",
+            row.minute,
+            row.income / 100,
+            row.upkeep / 100,
+            row.income as f64 / row.upkeep.max(1) as f64,
+        );
+    }
+
+    // …and modest: a local branch must not out-earn the reach the fare curve
+    // exists to reward. Design 08 §2 — long hauls pay disproportionately.
+    assert!(
+        steady.income < passenger_fare_cents(60) * 20,
+        "a three-stop local line grossing ${}/min would make reaching outward \
+         pointless",
+        steady.income / 100
+    );
+
+    let paid_back = bridged
+        .iter()
+        .find(|r| r.net_including_capex > 0)
+        .map(|r| r.minute);
+    eprintln!("capital cleared in minute {paid_back:?} (${} of it)", capex / 100);
+    assert!(
+        matches!(paid_back, Some(m) if m <= 16),
+        "a compact local line must clear its capital inside the opening pair's \
+         worst case of sixteen minutes; got {paid_back:?}"
     );
 }

@@ -137,6 +137,21 @@ pub fn config_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir));
     }
+    // Under test, the platform directory does not exist: only the explicit
+    // override above resolves. Both io paths already treat `None` as "no
+    // profile" (first-run on read, a logged warning on write), so every test
+    // is hermetic by construction rather than by each author remembering.
+    //
+    // This is not hypothetical. A shell test drives the rebind capture with
+    // `MapView` + `B` as its fixture, its app runs the real
+    // `persist_settings_on_change`, and for a while every `cargo test` quietly
+    // rewrote the developer's own profile with that exact conflict — which
+    // then resurrected however often the file was cleaned. A test that
+    // genuinely wants io opts in by setting [`CONFIG_DIR_ENV`] to a scratch
+    // directory.
+    if cfg!(test) {
+        return None;
+    }
     if cfg!(target_os = "windows") {
         return std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("RailTown"));
     }

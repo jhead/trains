@@ -48,6 +48,16 @@ Height should be organised into **legible landforms**, not a smooth noise field:
 
 The generator should place these as *features* and then let noise decorate them, rather than hoping features emerge from octaves. A blurred multi-octave field with a radial bias produces blobs; blobs produce no passes, no corridors, and no decisions.
 
+Playtest (2026-08-04) made this measurable — the failure mode was not too much
+elevation but too *frequent* elevation ("constantly fighting terrain... just
+mountains and up/down everywhere"). Binding targets for the default style on a
+standard map: **at least ~70% of land tiles flat against all eight
+neighbours**, hills and mountains gathered into **one to three connected
+systems** with clear passes, and a straight 30-tile line between random land
+points crossing **on average under one** band boundary. Rugged may roughly
+double the churn; Flat halves it. Elevation is a feature the player walks up
+to, never a texture they wade through.
+
 ### 2.3 Legibility is a generation requirement, not a rendering one
 
 If the player cannot see a ridge, the ridge is not part of the puzzle — it is an invisible tax. Terrain must be readable at a glance:
@@ -74,7 +84,7 @@ Flat cost per tile is the single change that most completely disables the routin
 | Gentle slope, or cross-contour on plains | 1.5× | mild |
 | Hills | 3× | noticeable |
 | Steep hillside, cut-and-fill | 6× | you think about it |
-| Bridge, per tile, scaling with span | 8–20× | a commitment |
+| Bridge, per tile, scaling with span | 8–56× | a commitment, then a project |
 | Tunnel, per tile | 15× | a project |
 | Cliff face, mountain | — | refused |
 
@@ -95,6 +105,8 @@ Tight curves slow trains meaningfully. A straight run is fast; a wiggly cheap ro
 ### 3.4 Water crossings are a decision, not a rule
 
 A short bridge is routine. A long bridge is a major expense with a span limit, and beyond that limit the answer is to go around, or to find the narrows. Crossing points should be scarce enough to be worth scouting and plentiful enough that no map has exactly one answer.
+
+Playtest (2026-08-04): *"if we're going to have rivers, we must be able to build bridges."* Binding: any river the generator draws must be bridgeable **somewhere the player is standing** — the span limit covers ordinary trunk widths (spans up to six, priced steeply: 8/14/20× for one to three, 30/42/56× for four to six), with narrows remaining the cheap crossing worth scouting. A watercourse the limit refuses everywhere is a wall wearing a river costume, and walls are rock's job.
 
 ---
 

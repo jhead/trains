@@ -45,18 +45,18 @@ Two-click placement with an invisible anchor is the opposite of all three. Dragg
 
 ### 2.2 Route proposal
 
-Dragging does not mean "draw a straight line." The game proposes the sensible route between anchor and cursor, honouring the sixteen-direction graph, minimum curve radius and gradient limits.
+Dragging means **the run goes exactly where the player points** — corrected by playtest (2026-08-04), which found the routed default made "decisions that don't make any sense": building is intentional, RCT-style, and terrain is dealt with deliberately rather than optimised away on the player's behalf. Assistance exists, opted into, never assumed.
 
 | Modifier | Proposal |
 | --- | --- |
-| *(none)* | **Smart route** — cheapest legal path, weighted toward straightness. Follows contours, finds crossings, curves properly. |
-| `Shift` | **Straight** — direct line on one of the sixteen directions, terrain be damned. For deliberate, expensive, precise work. |
-| `Ctrl` | **Single tile** — exactly the tile under the cursor. For fine correction. |
-| `Alt` | **Contour lock** — hold current elevation, routing around anything that would climb. |
+| *(none)* | **Straight** — direct line on one of the sixteen directions, terrain be damned. The player picks the angle by pointing and the length by dragging; every tile shows its own validity and cost, and an illegal tile refuses loudly. |
+| `Ctrl` | **Single tile** — exactly the tile under the cursor. The one-piece-at-a-time verb. |
+| `Alt` | **Contour lock** — hold current elevation, refusing anything that would climb. |
+| `Shift` | **Smart assist** — cheapest legal path, weighted toward straightness, held to a corridor a few tiles either side of where the player pointed. It finds the narrows and eases a grade; it never wanders off on an itinerary of its own. |
 
-Smart route is the default because it is right the overwhelming majority of the time, and because it is where the game demonstrates that it understands terrain. Watching the proposal snake around a hill and pick a river narrows is the moment terrain becomes visibly part of the game.
+The straight drag is the default because dealing with terrain **is the game**: the player who lays a run into a hillside should feel the refusal, read the ground, and choose — contour round, cut through, or bridge — not have the choice made silently for them. The assist is quality-of-life for a decision already taken.
 
-The proposal must be **stable** — small cursor movements must not cause the route to flip between equal-cost alternatives. Hysteresis on route selection; prefer the previous frame's shape when costs are within a few percent. A flickering ghost is unusable.
+The assist's proposal must be **stable** — small cursor movements must not cause the route to flip between equal-cost alternatives. Hysteresis on route selection; prefer the previous frame's shape when costs are within a few percent. A flickering ghost is unusable.
 
 ### 2.3 The cost HUD
 

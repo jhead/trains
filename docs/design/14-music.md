@@ -2,6 +2,24 @@
 
 **Status: feature design, subordinate to [10 — Audio & Feel](10-audio-and-feel.md).** Where this brief and 10 disagree, 10 wins. "Never startle", "silence is a texture", the narrow dynamic range and the cue schedule in 10 §4 are constraints on everything below, not inputs to be negotiated.
 
+---
+
+## 0. Course correction (2026-08-04) — this supersedes §§1-3 where they conflict
+
+The first realisation of this brief shipped and was playtested. Verdict, verbatim: *"really repetitive and not upbeat and bright. I wanted C418 vibes and it's just bland and boring."*
+
+The diagnosis is that §1's central wager lost. "A home but no cadence... somewhere you already are rather than somewhere you are arriving at" was designed to be leave-on-able, and it turned out that music which never arrives anywhere is music with nothing to remember. One low tonal centre, one plucked timbre, one harmonic colour held for four minutes reads as absence, not calm. The reference the owner named is **C418**: simple bright keys/bell tones with soft attacks and long decays over quiet pads, **singable motifs that return recognisably**, real diatonic movement with cadences at phrase ends (sus/add9 colour keeping them gentle), melody living around C4-C6, a gentle but present pulse, and generous rests between phrases.
+
+What replaces the specifics of §§1-3:
+
+- **Pieces, not a rondo texture.** A cue is a small piece with its own key (drawn from a few bright majors), its own one-or-two motifs, and its own progression; intro / A / B / A' / outro across two to four minutes. Consecutive cues must differ audibly.
+- **Motifs over walks.** Melodic material is generated once per piece and *reused with variation* — transposed, augmented, octave-shifted. A listener hears material return; that is the whole difference between a piece and a scale exercise.
+- **Harmony moves.** Functional diatonic progressions with cadences at phrase ends. The old dominant ban relaxes to taste: arrivals are the point now, kept soft (sus resolutions) rather than banned.
+- **Bright registers, layered voices.** Keys/bell melody (C4-C6), quiet pad harmony, soft sine bass — the single low pluck orchestra is retired as the lead (it may survive as a colour).
+- **4/4 around 80-100 BPM** with an unobtrusive rhythmic floor, replacing 6/4 at 66.
+
+What survives unchanged: everything 10 imposes (never startle, silence as texture, narrow dynamics, the cue schedule), determinism from the seed, zero assets and zero new dependencies, the render budget, and §4+ below where they describe motif discipline, voice-leading tests and integration — those apply to the new material as they did to the old.
+
 **The premise:** the score is generated, not authored, because there is no composer and there are no audio assets. That is a constraint, and constraints are fine — but generated music has a characteristic failure mode, and it is worth naming before anything else:
 
 > **Random notes in a scale is what generative music sounds like when it is done badly, and every listener recognises it inside four bars.** It is not that the notes are wrong. It is that nothing is *going* anywhere: the harmony does not progress, the melody has no shape, and the voices do not lead.

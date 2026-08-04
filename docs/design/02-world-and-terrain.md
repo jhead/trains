@@ -54,9 +54,14 @@ mountains and up/down everywhere"). Binding targets for the default style on a
 standard map: **at least ~70% of land tiles flat against all eight
 neighbours**, hills and mountains gathered into **one to three connected
 systems** with clear passes, and a straight 30-tile line between random land
-points crossing **on average under one** band boundary. Rugged may roughly
-double the churn; Flat halves it. Elevation is a feature the player walks up
-to, never a texture they wade through.
+points crossing **on average about two or fewer** band boundaries. (Under one
+was the first draft of that number, and it is geometrically unreachable while
+§2.1 demands 4–8% rock: bands step one per tile, so the rock alone owes the map
+~290 tiles of contour, and by integral geometry a random 30-tile line meets
+that much curve ~1.35 times before any other landform exists. The measured
+floor is the rock share's, not the generator's.) Rugged may roughly double the
+churn; Gentle trims it. Elevation is a feature the player walks up to, never a
+texture they wade through.
 
 ### 2.3 Legibility is a generation requirement, not a rendering one
 

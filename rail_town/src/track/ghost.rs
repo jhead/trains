@@ -1,8 +1,16 @@
 //! Live ghost sprites for proposed build / demolish tiles.
+//!
+//! **Iso prototype**: every footprint here is a tinted tile diamond rather than
+//! a square, because the ghost is how the player reads which tile the cursor
+//! resolved to — a square over a diamond grid says nothing. Sizes are the same
+//! fractions of a tile as before, so the vocabulary (hover faint, anchor small
+//! and solid, place bright, invalid `WARN`) is unchanged.
 
 use bevy::prelude::*;
-use rail_map::{tile_to_world, TILE_SIZE};
+use rail_map::tile_to_world;
 use rail_sim::ids::TileCoord;
+
+use crate::map::IsoDiamond;
 
 use super::preview::TileGhostKind;
 use super::tools::{DragKind, TrackToolState};
@@ -22,6 +30,7 @@ pub(crate) struct AnchorMarker;
 pub fn sync_track_ghosts(
     mut commands: Commands,
     state: Res<TrackToolState>,
+    diamond: Option<Res<IsoDiamond>>,
     ghosts: Query<Entity, With<GhostSprite>>,
     hovers: Query<Entity, With<HoverHighlight>>,
     anchors: Query<Entity, With<AnchorMarker>>,
@@ -36,12 +45,19 @@ pub fn sync_track_ghosts(
         commands.entity(entity).despawn();
     }
 
+    // Headless tests boot without the terrain plugin, so there is no mask to
+    // tint; a ghost is presentation only and simply does not draw.
+    let Some(diamond) = diamond else {
+        return;
+    };
+
     if let Some(tile) = state.hover_tile {
         spawn_tile(
             &mut commands,
+            &diamond,
             tile,
             HI.with_alpha(0.22),
-            Vec2::splat(TILE_SIZE * 0.98),
+            0.98,
             2.0,
             HoverHighlight,
         );
@@ -50,9 +66,10 @@ pub fn sync_track_ghosts(
     if let Some(anchor) = state.anchor {
         spawn_tile(
             &mut commands,
+            &diamond,
             anchor,
             HI.with_alpha(0.55),
-            Vec2::splat(TILE_SIZE * 0.35),
+            0.35,
             2.2,
             AnchorMarker,
         );
@@ -68,20 +85,20 @@ pub fn sync_track_ghosts(
                     } else {
                         WARN.with_alpha(0.55)
                     };
-                    let size = if is_bridge {
-                        Vec2::new(TILE_SIZE * 0.75, TILE_SIZE * 0.28)
-                    } else {
-                        Vec2::new(TILE_SIZE * 0.7, TILE_SIZE * 0.2)
-                    };
-                    (base, size)
+                    (base, if is_bridge { 0.75 } else { 0.6 })
                 }
-                TileGhostKind::Existing => (HI.with_alpha(0.2), Vec2::new(TILE_SIZE * 0.7, TILE_SIZE * 0.2)),
-                TileGhostKind::Invalid => (
-                    WARN.with_alpha(0.6),
-                    Vec2::splat(TILE_SIZE * 0.85),
-                ),
+                TileGhostKind::Existing => (HI.with_alpha(0.2), 0.6),
+                TileGhostKind::Invalid => (WARN.with_alpha(0.6), 0.85),
             };
-            spawn_tile(&mut commands, ghost.tile, color, size, 2.5, GhostSprite);
+            spawn_tile(
+                &mut commands,
+                &diamond,
+                ghost.tile,
+                color,
+                size,
+                2.5,
+                GhostSprite,
+            );
         }
     }
 
@@ -89,9 +106,10 @@ pub fn sync_track_ghosts(
         for &tile in &preview.tiles {
             spawn_tile(
                 &mut commands,
+                &diamond,
                 tile,
                 WARN.with_alpha(0.5),
-                Vec2::new(TILE_SIZE * 0.7, TILE_SIZE * 0.2),
+                0.6,
                 2.6,
                 GhostSprite,
             );
@@ -102,9 +120,10 @@ pub fn sync_track_ghosts(
                 if !preview.tiles.contains(&tip) {
                     spawn_tile(
                         &mut commands,
+                        &diamond,
                         tip,
                         WARN.with_alpha(0.25),
-                        Vec2::splat(TILE_SIZE * 0.5),
+                        0.5,
                         2.4,
                         GhostSprite,
                     );
@@ -114,18 +133,20 @@ pub fn sync_track_ghosts(
     }
 }
 
+/// `scale` is the fraction of a tile the diamond covers.
 fn spawn_tile<M: Component>(
     commands: &mut Commands,
+    diamond: &IsoDiamond,
     tile: TileCoord,
     color: Color,
-    size: Vec2,
+    scale: f32,
     z: f32,
     marker: M,
 ) {
     let (wx, wy) = tile_to_world(tile);
     commands.spawn((
         marker,
-        Sprite::from_color(color, size),
+        diamond.sprite(color, scale),
         Transform::from_xyz(wx, wy, z),
     ));
 }

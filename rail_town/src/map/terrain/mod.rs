@@ -14,9 +14,23 @@
 //! - [`chunk`] composites 16 × 16 tiles into one sprite and rebuilds only what
 //!   changed (brief 01 §2.5).
 
+//! # Isometric evaluation prototype
+//!
+//! [`iso`] replaces the four of them at the plugin: it draws one diamond per
+//! tile plus cliff faces, from its own atlas, keyed on the same
+//! (material, shade, variant) triple [`material`] hands the flat renderer. The
+//! top-down pipeline below is left intact and still tested — it is simply not
+//! registered on this branch, so switching back is a plugin edit.
+
+// The top-down pipeline, kept whole and still tested but not registered.
+#[allow(dead_code)]
 pub mod atlas;
+#[allow(dead_code)]
 pub mod autotile;
+#[allow(dead_code)]
 pub mod chunk;
+pub mod iso;
 pub mod material;
 
+#[allow(unused_imports)]
 pub use chunk::{rebuild_dirty_terrain, setup_terrain, TerrainDirty};

@@ -70,7 +70,13 @@ const POLISH_Z: f32 = 0.01;
 const TEXELS_PER_TILE: f32 = 32.0;
 /// Cell edge in texels. Three tiles: a half-step leg reaches √5/2 tiles from
 /// the centre, and the ballast is 8 wide beyond that.
-const CELL: u32 = 96;
+///
+/// **Iso prototype**: the projection stretches the ground plane to twice its
+/// width, so the widest leg (`(1, -2)`, projecting to 48 texels of run) plus its
+/// ballast wants ±60. 128 gives that with room to spare; the cell is cached per
+/// link mask and only masks that occur are ever baked, so the extra texels cost
+/// nothing that matters.
+const CELL: u32 = 128;
 /// Cell centre, in texels from the top-left.
 const CENTER: i32 = (CELL / 2) as i32;
 
@@ -236,10 +242,32 @@ fn cell_image(canvas: Canvas) -> Image {
 }
 
 /// Unit vector along a direction, and the perpendicular, in texel space.
+///
+/// **Iso prototype**: both are *projected*, so every painter below draws on the
+/// ground plane instead of on the screen plane. This is the whole of the track
+/// reprojection — the bed, the sleepers, the rail bodies and the railheads all
+/// walk `along · t + across · s` in ground units and land on the diamond grid
+/// without any of them knowing the projection exists.
+///
+/// The vectors are deliberately **not** re-normalised after projecting. A leg
+/// running south-east projects to 1.41× its ground length and a leg running
+/// north-east to 0.71×, and that foreshortening is exactly what makes a rail
+/// read as lying on the ground rather than floating over it. `across` is the
+/// projection of the ground-plane perpendicular, not the screen-space
+/// perpendicular of the projected run, so the sleepers lie flat too.
 fn axes(dir: usize) -> (Vec2, Vec2) {
     let (dx, dy) = DIR16[dir];
     let v = Vec2::new(dx as f32, dy as f32).normalize();
-    (v, Vec2::new(-v.y, v.x))
+    let perp = Vec2::new(-v.y, v.x);
+    (project(v), project(perp))
+}
+
+/// Ground-plane vector to screen-plane vector. The projection is linear, so it
+/// applies to a direction exactly as it applies to a point.
+#[inline]
+fn project(v: Vec2) -> Vec2 {
+    let (x, y) = rail_map::project(v.x, v.y);
+    Vec2::new(x, y)
 }
 
 /// Half the length of a link in texels — the share this piece draws.
@@ -627,6 +655,9 @@ mod tests {
     /// The §5.3 line weights, measured off the baked art rather than asserted
     /// in a comment. An east leg is axis-aligned, so a column of it reads the
     /// cross-section directly.
+    // Iso prototype: reads the §5.3 cross-section down a screen column, which is
+    // only the cross-section while an east leg is axis-aligned. It no longer is.
+    #[ignore = "iso prototype: pins the top-down cross-section to a screen column"]
     #[test]
     fn the_cross_section_matches_the_brief() {
         let canvas = paint_cell(key(1 << 2, false), Pass::Base);
@@ -653,6 +684,9 @@ mod tests {
         assert_eq!(RAIL_GAUGE_HALF * 2.0, 8.0);
     }
 
+    // Iso prototype: same reason — sleeper pitch and length are measured along
+    // screen axes, and the projection foreshortens both.
+    #[ignore = "iso prototype: measures sleeper pitch along a screen axis"]
     #[test]
     fn sleepers_sit_at_the_briefs_spacing_and_length() {
         let canvas = paint_cell(key(1 << 2, false), Pass::Base);
@@ -713,16 +747,36 @@ mod tests {
         }
     }
 
+    /// Iso prototype: rewritten to count colours rather than probe fixed texels
+    /// — the claim ("a bridge is timber, not ballast, and still carries rail")
+    /// is the same, but where a given texel lands is now the projection's
+    /// business.
     #[test]
     fn a_bridge_decks_in_timber_instead_of_ballast() {
         let ground = paint_cell(key(1 << 2, false), Pass::Base);
         let bridge = paint_cell(key(1 << 2, true), Pass::Base);
         assert_ne!(ground.px, bridge.px);
-        let plank = |px: [u8; 4]| px == rgba(WOOD_D) || px == rgba(WOOD_M);
-        assert!(plank(bridge.at(10, 7)), "deck should be planked");
-        assert!(!plank(ground.at(10, 7)), "ballast should not be timber");
+        let count = |c: &Canvas, want: Color| {
+            let want = rgba(want);
+            c.px.chunks_exact(4).filter(|p| *p == want).count()
+        };
+        // One 16-unit leg of 16-unit-wide deck is ~256 ground units²; the
+        // projection preserves area (its determinant is 1) and rasterising it
+        // rounds some away, so the floor is well under that.
+        let planks = count(&bridge, WOOD_D) + count(&bridge, WOOD_M);
+        assert!(planks > 120, "deck should be planked: {planks} texels");
+        assert_eq!(
+            count(&ground, WOOD_D) + count(&ground, WOOD_M),
+            0,
+            "ballast should not be timber"
+        );
+        assert_eq!(
+            count(&bridge, BALLAST_D) + count(&bridge, BALLAST_M),
+            0,
+            "a deck should not also be ballasted"
+        );
         // Rails still run over the deck.
-        assert_eq!(bridge.at(10, 4), rgba(RAIL_L));
+        assert!(count(&bridge, RAIL_L) > 20, "no railhead over the deck");
     }
 
     #[test]
@@ -733,7 +787,14 @@ mod tests {
             .filter(|&(x, y)| opaque(lone.at(x, y)))
             .count();
         assert!(painted > 500, "a lone tile should still show a stub");
-        assert_eq!(lone.at(8, 4), rgba(RAIL_L));
+        // Iso prototype: the stub still carries railhead, but which texel it
+        // lands on is the projection's business, so count instead of probing.
+        let heads = lone
+            .px
+            .chunks_exact(4)
+            .filter(|p| *p == rgba(RAIL_L))
+            .count();
+        assert!(heads > 20, "a lone stub with no railhead: {heads}");
     }
 
     /// A junction is one cell, not a rotation of a straight — the mask picks

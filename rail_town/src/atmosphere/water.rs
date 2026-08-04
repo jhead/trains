@@ -364,19 +364,28 @@ mod tests {
 
         let after = decal_positions(&mut app);
         assert!(!after.is_empty(), "the new world has a sea of its own");
-        let limit = 12.0 * TILE_SIZE;
+        // Iso prototype: the map's screen extent is a diamond, not a square, so
+        // the bound is the projected one. The claim is unchanged — no decal may
+        // land outside the world it belongs to.
+        let edge = 12.0 * TILE_SIZE;
+        let (west, _) = rail_map::project(0.0, edge);
+        let (east, _) = rail_map::project(edge, 0.0);
+        let (_, top) = rail_map::project(edge, edge);
         for p in &after {
-            assert!(
-                p.x >= -TILE_SIZE && p.y >= -TILE_SIZE && p.x <= limit && p.y <= limit,
-                "a decal is drawn off the map at {p:?}"
-            );
+            let inside = p.x >= west - TILE_SIZE
+                && p.x <= east + TILE_SIZE
+                && p.y >= -TILE_SIZE
+                && p.y <= top + TILE_SIZE;
+            assert!(inside, "a decal is drawn off the map at {p:?}");
         }
-        // Nothing survives on the dry rows the old map had water on.
-        let dry_row_y = 8.0 * TILE_SIZE;
-        assert!(
-            !after.iter().any(|p| p.y > dry_row_y),
-            "the old map's water is still drawn where this map has none"
-        );
+        // Nothing survives on the dry rows the old map had water on. Resolved
+        // back through the projection rather than read off the screen row,
+        // which no longer corresponds to a map row.
+        for p in &after {
+            let tile = rail_map::world_to_tile(p.x, p.y);
+            let msg = "the old map's water is still drawn where this map has none";
+            assert!(tile.y <= 3, "{msg}: {tile:?}");
+        }
     }
 
     #[test]

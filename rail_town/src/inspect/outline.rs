@@ -23,7 +23,11 @@ pub fn setup_selection_outline(mut commands: Commands) {
     commands.spawn((
         SelectionOutline,
         Sprite::from_color(RAIL_S, Vec2::splat(TILE_SIZE * 0.6 + OUTLINE_PAD)),
-        Transform::from_xyz(0.0, 0.0, 0.0),
+        // Iso prototype: `map::iso_sort` remembers the z a sprite is spawned
+        // with as its layer, and 0 is the terrain layer — the outline would tie
+        // with the ground it stands on and flicker behind it. Half a layer up
+        // keeps it over terrain and still under everything it outlines.
+        Transform::from_xyz(0.0, 0.0, 0.5),
         Visibility::Hidden,
     ));
 }

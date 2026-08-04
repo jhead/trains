@@ -31,11 +31,17 @@ use crate::input::{ControlAction, KeyBindings};
 
 /// Allowed zoom multipliers (screen pixels per world texel). Nothing between or outside.
 pub const ZOOM_FACTORS: [u8; 3] = [1, 2, 3];
-/// Default zoom: 2× (brief 01 §2.1).
-pub const DEFAULT_ZOOM_FACTOR: u8 = 2;
+/// Default zoom.
+///
+/// Brief 01 §2.1 says 2×. **Iso prototype**: the projection makes a tile 64 × 32
+/// screen texels instead of 32 × 32, so 2× shows about ten tiles across — too
+/// tight to read a ridge, which is the whole thing being evaluated. 1× shows
+/// roughly twenty and is where this branch opens. The ladder is untouched:
+/// 2× and 3× are still a scroll away.
+pub const DEFAULT_ZOOM_FACTOR: u8 = 1;
 pub(crate) const PAN_SPEED: f32 = 400.0;
-/// Default index into [`ZOOM_FACTORS`] (2×).
-pub(crate) const DEFAULT_ZOOM_INDEX: usize = 1; // ZOOM_FACTORS[1] == 2
+/// Default index into [`ZOOM_FACTORS`].
+pub(crate) const DEFAULT_ZOOM_INDEX: usize = 0; // ZOOM_FACTORS[0] == 1
 
 /// Pixel-unit scroll that buys one rung of the ladder.
 ///
@@ -336,7 +342,9 @@ mod tests {
     #[test]
     fn zoom_factors_are_exactly_one_two_three() {
         assert_eq!(ZOOM_FACTORS, [1, 2, 3]);
-        assert_eq!(DEFAULT_ZOOM_FACTOR, 2);
+        // Iso prototype: the default rung is 1×, not §2.1's 2× — see the
+        // constant. The ladder itself is unchanged and still has three rungs.
+        assert_eq!(DEFAULT_ZOOM_FACTOR, 1);
         assert_eq!(zoom_factor_at(DEFAULT_ZOOM_INDEX), DEFAULT_ZOOM_FACTOR);
     }
 

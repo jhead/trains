@@ -41,6 +41,8 @@ const TOWN_DISTANCE: f32 = 10.0;
 /// How far past the boundary the sign stands.
 const SIGN_DISTANCE: f32 = 2.6;
 
+/// Iso prototype: the yard root sits above the depth band (see the spawn).
+const YARD_ROOT_Z: f32 = 60.0;
 const YARD_TRACK_Z: f32 = 1.0;
 const YARD_TOWN_Z: f32 = 1.6;
 const YARD_WINDOW_Z: f32 = 1.7;
@@ -116,7 +118,20 @@ pub fn sync_border_yards(
                     link: link.link,
                     sequence,
                 },
-                Transform::from_xyz(origin.x, origin.y, 0.0),
+                // Iso prototype: the yard has no sprite of its own, so
+                // `map::iso_sort` never adopts it and its children keep this
+                // root z. At 0 the whole yard sat under the depth band and was
+                // buried by terrain. It is drawn beyond the map's edge with
+                // nothing between it and the camera, so it goes above the band.
+                //
+                // Its *layout* is still top-down — the track stubs, town
+                // silhouette and sign are laid out along world axes with
+                // axis-aligned rectangles, and they do not follow the diamond
+                // grid. It only appears with a neighbour link, which single
+                // player (`NeighborService::null()`) never has, so it is left
+                // as-is rather than redesigned for a projection nobody has
+                // accepted yet.
+                Transform::from_xyz(origin.x, origin.y, YARD_ROOT_Z),
                 Visibility::default(),
                 Name::new(format!("Border yard - {}", link.edge.label())),
             ))

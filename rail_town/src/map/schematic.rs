@@ -1153,6 +1153,9 @@ mod tests {
     /// The plate is laid over the map's own world extent, which is what keeps
     /// click-to-fly honest: the tile the pointer is over on the plate is the
     /// tile [`super::super::map_view::map_view_click_fly`] resolves.
+    // Iso prototype: pins the plate to top-down world coordinates, and the Map
+    // View it belongs to is gated off on this branch (see `crate::map`).
+    #[ignore = "iso prototype: pins top-down plate geometry; Map View is gated off"]
     #[test]
     fn the_plate_covers_exactly_the_map() {
         let mut app = bake_app();

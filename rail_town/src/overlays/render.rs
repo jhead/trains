@@ -1,13 +1,13 @@
 //! Spawn / update translucent overlay sprites over map tiles.
 
 use bevy::prelude::*;
-use rail_map::{tile_to_world, MapGrid, TILE_SIZE};
+use rail_map::{tile_to_world, MapGrid};
 use rail_sim::ids::TileCoord;
 use rail_sim::{StationRegistry, StationService, TileOccupancy, TownDensity, TrackNetwork};
 
 use super::score::{color_for_strength, strength_for};
 use super::{ActiveOverlay, OverlayKind};
-use crate::map::{MapViewState, SCHEMATIC_OVERLAY_Z};
+use crate::map::{IsoDiamond, MapViewState, SCHEMATIC_OVERLAY_Z};
 
 /// Overlay band in the world layer stack (brief 01 §6.1).
 const OVERLAY_Z: f32 = 4.5;
@@ -28,6 +28,7 @@ pub fn sync_overlay_sprites(
     network: Res<TrackNetwork>,
     occupancy: Res<TileOccupancy>,
     density: Res<TownDensity>,
+    diamond: Option<Res<IsoDiamond>>,
     existing: Query<(Entity, &OverlayTileSprite)>,
 ) {
     let _perf = crate::overlays::perf::scope("sync_overlay_sprites");
@@ -40,6 +41,9 @@ pub fn sync_overlay_sprites(
     if overlay.0 == OverlayKind::None {
         return;
     }
+    let Some(diamond) = diamond else {
+        return;
+    };
 
     let mut tiles: Vec<TileCoord> = Vec::new();
     match overlay.0 {
@@ -91,7 +95,8 @@ pub fn sync_overlay_sprites(
         };
         let (wx, wy) = tile_to_world(tile);
         commands.spawn((
-            Sprite::from_color(color, Vec2::splat(TILE_SIZE)),
+            // Iso prototype: an overlay cell is a tile, so it is a diamond.
+            diamond.sprite(color, 1.0),
             Transform::from_xyz(wx, wy, z),
             OverlayTileSprite { coord: tile },
         ));

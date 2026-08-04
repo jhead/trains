@@ -76,7 +76,14 @@ pub mod gain {
     pub const DEPARTURE: f32 = 0.20;
     pub const CROSSING: f32 = 0.13;
     /// Per moving train, before distance.
-    pub const ROLLING: f32 = 0.17;
+    ///
+    /// Lowered from `0.17` after a playtest heard it as "white noise... always
+    /// too loud": with the camera near the line, one train's roar out-levelled
+    /// the entire ambience bed and read as broken ambience rather than as a
+    /// train. One train now sits just *under* the landscape it crosses
+    /// ([`AMBIENCE_TOTAL`]) — present, directional, and gone when it stops
+    /// (the speed floor lives in `trains.rs`, priced by the same session).
+    pub const ROLLING: f32 = 0.11;
 
     pub const UI_CLICK: f32 = 0.10;
     pub const PANEL: f32 = 0.11;

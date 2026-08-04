@@ -255,7 +255,11 @@ pub fn drive_rolling_voices(
         let rate = (1.0 - voice.closing / DOPPLER_C).clamp(0.94, 1.06);
         voice.handle.set_pitch(rate, &sinks, &spatial);
 
-        let target = gain::ROLLING * falloff * perspective * (0.25 + 0.75 * state.speed);
+        // The speed term used to floor at 0.25, which kept a *dwelling* train
+        // hissing at a quarter roar for its whole stop — the playtest heard a
+        // white noise that never went away. A stopped train now falls to a
+        // near-silent presence and the roar belongs to motion again.
+        let target = gain::ROLLING * falloff * perspective * (0.06 + 0.94 * state.speed);
         voice
             .handle
             .apply(target, bus, dt, ROLL_FADE_SECS, &mut sinks, &mut spatial);
@@ -449,5 +453,24 @@ mod tests {
     fn crossing_bells_do_not_become_a_rattle() {
         assert!(CROSSING_INTERVAL >= 0.8, "a bell, not an alarm");
         assert!(gain::CROSSING < gain::BRAKE, "and it stays under the train");
+    }
+
+    #[test]
+    fn one_train_stays_under_the_landscape_it_crosses() {
+        // Playtest: a single train's roar read as "white noise... always too
+        // loud" — it was out-levelling the whole ambience bed, so the ear filed
+        // it as broken weather rather than as a vehicle. The train is a guest
+        // in the landscape, and a *stopped* train is close to no train at all.
+        assert!(
+            gain::ROLLING < gain::AMBIENCE_TOTAL,
+            "one train louder than the entire landscape: {} vs {}",
+            gain::ROLLING,
+            gain::AMBIENCE_TOTAL
+        );
+        let stopped = gain::ROLLING * (0.06 + 0.94 * 0.0);
+        assert!(
+            stopped < 0.01,
+            "a dwelling train still hisses: {stopped}"
+        );
     }
 }

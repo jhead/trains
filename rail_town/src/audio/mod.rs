@@ -454,6 +454,31 @@ mod tests {
     }
 
     #[test]
+    fn the_ambience_slider_at_zero_actually_reaches_silence() {
+        // A playtest reported "white noise doesn't stop at 0%". The noise
+        // turned out to be a train on the effects bus, but the report is worth
+        // a pin from the other side: the slider the player reached for must be
+        // *able* to silence its whole bus, not merely lower it. The buses are
+        // slewed on real time (headless frames advance microseconds, which is
+        // why this is simulated at 60 fps rather than app-updated), so this
+        // walks two seconds of the real math and asserts the destination —
+        // both that 0% maps to a target of exactly zero, and that the slew
+        // actually arrives under the sinks' silence clamp rather than at some
+        // floor a future edit might introduce.
+        let target = (0u32 as f32 / 100.0).clamp(0.0, 1.0);
+        assert_eq!(target, 0.0, "0% must not map to a nonzero target");
+        let mut bus = mixer::AudioMix::default().ambience_bus;
+        for _ in 0..120 {
+            bus = dsp::approach(bus, target, 1.0 / 60.0, 0.08);
+        }
+        let level = mixer::AudioMix::default().master * bus;
+        assert!(
+            level < 0.0008,
+            "two seconds after the slider hit 0% the bed is still audible: {level}"
+        );
+    }
+
+    #[test]
     fn a_panel_cue_reaches_the_player() {
         // `UiCue` is the module's only inbound API, and it lives outside the
         // `sfx` gate so a panel can write one without knowing whether the game

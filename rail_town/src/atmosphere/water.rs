@@ -479,7 +479,7 @@ mod tests {
     /// Install `map` as the world the projection's lift is read from, the way
     /// `map::projection::follow_map_heights` does for the running game.
     fn install(map: &MapGrid) {
-        rail_map::set_iso_heights(map);
+        crate::map::projection::set_iso_heights(map);
     }
 
     /// Every water decal, as `(ground point, drawn position)`.
@@ -690,7 +690,7 @@ mod tests {
 
         // Into top-down, exactly as the I key does it: move the flag, and do not
         // touch the world.
-        rail_map::set_projection(rail_map::Projection::TopDown);
+        crate::map::projection::set_projection(rail_map::Projection::TopDown);
         app.update();
         let flat: Vec<Vec2> = decals(&mut app).iter().map(|d| d.2).collect();
         assert_eq!(iso.len(), flat.len(), "the flip lost or duplicated decals");
@@ -703,7 +703,7 @@ mod tests {
         assert_every_decal_stands_on_water(&mut app, &map);
 
         // ... and back is exactly where it started, to the texel.
-        rail_map::set_projection(rail_map::Projection::Iso);
+        crate::map::projection::set_projection(rail_map::Projection::Iso);
         app.update();
         let back: Vec<Vec2> = decals(&mut app).iter().map(|d| d.2).collect();
         assert_eq!(back, iso, "a flip and a flip back moved the sea");

@@ -689,7 +689,7 @@ pub fn rebuild_iso_terrain(
     for entity in &existing {
         commands.entity(entity).despawn();
     }
-    rail_map::set_iso_heights(&map);
+    crate::map::projection::set_iso_heights(&map);
     let sprites = spawn_terrain(&mut commands, &map, &atlas.0);
     // The number the projection flip is really paying: everything else about a
     // flip is a handful of microseconds, and this is the whole map re-spawning.
@@ -1138,6 +1138,11 @@ mod tests {
         // path a flip into this view takes as well.
         app.add_systems(Startup, setup_iso_atlas);
         app.add_systems(Update, rebuild_iso_terrain);
+        // `rebuild_iso_terrain` installs the height field, so this app writes
+        // the projection globals from its own schedule the way a real one does
+        // — without `MapPlugin` here to own them on its behalf. Last, so every
+        // schedule the plugins added is already there to be pinned.
+        crate::map::tests::own_globals_for(&mut app);
         app
     }
 
@@ -1207,7 +1212,7 @@ mod tests {
             rail_map::tile_to_world(peak).1 - rail_map::tile_to_world_flat(peak).1,
             15.0 * ISO_LIFT
         );
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     // ── A picture, without a GPU ───────────────────────────────────────────
@@ -1428,8 +1433,9 @@ mod tests {
     #[ignore = "writes a file; run it deliberately to look at the projection"]
     #[test]
     fn dump_iso_screenshot() {
+        let _iso = iso();
         let map = generate_map(64, 64, DEFAULT_MAP_SEED);
-        rail_map::set_iso_heights(&map);
+        crate::map::projection::set_iso_heights(&map);
         let atlas = canvas();
 
         // A window on the middle of the map, roughly a 1440p frame's worth.
@@ -1450,7 +1456,7 @@ mod tests {
         let path = std::path::Path::new("/tmp/rail_town_iso.png");
         write_png(path, vw, vh, &pixels).expect("write the screenshot");
         eprintln!("wrote {}", path.display());
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// Write the two pictures brief 15 has to be judged on.
@@ -1549,7 +1555,7 @@ mod tests {
         let straight: Vec<TileCoord> = (5..20).map(|y| TileCoord { x: NOTCH, y }).collect();
         write_scene(&cliff, &atlas, &straight, "/tmp/rail_town_iso_track_cliff.png", 2);
 
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// Lay a railway through the real placement rules, frame it, and write it
@@ -1562,7 +1568,7 @@ mod tests {
     fn write_scene(map: &MapGrid, atlas: &Canvas, route: &[TileCoord], path: &str, zoom: u32) {
         use rail_sim::{Money, MoneyLedger, TrackNetwork, TrackTerrain, GROUND_LAYER};
 
-        rail_map::set_iso_heights(map);
+        crate::map::projection::set_iso_heights(map);
         let terrain = TrackTerrain::new(
             map.width,
             map.height,
@@ -1651,7 +1657,7 @@ mod tests {
     fn dump_iso_paths_screenshot() {
         let _iso = iso();
         let map = generate_map(64, 64, DEFAULT_MAP_SEED);
-        rail_map::set_iso_heights(&map);
+        crate::map::projection::set_iso_heights(&map);
         let atlas = canvas();
         let paths = worn_lane(&map);
 
@@ -1686,7 +1692,7 @@ mod tests {
         let zoomed = std::path::Path::new("/tmp/rail_town_iso_paths_zoom.png");
         write_png(zoomed, zw * zoom, zh * zoom, &crop).expect("write the zoom");
         eprintln!("wrote {}", zoomed.display());
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     #[test]
@@ -1724,7 +1730,7 @@ mod tests {
     fn a_worn_lane_changes_the_picture_in_isometric() {
         let _iso = iso();
         let map = flat_grass(24, 24);
-        rail_map::set_iso_heights(&map);
+        crate::map::projection::set_iso_heights(&map);
         let atlas = canvas();
         let (cx, cy) = rail_map::map_center_world(map.width, map.height);
         let (vw, vh) = (900u32, 600u32);
@@ -1755,7 +1761,7 @@ mod tests {
             let px = [b[0], b[1], b[2], b[3]];
             assert!(allowed.contains(&px), "a path drew off its own ramp: {px:?}");
         }
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// Flat plains, so every tile is band-0 grass and can take a path. A

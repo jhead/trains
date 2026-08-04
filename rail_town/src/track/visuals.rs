@@ -1272,7 +1272,7 @@ mod tests {
                 tile.height = 4;
             }
             map.get_mut(b).unwrap().height = 4 + grade;
-            rail_map::set_iso_heights(&map);
+            crate::map::projection::set_iso_heights(&map);
 
             let opposite = rail_sim::track::opposite_dir(dir);
             let height_of = rail_map::tile_height;
@@ -1367,7 +1367,7 @@ mod tests {
                 );
             }
         }
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// Clauses 1 and 3: walk the whole run and find no hole, and no step where
@@ -1395,7 +1395,7 @@ mod tests {
                 }
             }
         }
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// Clause 4, and the flat view's own failure: the sleeper rhythm has to
@@ -1451,7 +1451,7 @@ mod tests {
                 );
             }
         }
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// A climbing leg never floats: the column under its bed is solid all the
@@ -1485,7 +1485,7 @@ mod tests {
                 }
             }
         }
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// A descent is a cutting: the track draws over the ground it is notched
@@ -1520,7 +1520,7 @@ mod tests {
             count(&shallow.near, BALLAST_L) > 0,
             "the bank buried the bed's own sun edge"
         );
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// The ramp has to reach every layer, or the rails float off their own
@@ -1560,7 +1560,7 @@ mod tests {
                 "dir {dir}: the gleam came off the ramp"
             );
         }
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// Level ground keys on `LegGrades::LEVEL`, so a flat railway bakes exactly
@@ -1572,7 +1572,7 @@ mod tests {
         for tile in map.tiles_mut() {
             tile.height = 3;
         }
-        rail_map::set_iso_heights(&map);
+        crate::map::projection::set_iso_heights(&map);
         // The interior only. Off the map the height field answers 0, so a
         // border tile on high ground reads a drop into the void — which never
         // reaches a drawing, because a leg is only graded when it is *linked*,
@@ -1589,13 +1589,13 @@ mod tests {
         }
         // One bump, and only the tiles that touch it take a new key.
         map.get_mut(TileCoord { x: 8, y: 8 }).unwrap().height = 4;
-        rail_map::set_iso_heights(&map);
+        crate::map::projection::set_iso_heights(&map);
         let graded = interior()
             .filter(|&t| LegGrades::for_projection(t, u16::MAX) != LegGrades::LEVEL)
             .count();
         // The bump itself plus its sixteen `DIR16` neighbours.
         assert_eq!(graded, 17, "a single bump touched {graded} keys");
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     #[test]

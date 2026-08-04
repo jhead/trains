@@ -434,7 +434,7 @@ mod tests {
                 map.get_mut(tile(x, y)).unwrap().height = ((x * 2 + y) % 5) as i8;
             }
         }
-        rail_map::set_iso_heights(&map);
+        crate::map::projection::set_iso_heights(&map);
 
         let a = tile(11, 11);
         for dir in 0..DIR_COUNT {
@@ -452,7 +452,7 @@ mod tests {
             let back = half_link_screen(opposite_dir(dir), -grade);
             assert_eq!((bx + back.x, by + back.y), (ax + half.x, ay + half.y));
         }
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// The ramp is the straight segment: at the end of the leg it has climbed
@@ -628,7 +628,7 @@ mod tests {
             wet.water = true;
             wet.height = -7;
         }
-        rail_map::set_iso_heights(&map);
+        crate::map::projection::set_iso_heights(&map);
 
         let links = (1 << 2) | (1 << 0); // east and north
         let grades = LegGrades::for_projection(tile(4, 4), links);
@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(grades.at(0), -2, "north drops onto water at surface 0");
         assert_eq!(grades.at(6), 0, "an unlinked leg is level");
         assert_ne!(grades, LegGrades::LEVEL);
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     #[test]
@@ -644,11 +644,11 @@ mod tests {
         let _flat = crate::map::tests::ProjectionGuard::new(Projection::TopDown);
         let mut map = MapGrid::empty(8, 8, 1);
         map.get_mut(tile(5, 4)).unwrap().height = 9;
-        rail_map::set_iso_heights(&map);
+        crate::map::projection::set_iso_heights(&map);
         let grades = LegGrades::for_projection(tile(4, 4), u16::MAX);
         assert_eq!(grades, LegGrades::LEVEL);
         assert_eq!(grades, LegGrades::LEVEL);
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// The ghost's link prediction has to be the network's rule, not a

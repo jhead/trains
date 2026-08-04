@@ -160,6 +160,51 @@ pub fn anchor_world_sprites(mut anchored: Query<(&GroundAnchor, &mut Transform)>
     }
 }
 
+// ── The only way this crate writes the projection globals ──────────────────
+//
+// `rail_map`'s live projection and iso height field are process-global (its
+// `coords` module says why they have to be), and Rust runs a crate's tests as
+// threads in one process. An unguarded write from one test therefore lands in
+// whatever other test is running — and it is the *other* test that fails, one
+// run in eight, about something that looks unrelated.
+//
+// So every write this crate makes goes through these three, and in a test build
+// each one first asserts that the writing thread owns the globals. Forgetting
+// is then a panic that names the fix, not a wrong number somewhere else. See
+// `map::tests::ProjectionGuard`, which is what owning them means, and
+// `map::tests::own_globals_for`, which is how an app holds them for its life.
+//
+// In any build that is not a test harness these are `#[inline]` pass-throughs
+// and the game is bit-identical. The check deliberately lives here rather than
+// inside `rail_map`'s setters: putting it there needs a Cargo feature, and
+// Cargo unions `dev-dependencies` features into the plain binary a `cargo test`
+// run also builds — which leaves `target/debug/rail_town` panicking at boot.
+
+/// Make `projection` the live one, and report the one it replaced.
+#[inline]
+pub(crate) fn set_projection(projection: MapProjection) -> MapProjection {
+    #[cfg(test)]
+    rail_map::testing::assert_owned("set_projection");
+    rail_map::set_projection(projection)
+}
+
+/// Install `map`'s heights as the lift the iso projection reads.
+#[inline]
+pub(crate) fn set_iso_heights(map: &MapGrid) {
+    #[cfg(test)]
+    rail_map::testing::assert_owned("set_iso_heights");
+    rail_map::set_iso_heights(map);
+}
+
+/// Drop the height field: every tile falls back to sea level.
+#[inline]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn clear_iso_heights() {
+    #[cfg(test)]
+    rail_map::testing::assert_owned("clear_iso_heights");
+    rail_map::clear_iso_heights();
+}
+
 /// Run condition: the world is being drawn in 2:1 dimetric.
 pub fn drawing_iso(view: Res<ViewProjection>) -> bool {
     view.is_iso()
@@ -187,7 +232,7 @@ pub fn projection_for(isometric: bool) -> MapProjection {
 /// than flipping one frame after the window opens.
 pub fn install_boot_projection(mut commands: Commands, settings: Res<Settings>) {
     let wanted = projection_for(settings.display.isometric);
-    rail_map::set_projection(wanted);
+    set_projection(wanted);
     commands.insert_resource(ViewProjection(wanted));
 }
 
@@ -216,7 +261,7 @@ pub fn install_boot_projection(mut commands: Commands, settings: Res<Settings>) 
 /// frame's `PreUpdate` and the rebuild it triggers happens immediately.
 pub fn follow_map_heights(map: Res<MapGrid>) {
     if map.is_changed() {
-        rail_map::set_iso_heights(&map);
+        set_iso_heights(&map);
     }
 }
 
@@ -296,12 +341,12 @@ pub fn apply_projection_setting(
     });
 
     // ── 2. Move the flag ──────────────────────────────────────────────────
-    rail_map::set_projection(wanted);
+    set_projection(wanted);
     // The lift the iso branch reads belongs to the map on screen. Installing it
     // here rather than only in the terrain build means the first frame after a
     // flip already has it, including for anything that reads a tile position
     // before the terrain system runs.
-    rail_map::set_iso_heights(&map);
+    set_iso_heights(&map);
     view.0 = wanted;
 
     // ── 3. Swap the terrain renderer ──────────────────────────────────────
@@ -504,18 +549,18 @@ mod tests {
     /// resolve the tile in the old one, place it in the new one.
     #[test]
     fn the_focused_tile_survives_the_flip() {
-        let _lock = crate::map::tests::PROJECTION_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let restore = rail_map::projection();
+        // This one drives the projection by hand rather than settling on one,
+        // so it owns the globals without naming a view; the guard puts back
+        // whatever was live when it started.
+        let _guard = crate::map::tests::ProjectionGuard::hold();
 
         let tile = TileCoord { x: 21, y: 13 };
         for (from, to) in [
             (MapProjection::TopDown, MapProjection::Iso),
             (MapProjection::Iso, MapProjection::TopDown),
         ] {
-            rail_map::set_projection(from);
-            rail_map::clear_iso_heights();
+            set_projection(from);
+            clear_iso_heights();
             let (cx, cy) = rail_map::tile_to_world(tile);
             let focused = rail_map::world_to_tile(cx, cy);
             assert_eq!(focused, tile, "the camera did not resolve its own centre");
@@ -525,7 +570,7 @@ mod tests {
             let (camx, camy) = (cx + offset.0, cy + offset.1);
             let ground = rail_map::unproject_offset(camx - cx, camy - cy);
 
-            rail_map::set_projection(to);
+            set_projection(to);
             let (nx, ny) = rail_map::tile_to_world(focused);
             assert_eq!(
                 rail_map::world_to_tile(nx.round(), ny.round()),
@@ -541,8 +586,6 @@ mod tests {
                 "the sub-tile offset did not survive: {rx}, {ry}"
             );
         }
-
-        rail_map::set_projection(restore);
     }
 
     /// Two flips are the identity. Not "looks about the same" — the same
@@ -755,8 +798,8 @@ mod tests {
                     // coordinates — so what is left to prove is that these two
                     // are inert, and they are the two that a sim system could
                     // conceivably observe.
-                    rail_map::set_projection(rail_map::projection().flipped());
-                    rail_map::set_iso_heights(&map);
+                    set_projection(rail_map::projection().flipped());
+                    set_iso_heights(&map);
                 }
                 app.update();
             }
@@ -1043,7 +1086,7 @@ mod tests {
         // "spawned under this projection" and "moved into it" are two different
         // answers and one of them is wrong.
         drop(app);
-        rail_map::set_projection(MapProjection::TopDown);
+        set_projection(MapProjection::TopDown);
         let mut flipped = game_app(31_415);
         settle(&mut flipped);
         set_iso(&mut flipped, true);
@@ -1280,9 +1323,14 @@ mod tests {
     /// The two worlds here are deliberately different maps, so a stale height
     /// field cannot accidentally agree with a fresh one.
     fn save_then_load_in(save_view: MapProjection, load_view: MapProjection) {
-        let _guard = crate::map::tests::ProjectionGuard::new(save_view);
         // The save root is a process global; hold it still for the round trip.
+        // *Before* the projection guard, and not the other way round: an app
+        // holds the projection globals for as long as it lives, and the shell's
+        // own test app takes them after taking this — two tests taking the two
+        // locks in opposite orders is a deadlock, not a flake. Save root
+        // outside, projection inside. See `map::tests::ProjectionGuard`.
         let _root = crate::shell::lock_save_root("iso_load");
+        let _guard = crate::map::tests::ProjectionGuard::new(save_view);
         let slot =
             rail_sim::save::SaveSlot::named(&format!("iso load {:?} {:?}", save_view, load_view))
                 .expect("valid slot name");
@@ -1308,7 +1356,7 @@ mod tests {
         drop(app);
 
         // ── Session two: a different world, then load ─────────────────────
-        rail_map::set_projection(load_view);
+        set_projection(load_view);
         let mut app = game_app(90_210);
         app.world_mut()
             .resource_mut::<Settings>()

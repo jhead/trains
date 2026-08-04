@@ -759,6 +759,12 @@ mod tests {
         // Override whatever `ShellPlugin::build` read off this machine, so the
         // tests never depend on (or write to) a real player profile.
         .insert_resource(Settings::default());
+        // A load reinstalls the projection's height field inline
+        // (`save::regenerate_map_from_save`), so a shell app writes the
+        // process-global projection state even with no `MapPlugin` in it. Owned
+        // here rather than in the one test that loads today, so the next one
+        // does not have to know it needs to.
+        crate::map::tests::own_globals_for(&mut app);
         app
     }
 

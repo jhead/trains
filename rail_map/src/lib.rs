@@ -81,6 +81,13 @@ mod tile;
 
 pub mod measure;
 
+/// Owning the process-global projection state for the length of one test.
+///
+/// Test support, always compiled: a downstream crate's test build needs the
+/// guard type and [`testing::assert_owned`], and gating that on a Cargo feature
+/// leaks into the binary that crate ships. See [`coords::owner`].
+pub use coords::owner as testing;
+
 pub use coords::{
     clear_iso_heights, ground_to_world, map_center_world, project, project_offset, projection,
     projection_is_iso, set_iso_heights, set_projection, surface_height_of, tile_height, tile_lift,

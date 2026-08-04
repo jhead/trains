@@ -91,11 +91,19 @@ impl Default for MapPlugin {
 
 impl Plugin for MapPlugin {
     fn build(&self, app: &mut App) {
+        // This plugin, and every system it registers below, writes the
+        // process-global projection state. Under test that state is owned
+        // rather than shared, and the owning is done here rather than by each
+        // test remembering to: a test cannot get these systems without this
+        // line, so there is nothing left to forget. See `tests::ProjectionGuard`.
+        #[cfg(test)]
+        tests::own_globals_for(app);
+
         let grid = generate_map(self.width, self.height, self.seed);
         // The lift the isometric projection applies has to be right before
         // anything asks where a tile is — including this plugin's own camera
         // framing. Harmless from above, which never reads it.
-        rail_map::set_iso_heights(&grid);
+        crate::map::projection::set_iso_heights(&grid);
         app.insert_resource(grid)
             .init_resource::<crate::input::KeyBindings>()
             .init_resource::<CameraFocusRequest>()
@@ -202,34 +210,145 @@ impl Plugin for MapPlugin {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    /// Serialises every test in this crate that installs a projection.
-    ///
-    /// The live projection is a process-global (see `rail_map::coords` for why),
-    /// and Rust runs a crate's tests on one thread pool, so two tests that each
-    /// set it would otherwise read each other's. Take this before calling
-    /// `rail_map::set_projection`, and put the old value back.
-    pub static PROJECTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use bevy::app::{First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Startup, Update};
+    use bevy::ecs::schedule::{ExecutorKind, ScheduleLabel, Schedules};
+    use bevy::prelude::*;
 
-    /// Hold a projection for the body of one test and restore it afterwards.
+    /// Own the projection globals for the body of one test, and put the
+    /// projection back afterwards.
+    ///
+    /// The live projection and the iso height field are process-globals (see
+    /// `rail_map::coords` for why they have to be), and Rust runs a crate's
+    /// tests as threads in one process. Two tests that each write one would
+    /// otherwise be writing into each other — and the one that *fails* would be
+    /// the innocent one, several files away, one run in eight.
+    ///
+    /// So this is not a convention any more. Every write this crate makes goes
+    /// through `map::projection`'s three wrappers, and in a test build each of
+    /// them asserts the writing thread holds one of these — forgetting is a
+    /// panic naming the fix, not a wrong number in a neighbour.
+    /// [`own_globals_for`] is how an app that writes them from its own systems
+    /// holds one for as long as it exists.
+    ///
+    /// Re-entrant per thread: taking a second one nests, so a test can pin the
+    /// projection it wants and then build an app that takes its own.
+    ///
+    /// # Lock order
+    ///
+    /// This is the **innermost** of the crate's test-wide locks. An app holds
+    /// it for as long as the app lives, and apps are built last, so a test that
+    /// also wants `shell::lock_save_root` must take that one *first*. Two tests
+    /// taking the two in opposite orders deadlock the whole run — which is a
+    /// hang, not a failure, and reads as CI being slow.
     pub struct ProjectionGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _owned: rail_map::testing::WorldGuard,
         restore: rail_map::Projection,
     }
 
     impl ProjectionGuard {
+        /// Own the globals and put `projection` live until this is dropped.
         pub fn new(projection: rail_map::Projection) -> Self {
-            let lock = PROJECTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let restore = rail_map::set_projection(projection);
+            let owned = rail_map::testing::WorldGuard::acquire();
+            let restore = crate::map::projection::set_projection(projection);
             Self {
-                _lock: lock,
+                _owned: owned,
                 restore,
+            }
+        }
+
+        /// Own the globals without saying anything about what they should be —
+        /// for a holder that exists to keep other threads out rather than to
+        /// choose a view. Whatever the projection was comes back on drop.
+        pub fn hold() -> Self {
+            let owned = rail_map::testing::WorldGuard::acquire();
+            Self {
+                _owned: owned,
+                restore: rail_map::projection(),
             }
         }
     }
 
     impl Drop for ProjectionGuard {
         fn drop(&mut self) {
-            rail_map::set_projection(self.restore);
+            // Still the owner here: the field, and with it the ownership, is
+            // released after this body runs.
+            crate::map::projection::set_projection(self.restore);
         }
+    }
+
+    /// Give `app` the projection globals for as long as it lives.
+    ///
+    /// [`super::MapPlugin`] calls this on itself, so *any* test that builds a
+    /// map app is covered without knowing this exists — which is the point,
+    /// since the systems that write the globals are the plugin's, not the
+    /// test's, and they run frames after the line the author wrote. A test that
+    /// registers those systems into a bare app by hand should call this too.
+    ///
+    /// Two halves, and both are load-bearing:
+    ///
+    /// - The guard goes in as a non-send resource, so it is dropped exactly
+    ///   when the app is. Re-entrancy means a test that already took one nests
+    ///   rather than deadlocking, and two apps on two threads serialise instead
+    ///   of interleaving.
+    /// - The schedules are pinned to one thread, because Bevy's multi-threaded
+    ///   executor hands a `Send` system to a shared, process-wide task pool —
+    ///   so `apply_projection_setting` would otherwise write from a thread that
+    ///   is nobody's in particular, and ownership could not be checked at all.
+    pub(crate) fn own_globals_for(app: &mut App) {
+        // Idempotent: a test helper that already did this and then added
+        // `MapPlugin` would otherwise *replace* the resource, dropping the
+        // outer guard while the nested one it just took is still in the app —
+        // handing the globals away with the app still running on them.
+        let already_owned = app.world().get_non_send_resource::<ProjectionGuard>();
+        if already_owned.is_none() {
+            app.insert_non_send_resource(ProjectionGuard::hold());
+        }
+        run_on_the_calling_thread(app);
+    }
+
+    /// Run every one of `app`'s schedules on whichever thread calls `update`.
+    fn run_on_the_calling_thread(app: &mut App) {
+        // Everything the plugins built before this one, which is where the
+        // state-transition and fixed-timestep schedules come from.
+        if let Some(mut schedules) = app.world_mut().get_resource_mut::<Schedules>() {
+            for (_, schedule) in schedules.iter_mut() {
+                schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+            }
+        }
+        // ... and the main loop by name, created here if it does not exist yet
+        // so that the plugins built *after* this one inherit the setting when
+        // they add their systems.
+        for label in [
+            First.intern(),
+            PreStartup.intern(),
+            Startup.intern(),
+            PostStartup.intern(),
+            PreUpdate.intern(),
+            Update.intern(),
+            PostUpdate.intern(),
+            Last.intern(),
+        ] {
+            app.edit_schedule(label, |schedule| {
+                schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+            });
+        }
+    }
+
+    /// The enforcement itself, because a check that works is invisible.
+    ///
+    /// Every write in this crate is checked because it goes through
+    /// `map::projection`'s wrappers — a call site that reaches past them to
+    /// `rail_map` directly is not, and neither is a build where the `cfg(test)`
+    /// line inside a wrapper has been deleted as "dead code". Nothing else in
+    /// the suite would fail if that happened: every test above would still pass
+    /// and the race would quietly be back. This is what notices.
+    ///
+    /// Deterministic in every interleaving: an unowned write is refused whether
+    /// the globals are free or held by some other test's thread, and it is
+    /// refused *before* it touches anything, so this cannot disturb one.
+    #[test]
+    #[should_panic(expected = "does not own the projection globals")]
+    fn writing_the_globals_without_owning_them_is_refused() {
+        crate::map::projection::set_projection(rail_map::Projection::Iso);
     }
 }

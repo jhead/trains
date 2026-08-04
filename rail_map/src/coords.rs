@@ -120,6 +120,214 @@ impl Projection {
     }
 }
 
+// ── Who is allowed to write the globals ────────────────────────────────────
+//
+// Both globals below are process-wide, and Rust runs a crate's tests as
+// *threads in one process*. So a test that writes one of them is writing into
+// every other test that happens to be running, and the test that fails is not
+// the test that is wrong — it fails somewhere else, later, in whatever fraction
+// of runs the interleaving lands badly. That is a race, not a flake, and it is
+// not detectable by reading the test that fails.
+//
+// The discipline is that a test **owns** the globals for as long as it depends
+// on them, and [`owner::WorldGuard`] is that ownership. Every write from a test
+// build asserts the writing thread holds it, so forgetting is a panic naming
+// the fix rather than a wrong number in a neighbour.
+//
+// # Why the check is at each caller's `cfg(test)` and not in the setters
+//
+// The obvious shape — assert inside `set_projection` itself, behind a Cargo
+// feature a downstream crate turns on for its tests — is wrong, and measurably
+// so. Cargo unions a package's `dev-dependencies` features into the *one*
+// `rail_map` it builds for a `cargo test` invocation, and that invocation also
+// builds `rail_town`'s plain binary for its integration tests. The result is
+// that `cargo test` leaves `target/debug/rail_town` — the artifact you can just
+// run — panicking at boot, because the game legitimately writes these globals
+// and no test owns them. That was tried; it poisons everyday `cargo test`.
+//
+// So this module is always compiled and never asserts anything on its own.
+// [`owner::assert_owned`] is called by each caller from behind *its* own
+// `cfg(test)`: this crate's setters below, and `rail_town`'s
+// `map::projection` wrappers. A crate's own `cfg(test)` is true only when that
+// crate is compiled as a test harness, and never for the binary it ships.
+pub mod owner {
+    use std::sync::{Mutex, MutexGuard};
+    use std::thread::ThreadId;
+
+    /// Held for as long as one thread owns the globals. This is what serialises
+    /// the tests that care; the assertions below are what stop a test that
+    /// never took it from writing anyway.
+    static WORLD: Mutex<()> = Mutex::new(());
+
+    /// Who holds [`WORLD`], and how deep their nesting is. Separate from
+    /// `WORLD` itself so a *non*-owner can ask the question without blocking on
+    /// the owner — which is the whole point of asking.
+    static OWNER: Mutex<Option<Owner>> = Mutex::new(None);
+
+    #[derive(Clone, Copy)]
+    struct Owner {
+        thread: ThreadId,
+        depth: u32,
+    }
+
+    fn owner() -> MutexGuard<'static, Option<Owner>> {
+        // A test that panics while it owns the globals poisons both locks. The
+        // globals are plain data and the guard puts them back on the way out,
+        // so there is nothing left half-written to protect anyone from — and a
+        // poisoned lock here would turn one real failure into a hundred.
+        OWNER.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Ownership of the projection globals, for one thread, re-entrantly.
+    ///
+    /// Re-entrant on purpose: a test takes one for the projection it wants and
+    /// then builds an app, whose `MapPlugin` takes another for the app's
+    /// lifetime. Keying on the thread rather than counting a plain mutex is
+    /// what makes the second one a nesting rather than a deadlock.
+    pub struct WorldGuard {
+        /// `Some` only in the outermost guard on a thread — the one that
+        /// actually holds [`WORLD`]. Nested guards just count.
+        held: Option<MutexGuard<'static, ()>>,
+    }
+
+    impl WorldGuard {
+        /// Take the globals, blocking until whichever other thread has them is
+        /// finished. Free and immediate if this thread already owns them.
+        pub fn acquire() -> Self {
+            let me = std::thread::current().id();
+            {
+                let mut state = owner();
+                if let Some(existing) = state.as_mut() {
+                    if existing.thread == me {
+                        existing.depth += 1;
+                        return Self { held: None };
+                    }
+                }
+            }
+            // `OWNER` is deliberately *not* held across this wait: the thread
+            // we are waiting for has to be able to take it to let go.
+            let held = wait_for_world();
+            *owner() = Some(Owner {
+                thread: me,
+                depth: 1,
+            });
+            Self { held: Some(held) }
+        }
+
+        /// Whether the calling thread may write the globals right now.
+        pub fn owned_by_this_thread() -> bool {
+            let me = std::thread::current().id();
+            matches!(*owner(), Some(o) if o.thread == me)
+        }
+    }
+
+    impl Drop for WorldGuard {
+        fn drop(&mut self) {
+            let me = std::thread::current().id();
+            let mut state = owner();
+            if self.held.is_some() {
+                // The outermost guard. Clear the owner *before* `held` releases
+                // `WORLD` at the end of this drop, so the next thread in cannot
+                // claim ownership and then have it wiped by this line.
+                *state = None;
+            } else if let Some(existing) = state.as_mut() {
+                // A nesting. Guard against the guards having been dropped out
+                // of order — the outer one going first hands the globals away
+                // while this one still exists, and decrementing a *stranger's*
+                // depth would be the worst kind of wrong.
+                if existing.thread == me && existing.depth > 1 {
+                    existing.depth -= 1;
+                }
+            }
+        }
+    }
+
+    /// Block for [`WORLD`], but give up rather than hang forever.
+    ///
+    /// The guard is the innermost of a test suite's process-wide locks, and an
+    /// app holds it for as long as the app lives — so two tests that take it
+    /// and some *other* global lock in opposite orders deadlock. A plain
+    /// `lock()` would make that a silent hang, which reads as a slow CI job and
+    /// takes an afternoon to find. This makes it a failure that says so.
+    ///
+    /// Nothing legitimate waits: the whole suite runs in under a second, and
+    /// the longest anyone holds these is one headless app's lifetime.
+    fn wait_for_world() -> MutexGuard<'static, ()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match WORLD.try_lock() {
+                Ok(held) => return held,
+                // A test panicked while it owned them. The globals are plain
+                // data and its guard put them back on the way out, so there is
+                // nothing half-written to protect the next test from.
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => return poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waited 60s for the projection globals, which another test \
+                 thread is still holding.\n\
+                 \n\
+                 That is a deadlock, not slowness. The projection guard is the \
+                 innermost of this suite's process-wide test locks — an app \
+                 holds it for its whole life, and apps are built last — so \
+                 every other one has to be taken *first*. A test doing\n\
+                 \n    \
+                 let _guard = ProjectionGuard::new(..);   // then\n    \
+                 let _root  = shell::lock_save_root(..);\n\
+                 \n\
+                 will hang against a test doing those two the other way round. \
+                 Put the save root, or whatever else is global, outside."
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// Panic unless the calling thread owns the globals.
+    ///
+    /// Call this from behind your own crate's `cfg(test)`, immediately before
+    /// writing one of them — see the module comment for why it is not simply
+    /// built into the setters.
+    ///
+    /// The message is the deliverable here: this fires inside whatever system
+    /// happened to write, often several frames into an `app.update()` that
+    /// looks nothing like a projection test, and "assertion failed" there would
+    /// send the reader looking in exactly the wrong place.
+    pub fn assert_owned(what: &str) {
+        let state = owner();
+        let me = std::thread::current().id();
+        if matches!(*state, Some(o) if o.thread == me) {
+            return;
+        }
+        let who = match *state {
+            Some(_) => "another test thread owns them",
+            None => "no test owns them at all",
+        };
+        drop(state);
+        panic!(
+            "rail_map::{what} was called by a thread that does not own the \
+             projection globals — {who}.\n\
+             \n\
+             The live projection and the iso height field are process-global, \
+             and Rust runs a crate's tests as threads in one process. An \
+             unguarded write therefore lands in whatever *other* test is \
+             running, and the run fails over there, later, in some fraction of \
+             interleavings. Own them for as long as you depend on them:\n\
+             \n    \
+             let _guard = crate::map::tests::ProjectionGuard::new(rail_map::Projection::Iso);\n\
+             \n\
+             If this fired from inside `app.update()`, the app's own systems \
+             write these globals — `map::projection::install_boot_projection`, \
+             `follow_map_heights`, `apply_projection_setting` and \
+             `map::terrain::iso::rebuild_iso_terrain` all do. `map::MapPlugin` \
+             takes the guard for the app's whole lifetime and pins its \
+             schedules to the calling thread, so a test that builds one needs \
+             nothing further. An app that registers those systems by hand must \
+             do both: `crate::map::tests::own_globals_for(&mut app)`."
+        );
+    }
+}
+
 static PROJECTION: AtomicU8 = AtomicU8::new(0);
 
 /// The projection every conversion below is currently using.
@@ -133,6 +341,8 @@ pub fn projection() -> Projection {
 /// Presentation-side only — see the module docs. `rail_town`'s
 /// `map::projection` owns the flip and everything that has to follow it.
 pub fn set_projection(projection: Projection) -> Projection {
+    #[cfg(test)]
+    owner::assert_owned("set_projection");
     Projection::from_bits(PROJECTION.swap(projection.bits(), Ordering::Relaxed))
 }
 
@@ -263,6 +473,8 @@ pub fn surface_height_of(tile: &crate::tile::Tile) -> i8 {
 /// Called whenever a map is installed or edited. Cheap — one `i8` per tile.
 /// Harmless in [`Projection::TopDown`], which never reads the field.
 pub fn set_iso_heights(map: &MapGrid) {
+    #[cfg(test)]
+    owner::assert_owned("set_iso_heights");
     let surface: Vec<i8> = map.tiles().iter().map(surface_height_of).collect();
     let lo = surface.iter().copied().min().unwrap_or(0);
     let hi = surface.iter().copied().max().unwrap_or(0);
@@ -280,6 +492,8 @@ pub fn set_iso_heights(map: &MapGrid) {
 
 /// Drop the height field: every tile falls back to sea level.
 pub fn clear_iso_heights() {
+    #[cfg(test)]
+    owner::assert_owned("clear_iso_heights");
     if let Ok(mut slot) = HEIGHTS.write() {
         *slot = None;
     }
@@ -420,24 +634,23 @@ mod tests {
     use super::*;
     use crate::tile::TerrainKind;
 
-    /// Serialises every test that touches a process-global — the projection and
-    /// the height field both are.
-    static GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Holds the globals for one test and puts them back afterwards, so a
     /// panicking test cannot leave the process in the other projection.
+    ///
+    /// The serialising is [`owner::WorldGuard`]'s, not this type's, so that the
+    /// setters can tell an owner from a passer-by — see the `owner` module.
     struct Guard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _owned: owner::WorldGuard,
         restore: Projection,
     }
 
     impl Guard {
         fn with(projection: Projection) -> Self {
-            let lock = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+            let owned = owner::WorldGuard::acquire();
             let restore = set_projection(projection);
             clear_iso_heights();
             Self {
-                _lock: lock,
+                _owned: owned,
                 restore,
             }
         }
@@ -817,6 +1030,36 @@ mod tests {
         assert!(projection_is_iso());
         assert_eq!(set_projection(Projection::TopDown), Projection::Iso);
         assert!(!projection_is_iso());
+    }
+
+    /// A write from a thread that never took [`Guard`] is refused.
+    ///
+    /// Deterministic in every interleaving: unowned or owned-by-someone-else
+    /// both panic, and the refusal happens before the global is touched, so
+    /// this cannot disturb whatever test is running next to it.
+    #[test]
+    #[should_panic(expected = "does not own the projection globals")]
+    fn a_write_without_the_guard_is_refused() {
+        set_iso_heights(&flat_map(4, 4));
+    }
+
+    /// The guards nest on one thread instead of deadlocking, which is what lets
+    /// a test pin a projection and then build an app that owns the globals for
+    /// its own lifetime.
+    #[test]
+    fn ownership_nests_on_one_thread() {
+        let outer = Guard::iso();
+        assert!(owner::WorldGuard::owned_by_this_thread());
+        {
+            let _inner = owner::WorldGuard::acquire();
+            set_projection(Projection::TopDown);
+            assert!(owner::WorldGuard::owned_by_this_thread());
+        }
+        // Still ours: the inner guard gave back a level, not the ownership.
+        assert!(owner::WorldGuard::owned_by_this_thread());
+        set_projection(Projection::Iso);
+        drop(outer);
+        assert!(!owner::WorldGuard::owned_by_this_thread());
     }
 
     #[test]

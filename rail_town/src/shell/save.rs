@@ -189,7 +189,7 @@ fn regenerate_map_from_save(world: &mut World) {
     // triggers runs later in *this* `Update` — placing every piece of the
     // loaded railway at the previous world's elevation, permanently, because a
     // track sprite is positioned once and then left alone.
-    rail_map::set_iso_heights(&map);
+    crate::map::projection::set_iso_heights(&map);
     world.insert_resource(map);
 }
 

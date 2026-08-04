@@ -300,7 +300,7 @@ mod tests {
         let (mut app, _guard) = app(Projection::Iso);
         let mut map = rail_map::MapGrid::empty(16, 16, 1);
         map.get_mut(TileCoord { x: 5, y: 4 }).unwrap().height = 1;
-        rail_map::set_iso_heights(&map);
+        crate::map::projection::set_iso_heights(&map);
 
         let route = [TileCoord { x: 4, y: 4 }, TileCoord { x: 5, y: 4 }];
         app.world_mut()
@@ -319,7 +319,7 @@ mod tests {
 
         // And it came out of the shared bank, baked once each.
         assert_eq!(app.world().resource::<TrackArt>().baked(), 2);
-        rail_map::clear_iso_heights();
+        crate::map::projection::clear_iso_heights();
     }
 
     /// The shipping view is untouched: still the bar it always drew, and the

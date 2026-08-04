@@ -2,6 +2,7 @@
 
 mod feedback;
 mod ghost;
+mod iso_incline;
 mod preview;
 mod propose;
 mod route;
@@ -15,18 +16,26 @@ use feedback::{setup_build_feedback, sync_flash_sprites, update_build_feedback_u
 use ghost::sync_track_ghosts;
 use sync::sync_track_terrain_from_map;
 use tools::track_tool_input;
-use visuals::{apply_track_sprites, polish_railheads};
+use visuals::{apply_track_sprites, polish_railheads, TrackArt};
 
 use crate::inspect::SelectionInputSet;
 
 pub use tools::{BuildTool, TrackToolState};
 pub use visuals::TrackSprite;
 
+/// For the GPU-free screenshot compositor in `map::terrain::iso`'s tests, which
+/// wants to draw a railway over its terrain.
+#[cfg(test)]
+pub(crate) use visuals::test_cell;
+
 pub struct TrackPlugin;
 
 impl Plugin for TrackPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TrackToolState>()
+            // Shared by the piece painter and the build ghost, so the two draw
+            // the same cell for the same tile (brief 04 §2.2).
+            .init_resource::<TrackArt>()
             .init_resource::<crate::input::KeyBindings>()
             .add_systems(Startup, (sync_track_terrain_from_map, setup_build_feedback))
             .add_systems(

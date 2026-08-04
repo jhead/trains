@@ -31,7 +31,7 @@ For where the build actually stands, see [`docs/BURNDOWN.md`](../BURNDOWN.md) �
 | 12 | [Multiplayer: Neighbour Maps](12-multiplayer.md) | How do maps sit next to other players' maps? |
 | 13 | [Shadows](13-shadows.md) | How does light fall on the world? Sun quantisation, what casts, what it costs. |
 | 14 | [Music](14-music.md) | What does the score actually play? Mode, harmony, melody, form, synthesis. |
-| 15 | Isometric track *(forthcoming)* | How does rail draw at 2:1? Cross-section, bank, junctions on the diamond. |
+| 15 | [Isometric Track](15-isometric-track.md) | What does a railway do where the ground steps? Ramps, earthworks, what "connected" means. |
 
 **01 and 03 are binding standards** — the pixel contract, the palette and the UI kit are constraints, not suggestions. 02 and 04–10 are feature design. 11 sequences them. 13, 14 and 15 are subordinate to 01, 10 and 01 respectively: where a brief and its parent disagree, the parent wins.
 

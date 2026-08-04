@@ -1017,6 +1017,59 @@ mod tests {
     // in miniature — same atlas, same rects, same order — so a bug you can see
     // in the file is a bug that is on screen.
 
+    /// Composite the map *and a railway* into an RGBA buffer, far row first.
+    ///
+    /// Terrain and track interleave by diagonal row exactly as `depth_z` makes
+    /// the renderer interleave them — all of a row's ground, then all of its
+    /// track, then the row in front. That ordering is the whole reason a
+    /// climbing leg draws over the terrace it crosses and a descending one is
+    /// read as a cutting, so a compositor that got it wrong would be lying
+    /// about the one thing these pictures exist to show.
+    fn composite_iso_with_track(
+        map: &MapGrid,
+        atlas: &Canvas,
+        view: (i32, i32, u32, u32),
+        network: &rail_sim::TrackNetwork,
+    ) -> Vec<u8> {
+        let (vx, vy, vw, vh) = view;
+        let mut out = composite_iso(map, atlas, view);
+
+        let mut order: Vec<(TileCoord, u16, bool)> = network
+            .iter()
+            .map(|p| (p.tile, p.links.0, p.is_bridge()))
+            .collect();
+        order.sort_by_key(|(c, ..)| std::cmp::Reverse(c.x + c.y));
+        // Track sits above the ground of its own row but behind the row in
+        // front, and every rail tile here is on ground that has already been
+        // laid, so painting them far-row-first over the finished terrain is the
+        // same picture the renderer builds.
+        for (coord, links, bridge) in order {
+            let (cell, px) = crate::track::test_cell(coord, links, bridge);
+            let (sx, sy) = tile_to_world(coord);
+            let left = sx - cell as f32 / 2.0;
+            let top = -sy - cell as f32 / 2.0;
+            for row in 0..cell as i32 {
+                let dy = top as i32 + row - vy;
+                if dy < 0 || dy >= vh as i32 {
+                    continue;
+                }
+                for col in 0..cell as i32 {
+                    let dx = left as i32 + col - vx;
+                    if dx < 0 || dx >= vw as i32 {
+                        continue;
+                    }
+                    let s = ((row as u32 * cell + col as u32) * 4) as usize;
+                    if px[s + 3] == 0 {
+                        continue;
+                    }
+                    let d = ((dy as u32 * vw + dx as u32) * 4) as usize;
+                    out[d..d + 4].copy_from_slice(&px[s..s + 4]);
+                }
+            }
+        }
+        out
+    }
+
     /// Composite the map into an RGBA buffer, far row first.
     fn composite_iso(map: &MapGrid, atlas: &Canvas, view: (i32, i32, u32, u32)) -> Vec<u8> {
         let (vx, vy, vw, vh) = view;
@@ -1178,6 +1231,176 @@ mod tests {
         write_png(path, vw, vh, &pixels).expect("write the screenshot");
         eprintln!("wrote {}", path.display());
         rail_map::clear_iso_heights();
+    }
+
+    /// Write the two pictures brief 15 has to be judged on.
+    ///
+    /// `cargo test -p rail_town --bin rail_town -- --ignored dump_iso_track --nocapture`
+    ///
+    /// Purpose-built scenes rather than the default seed, because the thing
+    /// under review is what a railway does where the ground steps, and the
+    /// default map's track is on the flat.
+    #[ignore = "writes files; run it deliberately to look at the track"]
+    #[test]
+    fn dump_iso_track() {
+        let _guard = crate::map::tests::ProjectionGuard::new(rail_map::Projection::Iso);
+        let atlas = canvas();
+
+        // ── A climbing S-curve on a hillside ───────────────────────────────
+        //
+        // Ground that rises to the north-east in bands, and a route that leans
+        // into the slope, straightens, then leans the other way — so every leg
+        // in the curve climbs, and the sleeper rhythm has to carry around the
+        // bend as well as across each boundary.
+        let mut hill = MapGrid::empty(28, 28, 1);
+        for y in 0..28i32 {
+            for x in 0..28i32 {
+                let tile = hill.get_mut(TileCoord { x, y }).unwrap();
+                tile.height = ((x + y) / 2).clamp(0, 12) as i8;
+                tile.kind = if tile.height >= 8 {
+                    TerrainKind::Mountain
+                } else if tile.height >= 4 {
+                    TerrainKind::Hills
+                } else {
+                    TerrainKind::Plains
+                };
+            }
+        }
+        // Out of the rose, adjacent steps only, so the curve is one a player
+        // could lay: east, easing left to north, then back right to east.
+        let mut route = vec![TileCoord { x: 3, y: 5 }];
+        for step in [
+            (1, 0),
+            (2, 1),
+            (1, 1),
+            (1, 2),
+            (0, 1),
+            (0, 1),
+            (1, 2),
+            (1, 1),
+            (2, 1),
+            (1, 0),
+            (1, 0),
+            (2, 1),
+            (1, 1),
+            (1, 2),
+        ] {
+            let last = *route.last().unwrap();
+            route.push(TileCoord {
+                x: last.x + step.0,
+                y: last.y + step.1,
+            });
+        }
+        write_scene(
+            &hill,
+            &atlas,
+            &route,
+            "/tmp/rail_town_iso_track_hillside.png",
+            2,
+        );
+
+        // ── A straight ramp beside a cliff face ────────────────────────────
+        //
+        // A plateau six bands up with a hard southern edge, and a notch cut
+        // five tiles wide for a straight run to climb through. The full
+        // 24 px face stands either side of the cutting, so the frame holds the
+        // ramp and the terrace it crosses at once — a railway refusing to
+        // follow the contour, next to the contour it is refusing.
+        const TOP: i32 = 6;
+        const NOTCH: i32 = 10;
+        let mut cliff = MapGrid::empty(24, 24, 1);
+        for y in 0..24i32 {
+            for x in 0..24i32 {
+                let tile = cliff.get_mut(TileCoord { x, y }).unwrap();
+                let plateau = if y <= 11 { 0 } else { TOP };
+                tile.height = if (x - NOTCH).abs() <= 2 {
+                    // The cutting floor: level, then two a tile up to the top.
+                    plateau.min(((y - 11) * 2).max(0))
+                } else {
+                    plateau
+                } as i8;
+                tile.kind = if tile.height >= 4 {
+                    TerrainKind::Hills
+                } else {
+                    TerrainKind::Plains
+                };
+            }
+        }
+        let straight: Vec<TileCoord> = (5..20).map(|y| TileCoord { x: NOTCH, y }).collect();
+        write_scene(&cliff, &atlas, &straight, "/tmp/rail_town_iso_track_cliff.png", 2);
+
+        rail_map::clear_iso_heights();
+    }
+
+    /// Lay a railway through the real placement rules, frame it, and write it
+    /// out at an integer zoom.
+    ///
+    /// The route goes down through `rail_sim::try_place_path` rather than being
+    /// asserted into place, so a picture can only ever be of a railway a player
+    /// could actually have built — grades, terrain and half-step clearances all
+    /// checked by the code that checks them in the game.
+    fn write_scene(map: &MapGrid, atlas: &Canvas, route: &[TileCoord], path: &str, zoom: u32) {
+        use rail_sim::{Money, MoneyLedger, TrackNetwork, TrackTerrain, GROUND_LAYER};
+
+        rail_map::set_iso_heights(map);
+        let terrain = TrackTerrain::new(
+            map.width,
+            map.height,
+            map.tiles().iter().map(|t| (t.water, t.height)),
+        );
+        let mut network = TrackNetwork::new();
+        rail_sim::track::try_place_path(
+            &mut network,
+            &mut Money::new(1_000_000_000),
+            &mut MoneyLedger::default(),
+            &terrain,
+            route,
+            GROUND_LAYER,
+        )
+        .unwrap_or_else(|e| panic!("{path}: the scene's route is not buildable: {e:?}"));
+        assert_eq!(network.len(), route.len(), "{path}: the route lost a tile");
+        // Every consecutive pair has to have actually linked, or the picture is
+        // of a broken railway and proves nothing.
+        for pair in route.windows(2) {
+            let dir = rail_sim::track::dir_index(pair[0], pair[1]).expect("a rose step");
+            assert!(
+                network
+                    .at(pair[0], GROUND_LAYER)
+                    .is_some_and(|p| p.links.has(dir)),
+                "{path}: {:?} did not link to {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        // Centre on the middle of the run, and show a window the zoom will fill.
+        let (cx, cy) = tile_to_world(route[route.len() / 2]);
+        let (out_w, out_h) = (1280u32, 720u32);
+        let (vw, vh) = (out_w / zoom, out_h / zoom);
+        let view = (
+            (cx - vw as f32 / 2.0) as i32,
+            (-cy - vh as f32 / 2.0) as i32,
+            vw,
+            vh,
+        );
+        let pixels = composite_iso_with_track(map, atlas, view, &network);
+        assert!(
+            pixels.chunks_exact(4).all(|p| p[3] == 255),
+            "{path}: the frame has a hole in it"
+        );
+
+        // Nearest-neighbour, whole numbers only — the pixel contract's zoom
+        // rungs (01 §2.1), so what is written is what a zoomed-in player sees.
+        let mut scaled = vec![0u8; (out_w * out_h) as usize * 4];
+        for y in 0..out_h {
+            for x in 0..out_w {
+                let s = (((y / zoom) * vw + (x / zoom)) * 4) as usize;
+                let d = ((y * out_w + x) * 4) as usize;
+                scaled[d..d + 4].copy_from_slice(&pixels[s..s + 4]);
+            }
+        }
+        write_png(std::path::Path::new(path), out_w, out_h, &scaled).expect("write the screenshot");
+        eprintln!("wrote {path}");
     }
 
     #[test]

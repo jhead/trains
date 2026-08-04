@@ -123,21 +123,21 @@ Voice: plain, specific, never cute. *"Mara waited 11 min at Eastgate"* — a nam
 
 ## 5. Overlays
 
-`Tab` cycles; each also has a direct key. An overlay tints the world and puts a legend bottom right. The world stays readable underneath — overlays inform, they don't replace.
+`Tab` cycles the ones that exist; each also has a direct key, and `F4` turns the overlay off. An overlay tints the world and puts a legend bottom right. The world stays readable underneath — overlays inform, they don't replace.
 
-| Overlay | Shows | Answers |
-| --- | --- | --- |
-| **Service** | Per-station score, as a catchment gradient | Where is service bad? |
-| **Coverage** | Catchment rings, unserved buildings hatched | Who am I missing? |
-| **Congestion** | Track tinted by utilisation; blocked trains pulse | Where is my network jammed? |
-| **Gradient** | Terrain tinted by slope; impassable hatched | Where can track physically go? |
-| **Cost** | Terrain tinted by build cost | Where is cheap to build? |
-| **Density** | Building density heat | Where is the town? |
-| **Profit** | Lines and stations tinted by net contribution | What is losing money? |
+| Overlay | Shows | Answers | Built? |
+| --- | --- | --- | --- |
+| **Service** | Per-station score, as a catchment gradient | Where is service bad? | yes (`F1`) |
+| **Congestion** | Track tinted by utilisation; blocked trains pulse | Where is my network jammed? | yes (`F2`) |
+| **Density** | Building density heat | Where is the town? | yes (`F3`) |
+| **Coverage** | Catchment rings, unserved buildings hatched | Who am I missing? | no |
+| **Gradient** | Terrain tinted by slope; impassable hatched | Where can track physically go? | no |
+| **Cost** | Terrain tinted by build cost | Where is cheap to build? | no |
+| **Profit** | Lines and stations tinted by net contribution | What is losing money? | no |
 
 **Cost** and **Gradient** are the two that teach terrain, and they should be available directly from the Build tool — reading the land before committing is a skill the game wants to develop, and it needs to be one keystroke away while building.
 
-**Profit** is the overlay that makes overextension visible. A network sprawling with a lot of `warn`-tinted track is a picture worth more than any balance sheet.
+**Profit** is the overlay that makes overextension visible, and it is the most valuable of the four missing ones. A network sprawling with a lot of `warn`-tinted track is a picture worth more than any balance sheet, and [08](08-economy-and-pressure.md) §3.2's whole recovery arc — notice the rate fall, find the branch nobody uses, tear it up — currently has no picture at all.
 
 ---
 
@@ -149,10 +149,10 @@ Voice: plain, specific, never cute. *"Mara waited 11 min at Eastgate"* — a nam
 - Track drawn thin, with lines in their colours and live train positions as moving dots.
 - Stations as labelled nodes sized by throughput.
 - Unserved demand marked, which makes the next expansion obvious at a glance.
-- All the overlays from §5 render here too, and at map scale they're often more useful.
-- Click anywhere to fly there; drag to box-zoom.
+- Click anywhere to fly there and leave.
+- All the overlays from §5 rendering here too, and box-zoom by dragging, are wanted and not built.
 
-This is the strategic read, and it exists partly so the world camera never has to zoom out past its art's resolution.
+This is the strategic read, and it exists partly so the world camera never has to zoom out past its art's resolution. It is a **plan drawing laid out in tile order**, not a picture of the world, so it reads identically whichever projection the world is in — see [02](02-world-and-terrain.md) §6.
 
 ---
 
@@ -160,14 +160,20 @@ This is the strategic read, and it exists partly so the world camera never has t
 
 Alerts are for things needing attention that the player is not currently looking at. They stack top-right, under the status strip.
 
-| Alert | Trigger |
-| --- | --- |
-| Line blocked | A train has been stuck beyond a threshold |
-| Station overwhelmed | Sustained waiting over capacity |
-| Train unprofitable | A train has lost money over a sustained window |
-| District declining | Density falling in a served area |
-| New opportunity | A new settlement or industry has appeared |
-| Cash low | Balance below a few minutes of operating cost |
+| Alert | Trigger | Built? |
+| --- | --- | --- |
+| Service low | A *served* station's score has fallen | yes |
+| Station overwhelmed | Sustained waiting over capacity | yes |
+| Gridlock | A ring of trains each blocked by the next — nothing will move without more railway | yes |
+| Trains parked | Stock standing idle | wired, and unreachable |
+| Cash low | Balance below a few minutes of operating cost | yes |
+| New opportunity | A new settlement or industry has appeared, still off the network | yes |
+| Train unprofitable | A train has lost money over a sustained window | no |
+| District declining | Density falling in a served area | no |
+
+**Gridlock earns its place by naming the thing the player cannot otherwise diagnose.** A permanent silent stall is the one failure with no visible cause, so the alert states the situation *and* the fix. It is not a resolution — see [07](07-trains-and-lines.md) §4.3 — and an alert that names a problem the sim cannot solve is still the right thing to ship, because the player can solve it.
+
+**"Trains parked" is a readout with nothing left to read.** It was written for a rule that has since been reversed: trains are no longer parked when money runs out, and nothing else parks them ([08](08-economy-and-pressure.md) §3.2). The alert, and the health strip's parked count beside it, are wired to a state the game can no longer enter. Either something should park a train or these should go; leaving them is a promise the interface cannot keep.
 
 Each is one line, clickable to fly to the cause, dismissible individually or all at once. **Alerts never pause the game and never steal focus.** At most three visible; the rest collapse into a counter.
 

@@ -200,7 +200,9 @@ Every slot carries its **name and its shortcut key**, side by side, at Micro siz
 
 Slots are sized by their label, not padded out to a fixed square — a 48×48 slot at `2×` was 96 physical pixels, which is most of a phone screen's width for one button.
 
-Tools with sub-modes (bridge, tunnel, station tier) expand a small row **beneath** the slot on selection, rather than opening a separate panel. The player should never lose sight of the world to choose a variant of what they are already doing.
+Tools with sub-modes — station tier is the one that has them — expand a small row **beneath** the slot on selection, rather than opening a separate panel. The player should never lose sight of the world to choose a variant of what they are already doing.
+
+Bridges are deliberately *not* one of these: dragging over water builds deck, and the price is the only thing that changes ([04](04-building-and-tools.md) §2.4). A sub-mode there would make the player answer a question the ground has already answered.
 
 **A player who has never read a document must be able to find every verb in the game from this row.** That is its entire purpose. Keyboard shortcuts are an accelerator layer on top, never the only way in.
 
@@ -278,18 +280,24 @@ Step 1 runs in `PreUpdate` (`ui::WindowEscSet`) and **consumes the key press** w
 | Key | Action |
 | --- | --- |
 | `V` `B` `X` `L` `T` `G` | Look / Track / Demolish / Line / Transit / Transport |
+| `P` `U` | Place station / upgrade station |
+| `Enter` | Commit the line being drawn |
 | `H` `Y` `K` `C` `O` `N` | Network / Town Talk / Ledger / Alerts / Goals / Neighbours |
 | `Space` | Pause / resume |
 | `1` `2` `3` | Speed |
+| `WASD`, arrows | Pan |
+| `Z` | Reset zoom to 2× |
 | `M` | Map View |
+| `I` | Isometric / top-down |
 | `Tab` | Cycle overlay |
+| `F1` `F2` `F3` `F4` | Service / congestion / density / overlay off |
 | `F` | Follow selection |
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
 | `Esc` | Unwind |
 
-Window keys avoid every key a gameplay verb already owns; a test asserts it. `L` belongs to the Line tool, so the Ledger answers to `K` — the two used to share `L`, and the Controls tab was right to flag it.
+Window keys avoid every key a gameplay verb already owns, and no two actions in the whole table share a binding; a test asserts both. `L` belongs to the Line tool, so the Ledger answers to `K` — the two used to share `L`, and the Controls tab was right to flag it. `X` is the Demolish tool and, with a train selected, the sell verb — the same "get rid of this" gesture, so it is one key on purpose.
 
-All rebindable. The list is shown in Settings and in a `F1` overlay, so no player ever needs external documentation to find a verb.
+All rebindable, from the Controls tab, which is also where the list is read. **There is no `F1` help overlay**: `F1` is the service overlay, and a second meaning for it would be a conflict rather than a convenience.
 
 ### 10.3 Accessibility
 
@@ -298,6 +306,8 @@ All rebindable. The list is shown in Settings and in a `F1` overlay, so no playe
 - **Reduced motion:** a setting that disables all tweens; everything cuts.
 - **Hold-to-repeat** on every incremental control, and full keyboard navigation of panels.
 - **No timing-critical input** anywhere in the game. This is a calm builder; nothing should ever require reflex.
+
+Of these, only text scale and the last one hold today. The rest are settings rows that persist and are not read — see [09](09-shell-and-menus.md) §5. The design rule they encode is unaffected and every new state should still obey it; what is missing is the plumbing, not the intent.
 
 ---
 

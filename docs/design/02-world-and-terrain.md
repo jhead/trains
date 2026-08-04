@@ -89,9 +89,10 @@ Flat cost per tile is the single change that most completely disables the routin
 | Gentle slope, or cross-contour on plains | 1.5× | mild |
 | Hills | 3× | noticeable |
 | Steep hillside, cut-and-fill | 6× | you think about it |
+| High mountain band | 10× | the last thing you can still buy |
 | Bridge, per tile, scaling with span | 8–90× | a commitment, then a project |
-| Tunnel, per tile | 15× | a project |
-| Cliff face, mountain | — | refused |
+| Tunnel, per tile | 15× | a project — **not built yet**; layers are reserved ([04](04-building-and-tools.md) §7) |
+| Cliff face, high peak | — | refused |
 
 The point of the spread is that **the cheapest route and the shortest route stop being the same line.** A detour of twelve flat tiles beating four hillside tiles is the moment terrain becomes gameplay.
 
@@ -128,6 +129,8 @@ The player's first act must be **short, cheap, and immediately rewarding.** The 
 - Everything else on the map is *visible but not yet worth reaching.*
 
 The first line should be affordable within the first minute, connectable within the second, and paying out by the third. That first payout is the moment the game teaches its own loop, and nothing should stand between the player and it.
+
+**These are real minutes — the clock the player is sitting at, not the world's own.** The two differ by a factor of 640, and read as sim-minutes the sentence above would be a claim about the first eighteen ticks, which is less time than one train needs to cross six tiles. This paragraph is binding and it is measured against a scripted opening beat rather than trusted: three seeded anchors of which the first line reaches two, an L round terrain rather than a ruler line, and the demand spawner left running. The bar it holds is stronger than the prose — the first fare lands inside the first minute of running, **each** of the first three minutes earns more than it costs (a line that only clears its costs on average is one the player watches bleed), and the capital is back inside ten.
 
 Scattering the starting anchors to the map's extremes produces the opposite: a long, expensive, unrewarded haul as the first thing the player ever does. Maximum separation is the correct objective for a *late* goal and the worst possible one for an opening.
 
@@ -167,7 +170,9 @@ The world is played at a zoom where detail is visible and the whole map is not. 
 
 It is not a zoomed-out camera. It is a second, purpose-built rendering that answers different questions: *where is my network thin, where is demand I'm not serving, where does the terrain want a line to go.* Clicking anywhere in it flies the world camera there.
 
-The same view hosts the map-wide overlays described in [05 — Inspection & Overlays](05-inspection-and-overlays.md).
+**It is laid out in tile order, and reads identically in both projections.** A plan drawing is a drawing of the map, not a picture of the world, so it is deliberately immune to how the world happens to be drawn at the time ([01](01-art-direction.md) §6.1). Flipping the view never changes what the plate says.
+
+It is also where the map-wide overlays described in [05 — Inspection & Overlays](05-inspection-and-overlays.md) §5 want to render — at map scale they are often more useful than they are in the world — though that is not built yet.
 
 ---
 

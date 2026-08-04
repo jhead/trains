@@ -33,7 +33,7 @@ The smallest set of changes that removes the prototype impression entirely.
 - The pixel contract enforced — integer zoom only, cursor-anchored, contiguous terrain, no runtime sprite rotation.
 - The palette adopted across world and UI.
 - The pixel UI kit: bitmap font, square panels, the spacing grid.
-- A toolbar with icons, so every verb is discoverable without documentation.
+- A verb row with named, labelled slots, so every verb is discoverable without documentation. (Named rather than iconic: there is no icon set, and a word a player can read beats a glyph they have to guess — [03](03-ui-system.md) §7.)
 - The status strip: money, rate, date, speed.
 - Sound for laying track, and for failing to.
 
@@ -51,7 +51,7 @@ Everything becomes inspectable.
 - The Station panel with its plain-language cause line.
 - The Peep card — name, portrait, history, mood with a reason.
 - Town Talk as a living ticker, click-to-fly, deduplicated, with praise as well as complaint.
-- Overlays: service, coverage, congestion, gradient, cost, density, profit.
+- Overlays: service, congestion and density first; then coverage, gradient, cost and profit. Profit is the one the loop depends on — [08](08-economy-and-pressure.md) §3.2's recovery arc has no picture without it.
 - Map View.
 - The ledger, with income and expense by category and a trend.
 - Alerts, actionable and non-intrusive.
@@ -86,8 +86,10 @@ The most valuable phase, and the one the previous two exist to support.
 
 The world stops being a diagram.
 
-- Real terrain art: authored material transitions, cliffs that make elevation readable, water with structure.
-- The track sprite bank and authored junctions, at sixteen graph directions.
+**This phase is now isometric-first.** The projection landed and was played, and the owner committed to it ([01](01-art-direction.md) §8.1); everything below is drawn for the 2:1 angle, with the top-down set kept as the toggle's other half rather than extended. The order within the phase is set by [01](01-art-direction.md) §6.2 — the diamond autotiler first, because staircased shorelines are the most visible thing wrong; then the track cross-section (brief **15**, forthcoming); then the sprites that are still top-down stickers.
+
+- Real terrain art: a diamond autotiler with authored material transitions, cliff faces that make elevation readable, water with structure.
+- The track sprite bank and authored junctions, at sixteen graph directions, baked per projection.
 - Buildings in tiers, on lots, with district character.
 - Construction and decay as watchable events.
 - Peeps that walk, travel, board, alight, and move away by name.
@@ -121,8 +123,8 @@ The world stops being a diagram.
 Deliberately out of scope until the phases above are complete, and none of them are blocked by that:
 
 - **Underground and elevated construction.** The interaction is designed in [04 — Building & Tools](04-building-and-tools.md) §7 so it slots in without re-teaching, but tunnels are a Phase C+ luxury.
-- **Neighbour maps and asynchronous multiplayer.** Designed in [12 — Multiplayer](12-multiplayer.md) and sequenced as MP-1 through MP-3 there. MP-1 needs no networking at all and can follow Phase E directly. The edge-portal and command seams exist precisely so this stays cheap to add; nothing in these briefs should compromise them.
-- **Signals in full.** Passing loops and double track cover congestion adequately for a first pass; block signalling is the depth extension after.
+- **Live networking between two real players.** [12 — Multiplayer](12-multiplayer.md) sequences the feature as MP-1 through MP-3. **MP-1 — borders, portals, manifests and generated echo neighbours — has shipped, and it needed no networking at all**, which was the whole argument for building it first. MP-2 and MP-3 are the deferred half: they want a blob server, and nothing before them is blocked by it.
+- **Signals in full.** Passing loops and double track cover congestion adequately for a first pass; block signalling is the depth extension after. Note the prerequisite in [07](07-trains-and-lines.md) §4.3 — a single-track ring can still deadlock, and that is movement work rather than signalling work.
 - **Seasons and weather as mechanics**, beyond the visual and audio layer.
 
 ---

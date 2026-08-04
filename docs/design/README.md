@@ -2,9 +2,14 @@
 
 Detailed direction for what Rail Town *is*. These briefs elaborate the vision in [`DESIGN.md`](../../DESIGN.md) into specific look, feel, interaction and gameplay.
 
-They are written forward-looking. They describe the game, not the build — where a brief states a rule, that rule is the target, and nothing here should be read as commentary on any particular implementation.
+They are written forward-looking. They describe the game, not the build — where a brief states a rule, that rule is the target.
 
-For a snapshot of progress against these, see [`docs/PROGRESS-AUDIT.md`](../PROGRESS-AUDIT.md), which is the only document in the repo that talks about current state.
+Two exceptions to that, both earned:
+
+- **Where a brief has been overtaken by a playtest, it says so and records the verdict**, including the argument it lost. A rejected design with its reasoning attached is worth more than a deleted one — 01 §8.1 and 14 §8 are the pattern.
+- **Where a brief describes something that does not exist yet, it marks it**, because a target that reads as a description makes the docs untrustworthy the first time someone checks.
+
+For where the build actually stands, see [`docs/BURNDOWN.md`](../BURNDOWN.md) — the live ledger, including the carried-debt table. [`docs/PROGRESS-AUDIT.md`](../PROGRESS-AUDIT.md) is an older snapshot and goes stale by design.
 
 ---
 
@@ -26,8 +31,9 @@ For a snapshot of progress against these, see [`docs/PROGRESS-AUDIT.md`](../PROG
 | 12 | [Multiplayer: Neighbour Maps](12-multiplayer.md) | How do maps sit next to other players' maps? |
 | 13 | [Shadows](13-shadows.md) | How does light fall on the world? Sun quantisation, what casts, what it costs. |
 | 14 | [Music](14-music.md) | What does the score actually play? Mode, harmony, melody, form, synthesis. |
+| 15 | Isometric track *(forthcoming)* | How does rail draw at 2:1? Cross-section, bank, junctions on the diamond. |
 
-**01 and 03 are binding standards** — the pixel contract, the palette and the UI kit are constraints, not suggestions. 02 and 04–10 are feature design. 11 sequences them. 13 and 14 are subordinate to 01 and 10 respectively: where a brief and its parent disagree, the parent wins.
+**01 and 03 are binding standards** — the pixel contract, the palette and the UI kit are constraints, not suggestions. 02 and 04–10 are feature design. 11 sequences them. 13, 14 and 15 are subordinate to 01, 10 and 01 respectively: where a brief and its parent disagree, the parent wins.
 
 ---
 

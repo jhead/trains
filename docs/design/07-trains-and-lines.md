@@ -20,31 +20,44 @@ A **line** is a named, coloured, ordered sequence of stations that trains are as
 
 Line creation is a drawing gesture, matching the build tool's feel:
 
-1. Select the Line tool.
-2. **Click stations in order.** Each click extends the line, and the route between consecutive stops is drawn along the actual track in the line's colour, so the player sees the real path — including where it doubles back or shares a corridor.
+1. **`L`** selects the Line tool.
+2. **Click stations in order.** Each click extends the line, and the route between consecutive stops is drawn along the actual track in the line's colour, so the player sees the real path — including where it doubles back or shares a corridor. Right-click takes the last stop back off the draft.
 3. If two stops aren't connected, the segment draws `warn` with *"No route — Millhaven is not connected to Eastgate."*
-4. `Enter` confirms. The line gets a colour from a distinguishable palette rotation and a name suggested from its endpoints — *"Eastgate — Millhaven"* — which the player can override.
-5. Assign trains, set frequency, done.
+4. **`Enter`** confirms. The line gets a colour from a distinguishable palette rotation and a name suggested from its endpoints — *"Eastgate — Millhaven"* — which the player can override. Town Talk says the line opened and what to do next.
+5. **Crew it.** The tool puts itself down, hands the pointer back to Look, and focuses the new line; clicking a train in the world then assigns it to that line, and the assignment is announced. A focused row says so in words, because a mode the player is in and cannot see is a mode they will be surprised by; `Esc` leaves it.
 
-Editing is the same gesture: drag a stop to reorder, click to insert, right-click to remove. A line can be a there-and-back or a loop.
+Every exit from the tool — `Enter`, `Esc`, or another verb taking the pointer — hands the world back clickable. Confirming a line used to leave the pointer parked in a half-state, so the player's next click on a train did nothing at all, with no message: the line they had just drawn could not be crewed, which is the one thing they drew it for.
+
+**A duplicate is refused, and an exact reverse is a duplicate.** An out-and-back is one service, not two, and a player who draws the return leg as its own line gets told so rather than getting a second row that quietly competes with the first for the same trains.
+
+Removal is per-row from the Lines panel and goes through the confirm dialog, because a line is a decision several other decisions hang off.
+
+Editing in place — drag a stop to reorder, click to insert — is designed and not built. A line can be a there-and-back or a loop.
 
 ### 2.2 What a line owns
 
-| Property | Meaning |
-| --- | --- |
-| **Stops** | Ordered, each with a dwell time |
-| **Colour** | Identity everywhere — on the map, in panels, on the trains themselves |
-| **Trains** | Assigned vehicles |
-| **Frequency** | Target headway; the game reports the achieved one |
-| **Direction** | Out-and-back, or a one-way loop |
+| Property | Meaning | Built? |
+| --- | --- | --- |
+| **Name** | Suggested from the endpoints, overridable | yes |
+| **Stops** | Ordered | yes |
+| **Colour** | Identity everywhere — on the map, in panels, on the trains themselves | yes |
+| **Trains** | Assigned vehicles | yes |
+| **Direction** | Out-and-back, or a one-way loop | yes |
+| **Frequency** | Target headway; the game reports the achieved one | **no** |
+
+A line survives losing its route: demolish the far end and it goes **dormant** rather than being deleted. It is the player's named object, its trains still point at an id that resolves, and putting the stop back makes it run again. Deleting it would strand every train assigned to it on a line that no longer exists — the tidier behaviour is the destructive one.
+
+Dwell is currently a property of the train kind rather than of the stop, which is the same debt as §3's last two rows.
 
 ### 2.3 The Line panel
 
 - Colour, name, and a **schematic strip diagram** in the style of a transit map — stops as nodes with waiting counts and current train positions sliding along it. One glance shows bunching, gaps, and where the crowding is.
-- **Frequency**: target versus achieved. When achieved is much worse than target, the panel says why — *"Bunching at Eastgate — dwell exceeds headway"* — because a player who can see a problem but not diagnose it cannot fix it.
-- **Economics**: revenue, opex, net, per minute, with a trend.
-- **Load**: average occupancy per segment, showing which leg is the busy one.
-- Actions: add or remove trains, edit route, reverse, duplicate, delete.
+- **Frequency**: target versus achieved. When achieved is much worse than target, the panel says why — *"Bunching at Eastgate — dwell exceeds headway"* — because a player who can see a problem but not diagnose it cannot fix it. *(Not built; §2.2.)*
+- **Economics**: revenue, opex, net, per minute, with a trend. *(Not built — the ledger is category-level, and money is not tagged with the line that earned it. This is the one thing on this list a player asks for by name; see [08](08-economy-and-pressure.md) §6.)*
+- **Load**: average occupancy per segment, showing which leg is the busy one. *(Waits on capacity — §3.)*
+- Actions: crew from the world by clicking a train, remove a line through the confirm dialog. Edit route, reverse and duplicate are designed, not built.
+
+**Nothing in this panel fails quietly.** It once had a single control and a single response to being pressed with nothing selected: none. A playtester pressed it, nothing happened, and there was no way to tell whether the game had heard them. Brief 04 §3's rule is not a build-tool rule — every refusal anywhere writes a sentence where the player is already looking.
 
 ---
 
@@ -52,18 +65,20 @@ Editing is the same gesture: drag a stop to reorder, click to insert, right-clic
 
 The vision calls them sidegrades with distinct constraint profiles. That requires them to actually constrain differently — a price difference is not a profile.
 
-| | **Transit** | **Transport** |
-| --- | --- | --- |
-| Carries | People | Goods |
-| Capacity | Modest per car, many cars | Large per car, fewer cars |
-| Acceleration | Brisk | Slow — this is the defining trait |
-| Top speed | High | Moderate |
-| Gradient tolerance | Good | **Poor** — a hill that transit shrugs off, freight cannot climb loaded |
-| Curve tolerance | Good | Poor — long trains need generous radii |
-| Dwell at stops | Short, scales with crowd | Long, scales with load |
-| Stop pattern | Frequent, short hops | Point to point |
-| Operating cost | Lower | Higher |
-| Drives | Residential and commercial growth | Cash flow and industry |
+| | **Transit** | **Transport** | Built? |
+| --- | --- | --- | --- |
+| Carries | People | Goods | yes |
+| Top speed | High | Moderate | yes |
+| Gradient tolerance | Good | **Poor** — a hill that transit shrugs off, freight cannot climb loaded | yes |
+| Curve tolerance | Good | Poor — long trains need generous radii | yes |
+| Dwell at stops | Short | Long | yes |
+| Operating cost | Lower | Higher | yes |
+| Stop pattern | Frequent, short hops | Point to point | emergent |
+| Drives | Residential and commercial growth | Cash flow and industry | emergent |
+| **Capacity** | Modest per car, many cars | Large per car, fewer cars | **no** |
+| **Acceleration** | Brisk | Slow — this is meant to be the defining trait | **no** |
+
+**The last two rows are the debt, and they are the two that matter most.** Both kinds carry exactly one job at a time today, so "capacity" is not yet a dimension at all, and there is no acceleration model — a train crosses tiles at a rate and does not build up to it. The profile the sim keeps has the seams for both; neither is filled in. Until they are, the differences that *do* exist are speed, grade, curve, dwell and cost, which is enough for the two kinds to want different alignments and not enough for the "defining trait" claim above to be true. Dwell scaling with crowd and with load is part of the same unbuilt piece.
 
 The consequences are the interesting part, and they should be discoverable by playing rather than by reading:
 
@@ -99,6 +114,8 @@ The player needs real tools, or congestion is just a cap:
 
 Each of these is a distinct strategy with a distinct cost, which is what makes a congested corridor an interesting problem rather than a fail state.
 
+**Today only the first two exist, and there is one shape they do not cover.** A single-track ring can deadlock outright — trains meet nose to nose with nowhere to pass, and nothing in the sim breaks the tie. An alert names the situation and names the fix, which is the honest minimum, but *naming* a deadlock is not *resolving* one. The real remedy is movement work: a train that backs out, or one that refuses to enter a corridor it cannot leave. Signals are the depth extension on top of that, not a substitute for it.
+
 ### 4.4 It should reward slack
 
 The vision wants networks built with slack and redundancy to be rewarded, especially against events. That means an alternative route must be *usable* — trains reroute around a blockage when a path exists. A player who built a second way round should watch it save them, and that moment is the reward for having spent money on something that looked unnecessary.
@@ -109,8 +126,11 @@ The vision wants networks built with slack and redundancy to be rewarded, especi
 
 - **Named**, either automatically or by the player. A named train that has been running the same line for an hour is a thing the player has a relationship with.
 - **Composed** of a locomotive and cars, with the length visible in the world — a long freight train *looks* long, and that is what makes gradient and curve constraints feel physical rather than arithmetic.
-- **Aging**: gradual increase in operating cost and slight reliability loss over a long life, creating a gentle reason to reinvest. Never a failure — just a nudge, and never a surprise.
-- **Purchasable** from a panel that shows the actual stats being compared, with a placement flow that only permits legal locations and says why when one isn't.
+- **Aging**: gradual increase in operating cost and slight reliability loss over a long life, creating a gentle reason to reinvest. Never a failure — just a nudge, and never a surprise. *(Designed, not built.)*
+- **Bought and placed with one verb.** `T` and `G` arm placement for transit and goods; a click on a station tile puts a train down. The verb asks the **yard first** and only reaches for the bank when there is nothing there to place, which is why the slots read *place / buy* rather than *buy*. Pressing it used to purchase every time, so a player holding an unplaced train and less than its price in the bank got a failed purchase — reading as *"I can't place a train, I'm stuck"* — while a free placement was already armed and a train of theirs was sitting invisibly in the yard. A verb that is honest at any balance is worth more than one that is simple.
+- **Sold** with `X` on a selected train, after a confirm, for the **full purchase price**. Anything it was carrying goes back on the job board rather than vanishing with it. Rolling stock is a reversible decision for the same reason track is: the game wants the player experimenting with the shape of their network, and an irreversible purchase is a reason to stop.
+- **Never deleted by the world.** A train left standing where its track used to be is recalled to the yard, not destroyed. The player paid for it.
+- Purchase, entering service, and sale all say so in Town Talk — a purchase as an opportunity (there is now something to do), a placement as praise (the thing got done).
 
 ---
 
@@ -134,8 +154,9 @@ Rendering interpolates between simulation ticks. The simulation stays fixed-step
 
 The player should not micromanage individual journeys — they set up a system and watch it run. But it must be *their* system:
 
+- **Assignment is the switch between the two behaviours.** A train on a line patrols its stops and prefers work that lies along it. A train on no line free-roams the job board and takes whatever is nearest. Both are useful — the free-roamer is what makes the first ten minutes work before any line exists — and choosing between them is the player's first operational decision.
 - **Lines** decide where trains go.
-- **Frequency** decides how often.
+- **Frequency** decides how often. *(Designed, not built — a line has no headway yet, and the number of trains on it is the only lever.)*
 - Passengers choose among the lines the player has provided, including transfers, and their choices are visible in the data. Someone taking a two-transfer journey because the direct link doesn't exist is a design signal the player can act on.
 - **Goods** flow along the routes the player set up, with sensible defaults so a freight line "just works" once drawn.
 

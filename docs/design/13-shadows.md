@@ -2,6 +2,8 @@
 
 **Status: feature design, subordinate to [01 — Art Direction](01-art-direction.md).** Where this brief and 01 disagree, 01 wins. The pixel contract (§2), the palette cap (§3), the time-of-day pass (§3.4) and the composition rules (§6) are constraints on everything below, not inputs to be negotiated.
 
+**Designed, not built, and written before the projection moved.** Nothing here has shipped — the commit that added this brief touched only docs — and everything below assumes the top-down composition with a fake front face that 01 §6.1 has since demoted to the toggle's other half. The *principles* survive the change intact and are arguably strengthened by it: a hard-edged sun, shadows capped short, and every shadow abutting a visible cause. The *geometry* does not. In isometric a tile is a diamond, terrain is lifted rather than banded flat, and a cliff already shows two real faces — so §6's terrain-onto-terrain maths and §9's cliff-art costing both want redoing against the diamond before Phase 1 is scheduled. Read this brief for its argument, not for its offsets.
+
 **The premise:** the world already has a clock, a sun and a set of ramps drawn as though light came from somewhere. What it does not have is *consequence* — nothing casts, nothing receives, and the hour of the day changes the colour of the frame without changing its shape. Shadows are how the world stops being a coloured map and starts being a lit place.
 
 The whole design turns on one question, and it is a gameplay question, not an art question:
@@ -52,7 +54,7 @@ The sun state is a **pure function of the day cycle's position**, sitting beside
 
 Four decisions inside that table are load-bearing:
 
-**The sun never goes north.** It rises east, crosses south, sets west. The world is drawn from a high angle with a fake front face ([01 §6.1](01-art-direction.md)) — a northern sun would light every face the camera cannot see and shade every face it can. There is no hour at which this game looks better from behind.
+**The sun never goes north.** It rises east, crosses south, sets west. The camera looks at the world's southern faces in both projections ([01 §6.1](01-art-direction.md)) — a northern sun would light every face the camera cannot see and shade every face it can. There is no hour at which this game looks better from behind.
 
 **Azimuth and length are not independent.** They are both functions of one clock, and allowing (East, short) or (South, long) would multiply the state count for combinations the sky cannot produce. One state, one look.
 

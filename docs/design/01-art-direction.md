@@ -8,7 +8,7 @@
 
 ## 1. The look in one sentence
 
-**A cool-shadowed, low-saturation pixel town seen from a fixed high angle, where the only bright things in the world are the rails, the lit windows, and the money.**
+**A cool-shadowed, low-saturation pixel town seen in fixed two-to-one dimetric, where the only bright things in the world are the rails, the lit windows, and the money.**
 
 Three adjectives, and every asset is tested against all three:
 
@@ -62,9 +62,11 @@ The `downsample` plate's finding is blunt: screen-anchored Floyd–Steinberg *bo
 
 ### 2.5 Art is baked when data changes, never per frame
 
-Track sprite selection, autotile mask resolution and building composition happen on edit, in response to the world changing. The unit of rebuild is a **16 × 16 tile chunk**, and a chunk composites to a single drawn sprite.
+Track sprite selection, autotile mask resolution and building composition happen on edit, in response to the world changing. Top-down terrain rebuilds in units of a **16 × 16 tile chunk**, and a chunk composites to a single drawn sprite.
 
 The `spritebank` plate measures a full rotation-bank rebake at under a millisecond, so even a pathological full-map rebuild is affordable. Dirty-chunking is not about the cost of baking; it is about never doing per-tile work in a per-frame loop.
+
+**The rule is "never per frame", not "always chunked".** A diamond grid is not a rectangle of rectangles, so isometric bypasses the compositor and draws one sprite per tile plus its cliff faces. That is legal here for one reason: every tile draws from the same baked atlas, so the whole map batches into a single draw call, and nothing is re-baked between map swaps. A per-tile *draw* is fine; a per-frame *bake* is what this section forbids.
 
 ---
 
@@ -166,8 +168,8 @@ Window lighting is not part of the tint — it is a second sprite layer that fad
 
 | Property | Behaviour |
 | --- | --- |
-| Projection | Orthographic, high angle, with a fake front face (§6.1) |
-| Zoom | 1× / 2× / 3× via wheel, `+` / `-`; `Z` returns to 2× |
+| Projection | Orthographic. **Isometric** (2:1 dimetric) is the primary view; **top-down** with a fake front face is the other half of the toggle. `I`, or Settings → Display → *World view*. See §6.1. |
+| Zoom | 1× / 2× / 3× via wheel, `+` / `-`; `Z` returns to 2×. The two views open on different rungs — a tile is twice as wide in isometric — and a zoom the player chose survives the flip while a default is re-picked. |
 | Zoom anchor | **The cursor.** The world point under the pointer stays under the pointer, then the result rounds to texels. |
 | Keyboard pan | WASD and arrows, rounded per frame |
 | Drag pan | Middle-drag, or `Space` + left-drag, 1:1 with the cursor |
@@ -246,11 +248,28 @@ The polished-railhead decay is close to free and it is one of the most satisfyin
 
 ### 6.1 Projection and depth
 
-Top-down with a **fake front face**: a building's tile footprint is its ground plan, and it draws upward past the tile boundary by its height. This buys a legible skyline without the authoring and coordinate costs of true isometric.
+**The world is drawn in 2:1 dimetric isometric, and top-down is the toggle's other half.** `I` flips it, Settings → Display keeps the setting, and the flip is a presentation rebuild — same world, same save, camera left over the tile it was over, sub-tile offset and all. §8 records why this reverses the brief's original verdict.
 
-Depth is one rule: things further south draw in front. Layer bands run terrain → terrain decals → track → track decals → buildings → peeps → trains → weather → time-of-day tint, with everything from buildings up sorted by tile row within its band. A train drawing *over* the buildings north of it and *under* the buildings south of it does most of the work of selling the third dimension on its own.
+**Isometric.** A tile is a **64 × 32 diamond**. The ground plane maps `sx = gx - gy`, `sy = (gx + gy) / 2`, and terrain height then *lifts* a tile by **4 screen pixels per height unit** — so a band step (the generator moves in threes and fours) stands 12–16 px, between three eighths and half a tile's screen height, and the tallest band on a default map towers two tiles. Water sits at its surface rather than its bed, so a river is a flat ribbon and not a nine-band canyon.
 
-### 6.2 Terrain reads as terrain
+The camera sits over the map's **south-west** corner. A tile's near corner is therefore its south-west one, and the two faces a cliff can show are its **south** and **west** ones — which is what the cliff art has to be drawn for.
+
+Depth sorts on the tile's position on the **flat** ground plane, never its lifted one: a mountain must not draw in front of the tile standing between it and the camera merely because it is tall. Height is a lift, not a sort key.
+
+**Top-down** keeps the **fake front face**: a building's tile footprint is its ground plan, and it draws upward past the tile boundary by its height. That buys a legible skyline for nothing, and it is why this view was worth keeping rather than deleting.
+
+Depth in either view is one rule: things nearer the camera draw in front. Layer bands run terrain → terrain decals → track → track decals → buildings → peeps → trains → weather → time-of-day tint, with everything from buildings up sorted by row within its band. A train drawing *over* what is behind it and *under* what is in front does most of the work of selling the third dimension on its own.
+
+### 6.2 What isometric does not have yet
+
+The projection landed; the art has not followed it. These are the honest gaps, and together they are the art roadmap — not caveats to be worked around:
+
+- **No diamond autotiler.** The flat renderer resolves material transitions from a neighbour mask; the diamond renderer draws one diamond and up to two cliff faces per tile and nothing between them. Shorelines therefore staircase. This is the biggest and most visible of the four.
+- **Non-terrain sprites are still top-down.** Buildings, stations, industries, peeps and trains are drawn for the other view and stand in this one as stickers. They are in the right place; they are the wrong drawing.
+- **The rail cross-section aliases at 1×.** A 1-texel railhead across a 2:1 slant has nowhere to go. Track art wants baking per projection — brief **15 (forthcoming)** takes that on.
+- **Cliffs occlude picking on about one tile in twenty.** Ground genuinely behind a cliff answers with the cliff, which is correct — the player cannot see the tile they are asking about. What holds in both views is the property the cursor depends on: whatever tile comes back, its own centre comes back to it, so the ghost is always under the pointer. The number is asserted, not estimated.
+
+### 6.3 Terrain reads as terrain
 
 Three requirements, in priority order:
 
@@ -258,7 +277,7 @@ Three requirements, in priority order:
 2. **Elevation is legible at a glance.** Where the height delta between neighbours is steep, the terrain draws a dedicated cliff face — a solid banded strip in the rock ramp — rather than a gradient. Cliffs are what turn a heightmap into a landscape the player can *route around*, and without them the elevation data may as well not exist. If the player cannot see the ridge, the ridge is not part of the puzzle.
 3. **Large expanses do not tile visibly.** Each material carries three flat variants selected by world hash, and water carries depth bands so that open sea has structure instead of being a single flat field.
 
-### 6.3 Ambient motion
+### 6.4 Ambient motion
 
 Calm is not still. A still world reads as broken. Everything below is cheap and world-anchored.
 
@@ -298,6 +317,8 @@ What has to be drawn, in dependency order. Day estimates assume the `junction` p
 
 Every one of these is placeholder-able as flat rectangles in the meantime — but a useful placeholder **uses the real palette and the real dimensions**, so that swapping in final art is a texture change and never a layout change. A placeholder that is the wrong size or the wrong colour is not a placeholder; it is a second thing to redo.
 
+**This manifest is costed for one projection, and there are two.** Terrain is already drawn twice — a square set and a diamond set with cliff faces — and everything from *Stations* down is still the top-down drawing standing in the isometric view. Redrawing those for the angle is roughly a second pass through the bottom two-thirds of this table, and §6.2 is the order to do it in. It is the largest single piece of art work left in the project, and it is the direction, not a contingency.
+
 ---
 
 ## 8. Rejected, and why
@@ -308,15 +329,28 @@ Every one of these is placeholder-able as flat rectangles in the meantime — bu
 | SDF track banded into palette indices | Beautiful, shader-portable, and it self-intersects below the ballast half-width radius with a visible medial-axis crease. Revisit only if track art ever goes truly continuous-angle. |
 | Eight directions | The named failure mode of the `spritebank` plate. |
 | Sixty-four directions | Both walls close at ≈32. The 5.6° step is below the junction pixel floor, and the art is a quarter of a year, spent drawing pairs that rasterize identically. |
-| True isometric | Doubles every sprite's authoring cost and breaks the square-tile track graph, for no gain the fake front face doesn't already deliver. |
 | Fractional zoom, smooth camera glide | The `crawl` plate. An architecture decision, already taken. |
 | Unlimited palette | The cap is the reason forty-five colours read as one world. |
+
+### 8.1 True isometric — reversed, on evidence
+
+This table used to end with a row rejecting isometric outright: *"doubles every sprite's authoring cost and breaks the square-tile track graph, for no gain the fake front face doesn't already deliver."*
+
+**The cost half of that was right and still is.** Every non-terrain sprite in the game does want redrawing for the angle, and §7's manifest is close to a second time through for anything that is not ground. Nothing below makes that cheaper.
+
+**The gain half was wrong**, and it was wrong in the only way that counts: it was an argument made from a table rather than from the screen. A runtime toggle was built to settle it, the owner played both, and the verdict (2026-08-04) was *"I'm definitely all in on iso mode now and that's where I want to focus build effort."*
+
+The reason it lost is worth keeping, because it is a design reason and not a taste one. **Elevation is the routing puzzle, and from directly above elevation is a colour.** The fake front face sells a skyline; it cannot sell a ridge, because a ridge seen from above has no side. Brief 02 spends its whole §2.2 making terrain into legible landforms with passes to find, and §2.3 states flatly that a ridge the player cannot see is not part of the puzzle. Isometric is what makes that ground true in the frame rather than only in the heightmap.
+
+The graph objection turned out to be no objection at all: the projection is a *view*, not a world model. Tiles stay square, the sixteen-direction graph is untouched, the simulation cannot observe which view is on, and the whole flip is two coordinate functions and a terrain renderer swap.
+
+So: **isometric is the primary presentation direction, top-down stays as the toggle's other half**, and the bill in §6.2 is the roadmap rather than a regret.
 
 ---
 
 ## 9. Acceptance bar
 
-The art direction has landed when a player who has never seen the game can, from a single still screenshot at 2×:
+The art direction has landed when a player who has never seen the game can, from a single still screenshot at the view's opening zoom (2× top-down, 1× isometric — §4):
 
 1. Tell land from water from hills from mountain, with no legend.
 2. Trace a rail line across the frame and see where it forks.

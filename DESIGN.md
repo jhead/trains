@@ -4,6 +4,14 @@
 
 A calm, pixel-art sandbox about laying railway by hand and watching a small town grow around the service you provide. Rail is the only thing you build directly. The town is the readout — it thickens where your trains reach and thins where they don't. Scale stays small enough that individual residents remain visible and knowable.
 
+## How It Is Drawn
+
+**Two-to-one dimetric isometric**, hand-drawn pixel art at a whole-number scale, on one fixed camera angle that never rotates.
+
+Isometric is the primary direction because elevation has to be *seen* to be routed around. A ridge the player must cross reads as a wall from the side and as a colour change from above, and the routing puzzle is the one thing in the design that cannot survive being illegible. The cost is real — every sprite in the world eventually wants redrawing for the angle — and it is being paid deliberately.
+
+Top-down remains as the other half of a toggle. It is the cleaner read in a dense yard and it is where the art started, so it stays rather than being deleted. Both views share the same world, the same save, and the same schematic **Map View** for the strategic read; switching between them is a presentation rebuild and nothing more.
+
 ## The Loop
 
 - **Seconds** — place a piece of track. Fast, reversible, immediately legible.

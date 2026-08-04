@@ -209,13 +209,15 @@ Because a neighbour can only add to your world, a malicious manifest's blast rad
 
 Each phase is independently shippable and independently valuable — a property worth more than any individual feature here.
 
-| Phase | Contents | Network needed |
-| --- | --- | --- |
-| **MP-1 — Borders & Echoes** | Portal opening as construction, border yard, transit, manifests, standing offers, generated echo neighbours, Neighbours panel | **None** |
-| **MP-2 — Friend links** | Friend codes, blob exchange, cache and reconciliation, presence, donated snapshots | Yes |
-| **MP-3 — Community** | Opt-in stranger pool, relationship maturity, border-scale trade economy | Yes |
+| Phase | Contents | Network needed | State |
+| --- | --- | --- | --- |
+| **MP-1 — Borders & Echoes** | Portal opening as construction, border yard, transit, manifests, standing offers, generated echo neighbours, Neighbours panel | **None** | **shipped** |
+| **MP-2 — Friend links** | Friend codes, blob exchange, cache and reconciliation, presence, donated snapshots | Yes | deferred |
+| **MP-3 — Community** | Opt-in stranger pool, relationship maturity, border-scale trade economy | Yes | deferred |
 
-**MP-1 delivers most of the fantasy and requires no networking whatsoever.** Build it first, ship it, and let it prove the design before any infrastructure exists. If MP-2 never happened, MP-1 would still be a good feature — which is the correct shape for a risky system.
+**MP-1 delivered most of the fantasy and required no networking whatsoever** — which was the whole argument for building it first, and it held. Every neighbour in the game today is an echo: a pure function of the map's seed and the edge it stands behind, regenerated rather than stored, so nothing about it can drift from what it says it is. Nothing anywhere in the build talks to another machine.
+
+MP-2 is where the infrastructure starts, and it is deferred rather than dropped: it wants somewhere to put a blob, and that is the only thing standing between the current build and a real friend on the other side of a portal. If it never happened, MP-1 would still be a good feature — which is the correct shape for a risky system, and it is now demonstrated rather than argued.
 
 ---
 

@@ -59,10 +59,12 @@ The track-laying sound is the game's signature. It should be good enough that pl
 
 ### 3.2 Trains
 
-- **Motion** — a rolling loop, pitched and filtered by speed, positional. Different timbre for transit and freight; a heavy goods train should be audibly heavy.
+- **Motion** — a rolling loop, pitched and filtered by speed, positional. Different timbre for transit and freight; a heavy goods train is audibly heavy — it sits lower, its sleepers come slower and deeper, and it grows a groan a railcar never has.
+- **One train sits _under_ the whole ambience bed.** The loudest a single rolling voice may be is below what the landscape is doing, and that relationship is asserted rather than mixed by ear. A railway that drowns out the world it runs through has inverted the brief's first sentence.
+- **Distance falls off to nothing**, so a train the player is not looking at is not in the mix at all — and a train sitting at a platform is near-silent, because a dwelling train is not making the sound the loop is for.
 - **Starting and stopping** — a chuff or whine on departure, brakes on arrival. These punctuate the map's rhythm.
-- **Whistle** — on departure and at crossings. Sparing. A distant whistle across a valley is one of the best sounds available to this game and it is ruined by overuse.
-- **Level crossings** — a bell while barriers are down, attenuating quickly with distance.
+- **Whistle** — on departure and at crossings. Sparing: it needs a departure, a long global cooldown, *and* a coin toss to fire. A distant whistle across a valley is one of the best sounds available to this game and it is ruined by overuse.
+- **Level crossings** — a bell while barriers are down, attenuating quickly with distance. The sim has no crossings, so one is inferred: a track tile inside a built-up district is where a road would meet it. The brief asks for the behaviour, and the behaviour does not have to wait for the barriers.
 - **Passing** — a doppler sweep when a train passes near the camera.
 
 ### 3.3 The town
@@ -75,15 +77,18 @@ The track-laying sound is the game's signature. It should be good enough that pl
 
 ## 4. Music
 
-Sparse, long, and ambient. Slow harmonic movement, acoustic and analogue in character, no percussion driving anything.
+**This section owns the schedule and the volume. [14 — Music](14-music.md) owns the notes**, and where the two disagree this one wins.
+
+Sparse and generous with silence, but **not ambient** — that was the first design and it was played and rejected. Melodic, motif-driven and diatonic, bright bell tones over quiet pads, arriving somewhere rather than hovering: the reference the owner named is C418. Music that never goes anywhere turned out to be music with nothing to remember, and it read as absence rather than as calm. See 14 §8 for the full verdict, which is kept because a lost argument is worth more on the record than deleted.
 
 - **First cue enters a minute or two in**, never immediately at launch.
-- **Cues run three to five minutes**, then silence for three to eight. Ambience fills the gap.
+- **Cues run three to five minutes**, then silence for three to eight. Ambience fills the gap. The music plays perhaps a third of the time; the rest of the session is the landscape.
+- **No two consecutive cues are the same piece.** A world composes several from its seed and rotates through them, so "repetitive" is answered structurally rather than hoped away.
 - **The stack thins during interaction** — laying a long run, the music ducks slightly so the *clacks* have room.
-- **Contextual variants**: a warmer palette when the network is thriving, sparser when the town is declining. Never dramatic, never a fail cue.
-- **A dusk piece.** The prettiest minute of the day cycle deserves its own music, and players will remember it.
+- **Contextual variants**: a warmer, fuller reading when the network is thriving, thinner when the town is declining. Never dramatic, never a fail cue.
+- **Dusk plays the same music softer and darker**, not lower. The prettiest minute of the day cycle gets its own reading; dropping it an octave was most of what made the first score read as gloom.
 
-Explicitly avoided: loops short enough to notice, anything that builds to a climax, anything with a strong beat, and any cue that comments on failure.
+Explicitly avoided: loops short enough to notice, anything that builds to a climax, percussion, and any cue that comments on failure. Cadences are not on that list — a gentle arrival is not a climax, and banning them is what produced a score with nowhere to land.
 
 ---
 
@@ -135,7 +140,7 @@ The one exception is the **first payout of a new game**, which gets slightly mor
 - **Distance attenuation and low-pass** with distance, so far-off sounds are muffled as well as quieter.
 - **Zoom affects the mix** — at 1× the world sounds distant and wide; at 3× the player is down among the trains.
 - **Voice limits per category**, with the nearest instances winning, so a large network never turns to mush.
-- **Mute on focus loss**, by default.
+- **Mute on focus loss**, by default. In the browser build the page suspends the audio context outright when the tab is hidden, because a muted game whose loop has stopped cannot mute itself ([09](09-shell-and-menus.md) §8.1).
 
 ---
 

@@ -52,28 +52,49 @@ Dragging means **the run goes exactly where the player points** — corrected by
 | *(none)* | **Straight** — direct line on one of the sixteen directions, terrain be damned. The player picks the angle by pointing and the length by dragging; every tile shows its own validity and cost, and an illegal tile refuses loudly. |
 | `Ctrl` | **Single tile** — exactly the tile under the cursor. The one-piece-at-a-time verb. |
 | `Alt` | **Contour lock** — hold current elevation, refusing anything that would climb. |
-| `Shift` | **Smart assist** — cheapest legal path, weighted toward straightness, held to a corridor a few tiles either side of where the player pointed. It finds the narrows and eases a grade; it never wanders off on an itinerary of its own. |
+| `Shift` | **Smart assist** — cheapest legal path, weighted toward straightness, **leashed to six tiles either side** of the straight segment the player pointed along. It finds the narrows and eases a grade; it never wanders off on an itinerary of its own. |
+
+The leash is the whole difference between assistance and autopilot. Six tiles is wide enough to step round a boulder, cross at the narrows, or take a grade at an angle, and far too narrow to decide that the line should really go up the next valley. A search with no corridor produces the route that lost the playtest; a search with this one produces the route the player was already drawing, tidied.
 
 The straight drag is the default because dealing with terrain **is the game**: the player who lays a run into a hillside should feel the refusal, read the ground, and choose — contour round, cut through, or bridge — not have the choice made silently for them. The assist is quality-of-life for a decision already taken.
 
-The assist's proposal must be **stable** — small cursor movements must not cause the route to flip between equal-cost alternatives. Hysteresis on route selection; prefer the previous frame's shape when costs are within a few percent. A flickering ghost is unusable.
+The proposal must be **stable** — small cursor movements must not cause the route to flip between alternatives. A flickering ghost is unusable, and the failure is worse than it sounds: a wobble in a sixteen-direction snap is not one tile changing its mind, it is the whole run swinging onto a different angle.
+
+The fix is a **detent, not a timer and not frame-to-frame hysteresis**. A half-step ray has to beat the best compass ray by a real margin before it wins, and ties resolve to the shorter run on the lower-indexed direction. That leaves the proposal a pure, deterministic function of the anchor and the cursor tile with a dead band around every compass ray, so it cannot oscillate for a held cursor and cannot depend on how the cursor arrived. Remembering the previous frame would buy the same stillness and cost the property that makes the tool predictable: the same two tiles always propose the same run.
 
 ### 2.3 The cost HUD
 
 Follows the cursor at a fixed offset, never covering the tile being pointed at.
 
 ```
-        ┌──────────────────────┐
-        │  18 tiles     $740   │
-        │  1 bridge     ▲ 2.1% │
-        │  ────────────────    │
-        │  Balance     $9,260  │
-        └──────────────────────┘
+        ┌──────────────────────────┐
+        │  18 tiles   $740         │
+        │             - 1 bridge   │
+        │  Balance    $9,260       │
+        └──────────────────────────┘
 ```
 
-Tile count, total cost, notable features (bridges, tunnels, cuttings), and maximum gradient on the route. Balance-after in `ok`, or in `warn` when it would go negative — with the whole ghost turning `warn` and the route becoming uncommittable.
+Tile count, total cost, deck tiles called out as their own line item — a wide crossing is most of the bill and the player should see that is what they are paying for — and the balance the run would leave, in `ok`, or in `warn` when it would go negative, with the whole ghost turning `warn` and the route becoming uncommittable. Demolition uses the same readout with the refund in place of the price.
 
-Cost is the number the player watches while deciding. It updates live, it never lags, and it is never more than a glance away from the cursor.
+**"While building" means whenever there is a ghost, not while a button is held.** Those are different windows, and the difference is most of the tool: the Build verb keeps its anchor after every commit, so the ghost follows the cursor between drags, and a continuous-build player spends most of their time in exactly that state. Keying the readout off the drag left them pricing a run they could see and could not cost. It keys off the preview, so if a ghost is on screen its price is on screen — from the first tile, in every modifier mode. If the pointer leaves the window the readout moves to a fixed corner rather than leaving with it; a player whose mouse has wandered has not stopped caring what the run costs.
+
+Cost is the number the player watches while deciding. It updates live, it never lags, and it is never more than a glance away.
+
+Maximum gradient on the route, and the terrain features other than bridges, are wanted here and not there yet.
+
+### 2.4 Bridges are not a mode
+
+**There is no bridge tool.** Drag across water and the tiles over water are deck; the price changes and nothing else does. A mode would make the player answer a question the ground has already answered, and it would put a decision between them and the drag.
+
+What the player is choosing is not *whether* to bridge but *where*, and the price ladder is what makes that a decision. A crossing may span **one to eight** water tiles, and the per-tile rate climbs with the span:
+
+| Span (tiles) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Cost per tile | 8× | 14× | 20× | 30× | 42× | 56× | 72× | 90× |
+
+The first three rungs are the **cheap tier** — a ford, a stream, a small river, the things a young railway crosses without much thought — and finding one of them is what makes scouting a river worth the walk. Above that a crossing is a premium one: the rate rises *and* there are more tiles to pay it on, so a full eight-span deck runs 720× base. That is a monument the railway saves toward, not a shortcut it takes, and it should read that way in the readout before it is ever committed.
+
+Nine tiles of water is refused, with the span it measured named in the chip. See [02 — World & Terrain](02-world-and-terrain.md) §3.4 for why every river the generator draws has to be crossable somewhere.
 
 ---
 
@@ -108,7 +129,7 @@ Demolition is a first-class verb because the vision makes building free to exper
 
 ## 5. Undo
 
-**`Ctrl+Z` undoes the last build or demolish**, including a whole dragged run as one unit. Redo with `Ctrl+Shift+Z`. At least fifty levels deep.
+**`Ctrl+Z` undoes the last build or demolish**, including a whole dragged run as one unit. Redo is `Ctrl+Y`. Fifty levels deep.
 
 Undo is what makes the promise of reversibility true. A player who knows a mistake costs one keystroke experiments freely, and experimenting freely is the entire point of "building is free to experiment with; only commitment costs."
 

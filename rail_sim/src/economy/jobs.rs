@@ -381,6 +381,7 @@ pub fn assign_jobs(
     industries: Res<IndustryRegistry>,
     network: Res<TrackNetwork>,
     lines: Res<LineRegistry>,
+    mut service: ResMut<StationService>,
     mut q: Query<(
         &Train,
         &mut TrainLocation,
@@ -398,6 +399,10 @@ pub fn assign_jobs(
             let Some(line) = lines.get(on.line) else {
                 continue;
             };
+            // Where this train is standing, before it sets off again. A train
+            // that leaves a platform has called there, and 06 §5 counts that as
+            // service whether or not anybody was riding to it.
+            let calling_at = station_at_track(&network, &stations, loc.track);
             if try_assign_line_job(
                 &mut board,
                 &stations,
@@ -408,6 +413,9 @@ pub fn assign_jobs(
                 &mut cargo,
                 line,
             ) {
+                if let Some(here) = calling_at {
+                    service.record_call(here);
+                }
                 // Advance next_stop toward the job destination if passenger.
                 if let TrainCargo::Passengers { to, .. } = *cargo {
                     if let Some(idx) = line.stop_index(to) {
@@ -429,6 +437,9 @@ pub fn assign_jobs(
                 {
                     loc.set_path(path);
                     on.next_stop = next_idx;
+                    if let Some(here) = calling_at {
+                        service.record_call(here);
+                    }
                 }
             }
             continue;
@@ -670,6 +681,23 @@ fn station_track(
     track_for_station(network, s.tile, s.layer)
 }
 
+/// The stop a train standing on `track` is standing at, if any.
+///
+/// The reverse of [`station_track`], and a linear walk on purpose: there are a
+/// handful of stops on a map, this is asked once per train that is idle at a
+/// destination, and a second index would be one more thing a save has to keep
+/// in step with the registry.
+fn station_at_track(
+    network: &TrackNetwork,
+    stations: &StationRegistry,
+    track: TrackId,
+) -> Option<StationId> {
+    stations
+        .iter()
+        .find(|s| track_for_station(network, s.tile, s.layer) == Some(track))
+        .map(|s| s.id)
+}
+
 fn path_to_station(
     network: &TrackNetwork,
     stations: &StationRegistry,
@@ -854,6 +882,9 @@ mod tests {
         ) -> Self {
             let mut app = App::new();
             app.init_resource::<JobBoard>()
+                // A line train banks a call as it leaves a platform, so the
+                // assignment pass writes service now.
+                .init_resource::<StationService>()
                 .insert_resource(network)
                 .insert_resource(stations)
                 .insert_resource(industries)

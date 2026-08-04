@@ -70,7 +70,7 @@ use kit::pointer_blocks_world;
 use ledger::{setup_ledger_ui, update_ledger_panel};
 use menu_bar::{
     inject_synthetic_keys, menu_row_clicks, refresh_menu_key_labels, setup_top_chrome,
-    update_menu_row, window_hotkeys, SyntheticKeys,
+    tier_row_clicks, update_menu_row, update_tier_row, window_hotkeys, SyntheticKeys,
 };
 use status_strip::{
     advance_calendar, alert_bell_clicks, speed_button_clicks, update_speed_buttons,
@@ -169,6 +169,10 @@ impl Plugin for UiPlugin {
                     alert_bell_clicks,
                     update_menu_row,
                     menu_row_clicks,
+                    // The tier sub-row: clicks first, so a pick lands on the
+                    // frame it was made rather than the next one.
+                    tier_row_clicks,
+                    update_tier_row.after(tier_row_clicks),
                     window_hotkeys.in_set(crate::input::PlayerVerbSet),
                     refresh_menu_key_labels,
                 ),

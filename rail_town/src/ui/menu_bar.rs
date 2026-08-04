@@ -41,6 +41,7 @@
 //! state this file can reach.
 
 use bevy::prelude::*;
+use rail_sim::StationTier;
 
 use crate::input::{ControlAction, KeyBindings};
 use crate::lines::LineToolState;
@@ -48,8 +49,10 @@ use crate::map::MapViewState;
 use crate::overlays::{ActiveOverlay, OverlayKind};
 use crate::palette::{BG1, OUTLINE};
 use crate::shell::{MenuAction, MenuActivated};
+use crate::stations::StationToolState;
 use crate::track::TrackToolState;
 use crate::trains::TrainToolState;
+use crate::ui::format::money_whole;
 use crate::ui::health::spawn_health_row;
 use crate::ui::kit::{
     chrome_button_node, control_border, micro_font, text_primary, text_secondary, MENU_H, SPACE_1,
@@ -111,9 +114,13 @@ const WINDOW_SLOTS: &[(WindowId, ControlAction, bool)] = &[
 /// Build verbs, in row order, with the action that also arms them. The label
 /// comes from [`ToolbarTool::label`] so the bar and the status readout cannot
 /// drift, and the key comes from [`KeyBindings`] for the same reason.
+/// Station sits beside Track because it *is* track (04 §6) — a platform on a
+/// piece of line — and because a player looking for "where do stations come
+/// from" looks next to the thing they just built.
 const TOOL_SLOTS: &[(ToolbarTool, ControlAction)] = &[
     (ToolbarTool::Select, ControlAction::LookTool),
     (ToolbarTool::Build, ControlAction::TrackTool),
+    (ToolbarTool::Station, ControlAction::PlaceStation),
     (ToolbarTool::Demolish, ControlAction::DemolishTool),
     (ToolbarTool::Line, ControlAction::LineTool),
     (ToolbarTool::Transit, ControlAction::BuyTransit),
@@ -124,6 +131,22 @@ const TOOL_SLOTS: &[(ToolbarTool, ControlAction)] = &[
 /// [`refresh_menu_key_labels`] whenever the bindings change.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct MenuKeyLabel(ControlAction);
+
+/// The Station tool's sub-mode row (03 §7).
+///
+/// > Tools with sub-modes — station tier is the one that has them — expand a
+/// > small row **beneath** the slot on selection, rather than opening a separate
+/// > panel.
+///
+/// So it is a second row in the same top block, present only while the tool is
+/// armed. It carries each tier's name **and its price**, because the price is
+/// half the decision and `P` alone cycles blind.
+#[derive(Component)]
+pub struct TierRowRoot;
+
+/// One tier button on that row.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TierButton(StationTier);
 
 pub fn setup_top_chrome(
     mut commands: Commands,
@@ -156,8 +179,58 @@ pub fn setup_top_chrome(
         ))
         .with_children(|chrome| {
             spawn_menu_row(chrome, &bindings);
+            spawn_tier_row(chrome);
             spawn_status_row(chrome, starting_cents);
             spawn_health_row(chrome);
+        });
+}
+
+/// The Station tool's tier row, hidden until the tool is armed.
+///
+/// Spawned once and shown with `Display`, like every other row in this block —
+/// a row that respawned on each arming would cost a UI rebuild in the middle of
+/// a build gesture.
+fn spawn_tier_row(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            TierRowRoot,
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                flex_wrap: FlexWrap::Wrap,
+                column_gap: Val::Px(SPACE_1),
+                row_gap: Val::Px(1.0),
+                padding: UiRect::axes(Val::Px(SPACE_2), Val::Px(2.0)),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .with_children(|row| {
+            for tier in StationTier::ALL {
+                let (node, bg, border) = chrome_button_node(SPACE_1, 1.0);
+                row.spawn((
+                    Button,
+                    TierButton(tier),
+                    Node {
+                        column_gap: Val::Px(SPACE_1),
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        flex_shrink: 0.0,
+                        ..node
+                    },
+                    bg,
+                    border,
+                ))
+                .with_children(|slot| {
+                    slot.spawn((Text::new(tier.label()), micro_font(), text_primary()));
+                    slot.spawn((
+                        Text::new(money_whole(tier.build_cents())),
+                        micro_font(),
+                        text_secondary(),
+                    ));
+                });
+            }
         });
 }
 
@@ -285,6 +358,7 @@ pub fn update_menu_row(
     track: Res<TrackToolState>,
     train: Option<Res<TrainToolState>>,
     line: Option<Res<LineToolState>>,
+    station: Option<Res<StationToolState>>,
     manager: Res<WindowManager>,
     map_view: Res<MapViewState>,
     overlay: Res<ActiveOverlay>,
@@ -293,7 +367,8 @@ pub fn update_menu_row(
     let placing = train.as_ref().is_some_and(|t| t.place_mode);
     let place_kind = train.as_ref().map(|t| t.kind);
     let line_active = line.as_ref().is_some_and(|l| l.active);
-    let armed = active_tool(track.tool, placing, place_kind, line_active);
+    let station_active = station.as_ref().is_some_and(|s| s.active);
+    let armed = active_tool(track.tool, placing, place_kind, line_active, station_active);
 
     for (button, interaction, mut border) in &mut buttons {
         let selected = match button {
@@ -308,6 +383,51 @@ pub fn update_menu_row(
         if border.top != wanted.top {
             *border = wanted;
         }
+    }
+}
+
+/// Show the tier row while the Station tool is armed, and mark the armed tier.
+///
+/// Touches nothing on a frame where neither the tool's state nor a hover has
+/// changed, the same rule [`update_menu_row`] follows.
+pub fn update_tier_row(
+    station: Option<Res<StationToolState>>,
+    mut row: Query<&mut Node, With<TierRowRoot>>,
+    mut buttons: Query<(&TierButton, &Interaction, &mut BorderColor)>,
+) {
+    let armed = station.as_ref().is_some_and(|s| s.active);
+    if let Ok(mut node) = row.single_mut() {
+        let wanted = if armed { Display::Flex } else { Display::None };
+        if node.display != wanted {
+            node.display = wanted;
+        }
+    }
+    if !armed {
+        return;
+    }
+    let tier = station.map(|s| s.tier).unwrap_or_default();
+    for (button, interaction, mut border) in &mut buttons {
+        let hovered = matches!(interaction, Interaction::Hovered | Interaction::Pressed);
+        let wanted = control_border(button.0 == tier, hovered);
+        if border.top != wanted.top {
+            *border = wanted;
+        }
+    }
+}
+
+/// A click on the tier row picks that tier — and arms the tool if it is not up.
+pub fn tier_row_clicks(
+    interactions: Query<(&Interaction, &TierButton), (Changed<Interaction>, With<Button>)>,
+    mut station: ResMut<StationToolState>,
+) {
+    for (interaction, button) in &interactions {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        station.active = true;
+        station.tier = button.0;
+        // The refusal on screen belonged to the old tier's rules.
+        station.reject = None;
     }
 }
 
@@ -386,11 +506,15 @@ mod tests {
 
     #[test]
     fn every_verb_in_the_game_is_on_the_bar() {
-        // 03 §7's acceptance bar, restated for the menu row.
+        // 03 §7's acceptance bar, restated for the menu row. Station is on this
+        // list because it was missing from the row for its whole life: the
+        // whole build-a-stop mechanic shipped keyboard-only, and a player who
+        // never pressed `P` concluded stations were fixed at worldgen.
         let listed: HashSet<ToolbarTool> = TOOL_SLOTS.iter().map(|(t, _)| *t).collect();
         for tool in [
             ToolbarTool::Select,
             ToolbarTool::Build,
+            ToolbarTool::Station,
             ToolbarTool::Demolish,
             ToolbarTool::Line,
             ToolbarTool::Transit,
@@ -398,6 +522,128 @@ mod tests {
         ] {
             assert!(listed.contains(&tool), "{tool:?} is unreachable by mouse");
         }
+    }
+
+    /// The slot has to answer to the key the bar prints beside it, or the row
+    /// teaches a shortcut the game does not listen for.
+    #[test]
+    fn the_station_slot_carries_the_key_that_arms_it() {
+        let (_, action) = TOOL_SLOTS
+            .iter()
+            .find(|(tool, _)| *tool == ToolbarTool::Station)
+            .expect("a Station slot");
+        assert_eq!(*action, ControlAction::PlaceStation);
+        let bindings = KeyBindings::default();
+        assert_eq!(bindings.key(*action), KeyCode::KeyP);
+        assert_eq!(bindings.label(*action), "P");
+    }
+
+    /// 03 §7: a sub-mode expands a row **beneath** the slot, and the row is how
+    /// a player finds out there are five tiers and what each one costs.
+    #[test]
+    fn the_tier_row_offers_every_tier_with_its_price() {
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins);
+        app.add_systems(Startup, |mut commands: Commands| {
+            commands
+                .spawn(Node::default())
+                .with_children(spawn_tier_row);
+        });
+        app.update();
+
+        let world = app.world_mut();
+        let offered: Vec<StationTier> = world
+            .query::<&TierButton>()
+            .iter(world)
+            .map(|b| b.0)
+            .collect();
+        for tier in StationTier::ALL {
+            assert!(
+                offered.contains(&tier),
+                "{} is unreachable by mouse",
+                tier.label()
+            );
+        }
+
+        // Every price on the row is the price the sim charges.
+        let labels: Vec<String> = world
+            .query::<&Text>()
+            .iter(world)
+            .map(|t| t.0.clone())
+            .collect();
+        for tier in StationTier::ALL {
+            assert!(labels.iter().any(|l| l == tier.label()), "{tier:?} name");
+            let price = money_whole(tier.build_cents());
+            assert!(labels.contains(&price), "{tier:?} price {price}");
+        }
+    }
+
+    /// The row is the Station tool's, so it is only on screen while that tool
+    /// is — 03 §5.2 keeps the permanent block to what is permanently useful.
+    #[test]
+    fn the_tier_row_is_only_up_while_the_station_tool_is() {
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins)
+            .init_resource::<StationToolState>();
+        app.add_systems(Startup, |mut commands: Commands| {
+            commands
+                .spawn(Node::default())
+                .with_children(spawn_tier_row);
+        });
+        app.add_systems(Update, update_tier_row);
+        app.update();
+
+        let display = |app: &mut App| {
+            let world = app.world_mut();
+            world
+                .query_filtered::<&Node, With<TierRowRoot>>()
+                .single(world)
+                .expect("one tier row")
+                .display
+        };
+        assert_eq!(display(&mut app), Display::None, "nothing armed, nothing up");
+
+        app.world_mut().resource_mut::<StationToolState>().active = true;
+        app.update();
+        assert_eq!(display(&mut app), Display::Flex);
+
+        app.world_mut().resource_mut::<StationToolState>().disarm();
+        app.update();
+        assert_eq!(display(&mut app), Display::None);
+    }
+
+    /// Clicking a tier picks it. `P` still cycles; the row is the way in for a
+    /// player who has never pressed `P`.
+    #[test]
+    fn clicking_a_tier_arms_that_tier() {
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins)
+            .init_resource::<StationToolState>();
+        app.add_systems(Startup, |mut commands: Commands| {
+            commands
+                .spawn(Node::default())
+                .with_children(spawn_tier_row);
+        });
+        app.add_systems(Update, tier_row_clicks);
+        app.update();
+
+        let button = {
+            let world = app.world_mut();
+            world
+                .query::<(Entity, &TierButton)>()
+                .iter(world)
+                .find(|(_, b)| b.0 == StationTier::Interchange)
+                .map(|(e, _)| e)
+                .expect("an Interchange button")
+        };
+        app.world_mut()
+            .entity_mut(button)
+            .insert(Interaction::Pressed);
+        app.update();
+
+        let state = app.world().resource::<StationToolState>();
+        assert_eq!(state.tier, StationTier::Interchange);
+        assert!(state.active, "picking a tier leaves the tool armed");
     }
 
     #[test]

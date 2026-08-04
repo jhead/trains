@@ -95,7 +95,7 @@ pub use save::{
     SaveSlot, SlotInfo, WorldSnapshot, AUTOSAVE_SLOTS, SCHEMA_VERSION,
 };
 pub use stations::{
-    apply_station_commands, catchment_influence, push_station_command,
+    announce_station_edits, apply_station_commands, catchment_influence, push_station_command,
     seed_stations_and_industries, seed_stations_and_industries_at, station_maintenance_total,
     AnchorSites, DemolishStation, GoodKind, Industry,
     IndustryId, IndustryRegistry, IndustryTier, PlaceStation, Station, StationCommand, StationEdit,
@@ -195,6 +195,10 @@ impl Plugin for SimPlugin {
                     // it puts line edits after the world they are edited
                     // against has changed.
                     apply_line_commands.after(apply_station_commands),
+                    // The feed reads the edits that pass emits, so it has to
+                    // follow it inside the same set — a tick's news must land
+                    // on the tick that made it.
+                    announce_station_edits.after(apply_station_commands),
                 )
                     .in_set(SimSet::ApplyCommands),
             )

@@ -470,11 +470,18 @@ fn mvp_playable_loop_delivers_and_complains() {
         !feed.is_empty(),
         "expected at least one peep wait complaint after long sim"
     );
-    let line = feed.latest_line().expect("complaint line");
     // Single voice: "Mara waited 11 min at Eastgate"
     // Deduped: "N people are waiting at Eastgate"
+    //
+    // Searched rather than read off the front: the feed carries everything the
+    // town has to say — walk-offs, opportunities, a platform opening — and
+    // which of them happens to be newest on the last tick is not what this test
+    // is about. It is about the wait path reaching the feed at all.
+    let lines: Vec<String> = feed.iter().map(|e| e.display_line()).collect();
     assert!(
-        (line.contains("waited") && line.contains("min")) || line.contains("are waiting at"),
-        "unexpected complaint line: {line}"
+        lines
+            .iter()
+            .any(|l| (l.contains("waited") && l.contains("min")) || l.contains("are waiting at")),
+        "no peep wait complaint in the feed: {lines:#?}"
     );
 }

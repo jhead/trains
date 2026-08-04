@@ -22,6 +22,33 @@ const CROWD_PER_PENALTY: u32 = 20;
 /// Hardest crowding penalty a single sample may apply.
 const MAX_CROWD_PENALTY: u8 = 5;
 
+/// Ticks with no arrival before a stop's reputation starts to slide.
+///
+/// A tick is [`SIM_SECONDS_PER_TICK`](crate::peeps::SIM_SECONDS_PER_TICK) = 10
+/// sim-seconds, so this is twenty sim-minutes: long enough that a stop between
+/// two calls is not "neglected", short enough that a branch nobody runs is.
+pub const SCORE_IDLE_GRACE_TICKS: u64 = 120;
+
+/// Ticks between the single points a neglected stop loses.
+///
+/// # Why this is not one point per tick
+///
+/// It was, and that quietly broke the game's third pillar. An arrival banks
+/// [`StationTierSpec::arrival_gain`](super::tier::StationTierSpec) — 8 for the
+/// workhorse tier — and a point a tick spends that in eight ticks, so a stop
+/// held a score only while trains arrived less than ~128 ticks apart. Nothing
+/// in a real railway does: a lap of a three-stop line is several hundred ticks,
+/// and only a *delivery* banks anything. Measured on a generated map with a
+/// train running, every station on the network sat at score `0` for the whole
+/// session — and `town::density_target_at` multiplies by `score / 100`, so
+/// **no town anywhere ever grew**, however well it was served.
+///
+/// One point per minute of sim time makes the decay what its own comment always
+/// said it was — *slow*. A stop with a full hundred fades to nothing after
+/// about sixteen sim-hours with no train at all, which is neglect anybody would
+/// call neglect, while a stop served every few minutes keeps what it earns.
+pub const SCORE_DECAY_EVERY_TICKS: u64 = 60;
+
 /// Snapshot of how well a station is being served.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StationServiceScore {
@@ -106,6 +133,27 @@ impl StationService {
         s.score = (s.score as u16 + gain).min(100) as u8;
     }
 
+    /// A scheduled train called here and went on its way.
+    ///
+    /// Brief 06 §5 makes service reliability — *"do trains actually come?"* —
+    /// the multiplier on growth, and a call is what "trains come" means. Only
+    /// deliveries used to count, which measured throughput instead: a stop with
+    /// a train every three sim-minutes all day read as **unserved** unless
+    /// somebody happened to be riding to it, because a line train dead-heads to
+    /// a job's origin and only banks score where it sets its passengers down.
+    ///
+    /// Worth half an arrival, rounded up, so a stop trains merely pass through
+    /// keeps its lights on while a stop people actually travel to still earns
+    /// faster. `deliveries` is untouched — that is a count of paid runs, and the
+    /// Inspector and the goals board both read it as one.
+    pub fn record_call(&mut self, id: StationId) {
+        let tick = self.tick;
+        let s = self.ensure(id);
+        s.last_arrival_tick = tick;
+        let gain = (u16::from(s.tier.arrival_gain()).div_ceil(2)).max(1);
+        s.score = (s.score as u16 + gain).min(100) as u8;
+    }
+
     /// Set the job-board queue and charge the tick's crowding penalty.
     ///
     /// The penalty reads [`StationServiceScore::crowding_percent`], which blends
@@ -129,9 +177,14 @@ impl StationService {
 
     pub fn tick_decay(&mut self) {
         self.tick = self.tick.saturating_add(1);
+        // Idle stations slowly lose score so neglected areas stagnate. One
+        // shared beat rather than a per-station timer keeps this deterministic
+        // and free of state a save would have to carry.
+        if !self.tick.is_multiple_of(SCORE_DECAY_EVERY_TICKS) {
+            return;
+        }
         for s in self.scores.values_mut() {
-            // Idle stations slowly lose score so neglected areas stagnate.
-            if self.tick.saturating_sub(s.last_arrival_tick) > 120 {
+            if self.tick.saturating_sub(s.last_arrival_tick) > SCORE_IDLE_GRACE_TICKS {
                 s.score = s.score.saturating_sub(1);
             }
         }
@@ -195,6 +248,34 @@ mod tests {
             halt.score,
             interchange.score
         );
+    }
+
+    /// The arithmetic the town pillar stands on: what one arrival banks has to
+    /// outlast the gap until the next one, or `density_target_at` reads `0`
+    /// forever and no town ever grows.
+    #[test]
+    fn a_stop_keeps_what_it_earns_between_trains() {
+        let mut service = StationService::default();
+        service.record_arrival(A);
+        let banked = service.score(A).score;
+        assert_eq!(banked, StationTier::Station.arrival_gain());
+
+        // A realistic gap between calls on a short line.
+        for _ in 0..300 {
+            service.tick_decay();
+        }
+        assert!(
+            service.score(A).score > 0,
+            "a stop served every 300 ticks must not read as neglected"
+        );
+
+        // Neglect it for a good part of a sim day and it is forgotten.
+        let mut service = StationService::default();
+        service.ensure(A).score = 100;
+        for _ in 0..(100 * SCORE_DECAY_EVERY_TICKS + SCORE_IDLE_GRACE_TICKS) {
+            service.tick_decay();
+        }
+        assert_eq!(service.score(A).score, 0, "and neglect still costs the lot");
     }
 
     #[test]

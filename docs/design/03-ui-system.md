@@ -200,11 +200,15 @@ Every slot carries its **name and its shortcut key**, side by side, at Micro siz
 
 Slots are sized by their label, not padded out to a fixed square — a 48×48 slot at `2×` was 96 physical pixels, which is most of a phone screen's width for one button.
 
-Tools with sub-modes — station tier is the one that has them — expand a small row **beneath** the slot on selection, rather than opening a separate panel. The player should never lose sight of the world to choose a variant of what they are already doing.
+The row is: **Look · Track · Station · Demolish · Line · Transit · Transport.** Station sits beside Track because it *is* track ([04](04-building-and-tools.md) §6) — a platform on a piece of line — and because a player looking for "where do stations come from" looks next to the thing they just built.
+
+Tools with sub-modes — station tier is the one that has them — expand a small row **beneath** the slot on selection, rather than opening a separate panel. The player should never lose sight of the world to choose a variant of what they are already doing. The Station tool's row carries all five tiers **with their prices** — `Halt $400 · Station $1,200 · Interchange $4,000 · Terminus $2,600 · Goods Platform $900` — and the armed one takes the `hi` border. `P` still cycles them; the row is the way in for a player who has never pressed `P`.
 
 Bridges are deliberately *not* one of these: dragging over water builds deck, and the price is the only thing that changes ([04](04-building-and-tools.md) §2.4). A sub-mode there would make the player answer a question the ground has already answered.
 
-**A player who has never read a document must be able to find every verb in the game from this row.** That is its entire purpose. Keyboard shortcuts are an accelerator layer on top, never the only way in.
+**What is not on this row: Upgrade.** The group is *modes* — verbs that arm the pointer and stay armed. Upgrade arms nothing. It applies in place, to one named stop, at a price that only means anything beside the tier that stop already is, so it belongs on the Inspector card for that stop ([05](05-inspection-and-overlays.md) §3) with Demolish beside it. `U` remains its accelerator. A slot that fired immediately would be the only one in the row that was not a mode, and the row's own selected-state painting would have nothing to show.
+
+**A player who has never read a document must be able to find every verb in the game from this row.** That is its entire purpose. Keyboard shortcuts are an accelerator layer on top, never the only way in. The Station tool spent its whole life as the counter-example — the mechanic shipped complete and keyboard-only, and a player who never pressed `P` reasonably concluded stations were fixed at worldgen.
 
 ---
 

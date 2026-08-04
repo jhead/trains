@@ -24,8 +24,8 @@ mod service;
 mod tier;
 
 pub use apply::{
-    apply_station_command, apply_station_commands, line_using, push_station_command,
-    StationCommand, StationEdit,
+    announce_station_edits, apply_station_command, apply_station_commands, line_using,
+    push_station_command, StationCommand, StationEdit,
 };
 pub use industry::{GoodKind, Industry, IndustryId, IndustryRegistry, IndustryTier};
 pub use place::{

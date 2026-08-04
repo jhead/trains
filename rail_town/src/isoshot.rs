@@ -21,6 +21,9 @@
 //! - `RAIL_TOWN_SHOT_ZOOM=1|2|3` overrides the zoom rung.
 //! - `RAIL_TOWN_SHOT_MAPVIEW=1` presses the Map View key before the shot, so
 //!   the schematic plate can be checked in either view.
+//! - `RAIL_TOWN_SHOT_ARM=p` presses one letter key before the shot, so chrome
+//!   that only appears with a verb armed — the Station tool's tier row, say —
+//!   can be looked at without anyone sitting at the keyboard.
 //! - `RAIL_TOWN_SHOT_PICK=px,py` runs one screen point through the whole
 //!   picking path the mouse uses — `viewport_to_world_2d`, then
 //!   [`rail_map::world_to_tile`] — and drops a marker on the tile that came
@@ -45,6 +48,8 @@ struct ShotPlan {
     flip_at: Option<u32>,
     /// Open the Map View before the shot.
     map_view: bool,
+    /// A letter key to press before the shot, for chrome that needs a verb armed.
+    arm: Option<KeyCode>,
     frame: u32,
     taken: bool,
 }
@@ -77,6 +82,9 @@ impl Plugin for IsoShotPlugin {
                 .ok()
                 .and_then(|v| v.parse().ok()),
             map_view: std::env::var("RAIL_TOWN_SHOT_MAPVIEW").is_ok(),
+            arm: std::env::var("RAIL_TOWN_SHOT_ARM")
+                .ok()
+                .and_then(|v| letter_key(v.trim())),
             frame: 0,
             taken: false,
         })
@@ -88,6 +96,23 @@ impl Plugin for IsoShotPlugin {
         )
         .add_systems(Update, drive_shot);
     }
+}
+
+/// `"p"` -> [`KeyCode::KeyP`]. Letters only — every gameplay verb is one.
+fn letter_key(name: &str) -> Option<KeyCode> {
+    let c = name.chars().next()?.to_ascii_uppercase();
+    if !c.is_ascii_alphabetic() || name.chars().count() != 1 {
+        return None;
+    }
+    const LETTERS: [KeyCode; 26] = [
+        KeyCode::KeyA, KeyCode::KeyB, KeyCode::KeyC, KeyCode::KeyD, KeyCode::KeyE,
+        KeyCode::KeyF, KeyCode::KeyG, KeyCode::KeyH, KeyCode::KeyI, KeyCode::KeyJ,
+        KeyCode::KeyK, KeyCode::KeyL, KeyCode::KeyM, KeyCode::KeyN, KeyCode::KeyO,
+        KeyCode::KeyP, KeyCode::KeyQ, KeyCode::KeyR, KeyCode::KeyS, KeyCode::KeyT,
+        KeyCode::KeyU, KeyCode::KeyV, KeyCode::KeyW, KeyCode::KeyX, KeyCode::KeyY,
+        KeyCode::KeyZ,
+    ];
+    LETTERS.get((c as u8 - b'A') as usize).copied()
 }
 
 /// Open in the view the run asked for.
@@ -137,6 +162,15 @@ fn drive_shot(
     }
     if plan.map_view && plan.at_frame.saturating_sub(plan.frame) == 39 {
         keys.release(KeyCode::KeyM);
+    }
+    // Same trick for a verb key: pressed through the real binding, held for one
+    // frame, so the tool arms exactly as it does for a player.
+    if let Some(key) = plan.arm {
+        match plan.at_frame.saturating_sub(plan.frame) {
+            30 => keys.press(key),
+            29 => keys.release(key),
+            _ => {}
+        }
     }
     if let (Some(zoom), true) = (plan.zoom, plan.frame == 60) {
         if let Ok(mut projection) = camera.single_mut() {

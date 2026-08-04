@@ -143,16 +143,48 @@ The vision says rail is the only thing you build directly, and that the town gro
 
 The resolution: **a station is a kind of track.** It is placed with the track tools, on a piece of line, as a platform. The player is still only ever building railway. The town is still only ever a consequence.
 
-| Tier | Platforms | Character |
-| --- | --- | --- |
-| **Halt** | 1 short | Cheap, slow to board, serves a small catchment |
-| **Station** | 2 | The workhorse |
-| **Interchange** | 4 | Expensive, fast turnaround, wide catchment, lines can meet |
-| **Terminus** | 3 stub | End-of-line, high capacity, no through running |
+| Tier | Platforms | Price | Reach | Character |
+| --- | --- | --- | --- | --- |
+| **Halt** | 1 short | $400 | 3 | Cheap, slow to board, serves a small catchment |
+| **Station** | 2 | $1,200 | 5 | The workhorse |
+| **Interchange** | 4 | $4,000 | 8 | Expensive, fast turnaround, wide catchment, lines can meet |
+| **Terminus** | 3 stub | $2,600 | 6 | End-of-line, high capacity, no through running |
+| **Goods Platform** | 2 | $900 | 1 | Freight, placed against an industry lot |
 
-Placement shows the **catchment ring** live during the drag, along with how many existing buildings and how much unserved demand fall inside it. Siting a station is then a real decision made with real information, rather than a guess.
+Freight facilities work the same way: a goods platform placed against an industry. It is the fifth row rather than a separate system — same tool, same line, one extra rule.
 
-Freight facilities work the same way: a goods platform placed against an industry.
+### 6.1 Placing one
+
+**Station is a slot on the menu row** ([03](03-ui-system.md) §7), beside Track, with `P` printed on it. Arming it opens the tier row beneath, which names every tier and what it costs — so the choice and its price are both on screen before the click, and neither depends on knowing a key.
+
+Placement shows the **catchment ring** live during the drag, along with how many existing buildings and how much unserved demand fall inside it. Siting a station is then a real decision made with real information, rather than a guess. The chip at the cursor carries the armed tier, its price, its platform count, its reach, and what the balance would be afterwards.
+
+Every refusal speaks, with its rule and its number (§3):
+
+| Condition | Reason chip |
+| --- | --- |
+| No rails under the cursor | *Platforms need track — lay the line first* |
+| Open water | *That tile is water — bridge it first, or build ashore* |
+| Another stop within `MIN_STATION_SPACING` | *Too close — 2 tiles, need 3* |
+| The straight run is short of the tier's platforms | *Not enough platform — 3 tiles of line, needs 4* |
+| A terminus mid-run | *Terminus needs a dead end — the line runs through here* |
+| A goods platform touching no lot | *Goods platforms load an industry — none touches this tile* |
+| Can't afford it | *Short by $5.00* |
+
+A refusal the **sim** raises — an upgrade whose platforms will not fit, a site something else took between the hover and the click — lands on the same line. The rule is that nothing about a station is ever refused silently.
+
+Opening a station is news: Town Talk says *"Brackwell opened — no line calls there yet"*, which is also the next thing to do about it.
+
+### 6.2 Managing one
+
+Selecting a stop opens the Inspector on it: tier, catchment, platforms and capacity, how many lines call there, its service score and trend. Two verbs live on that card, because they act on that stop and nothing else:
+
+- **Upgrade** — one rung up the Halt → Station → Interchange ladder, labelled with the *difference* in price and what the money buys. Where the upgrade cannot be had the button says why instead of offering — *"Not enough platform — 3 tiles of line, needs 4"*, *"Interchange is the top of the ladder"* — because §3's last line asks a tool to signal an impossible action before the click, not after it. `U` over a stop does the same thing.
+- **Demolish** — a full refund (§4), through the confirm that names the consequence: which lines lose a call, and which of them is left with nowhere to run.
+
+### 6.3 And then the town grows
+
+A stop that a line calls at earns a service score, and `town` grows building density inside that stop's catchment in proportion to it. That is the whole loop the vision promises — place a platform, run a train through it, watch a place appear around it — and `rail_town/tests/station_grows_a_town.rs` walks it end to end on a generated map, through the same commands the player's clicks issue, with an unserved control site that must stay open country.
 
 ---
 

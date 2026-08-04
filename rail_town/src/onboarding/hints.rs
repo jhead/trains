@@ -46,18 +46,22 @@ pub enum Hint {
     Build,
     /// Track joins two stops but nothing is running on it.
     Train,
+    /// A railway is running, and the player may not know stops are theirs to
+    /// place — the mechanic shipped keyboard-only and read as worldgen.
+    Station,
     /// The railway is losing money and the player may not know where to look.
     Ledger,
 }
 
 impl Hint {
-    pub const ALL: &'static [Self] = &[Self::Build, Self::Train, Self::Ledger];
+    pub const ALL: &'static [Self] = &[Self::Build, Self::Train, Self::Station, Self::Ledger];
 
     /// Storage key in `onboarding.ron`. Stable — renaming one re-shows a hint.
     pub fn key(self) -> &'static str {
         match self {
             Self::Build => "hint_build",
             Self::Train => "hint_train",
+            Self::Station => "hint_station",
             Self::Ledger => "hint_ledger",
         }
     }
@@ -69,6 +73,9 @@ impl Hint {
             // Rails *at* two stops, not necessarily joined: the check is per
             // stop, and a hint must never claim more than it knows.
             Self::Train => "Rails at two stops. T buys a train.",
+            // The seeded anchors are not the whole map: new stops are the
+            // player's to place, and this is the sentence that says so.
+            Self::Station => "P adds a station to your line.",
             // `K`, not `L` — the Line tool owns `L` (03 §10.2), and this line
             // pointed at the wrong key for as long as the two shared it.
             Self::Ledger => "Earning less than it costs. K for why.",
@@ -217,6 +224,11 @@ fn moment_for(
         Hint::Build => tools.tool == BuildTool::Build && network.is_empty(),
         // Rails reach two stops and nothing is running on them.
         Hint::Train => served_stations >= 2 && running_stock == 0,
+        // The other side of that moment: a railway that *is* running. The
+        // question the player has then is "where does the next place come
+        // from", and the answer is that they build it. Mutually exclusive with
+        // `Train` by the same count, so the corner never has two things to say.
+        Hint::Station => served_stations >= 2 && running_stock >= 1,
         // A railway that *earns* and still loses money. Requiring income first
         // is what keeps this off the screen during the opening minute, when the
         // rate is negative purely because the player just paid for some track.
@@ -363,6 +375,35 @@ mod tests {
             !moment_for(Hint::Train, &tools(BuildTool::Build), &network, &ledger, 2, 1),
             "a player who already bought a train knows how"
         );
+    }
+
+    /// The beat the owner never found: stations are built, not given (04 §6).
+    /// It waits until there is a railway to add one *to*, and it never shares
+    /// the corner with the train hint.
+    #[test]
+    fn the_station_hint_waits_for_a_railway_that_is_actually_running() {
+        let network = some_track();
+        let ledger = MoneyLedger::default();
+        let tools = tools(BuildTool::Build);
+
+        assert!(
+            !moment_for(Hint::Station, &tools, &network, &ledger, 2, 0),
+            "nothing is running yet - that is the train hint's moment"
+        );
+        assert!(moment_for(Hint::Station, &tools, &network, &ledger, 2, 1));
+        assert!(
+            !moment_for(Hint::Station, &tools, &network, &ledger, 1, 1),
+            "one stop is not yet a line to add to"
+        );
+        // The two never coincide, whatever the world looks like.
+        for served in 0..4 {
+            for running in 0..3 {
+                let train = moment_for(Hint::Train, &tools, &network, &ledger, served, running);
+                let station =
+                    moment_for(Hint::Station, &tools, &network, &ledger, served, running);
+                assert!(!(train && station), "{served}/{running} says two things");
+            }
+        }
     }
 
     #[test]

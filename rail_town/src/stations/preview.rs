@@ -10,7 +10,8 @@ use rail_sim::stations::{
 };
 use rail_sim::track::{opposite_dir, step};
 use rail_sim::{
-    DemandSpawner, IndustryRegistry, LineRegistry, Money, TownDensity, TrackNetwork, GROUND_LAYER,
+    DemandSpawner, IndustryRegistry, LineRegistry, Money, TownDensity, TrackNetwork, TrackTerrain,
+    GROUND_LAYER,
 };
 
 /// Density at or above this reads as a standing building.
@@ -38,6 +39,11 @@ pub struct StationPreview {
 }
 
 /// Everything the ghost needs about a candidate site.
+///
+/// `terrain` is only consulted to tell the player *water* rather than *no
+/// track*: the sim's rule is that platforms stand on line, and open water is
+/// simply the commonest place there is none. Naming the ground is the difference
+/// between a rule the player learns and one they bounce off (04 §3).
 #[allow(clippy::too_many_arguments)]
 pub fn preview_station(
     stations: &StationRegistry,
@@ -46,6 +52,7 @@ pub fn preview_station(
     density: &TownDensity,
     demand: &DemandSpawner,
     money: &Money,
+    terrain: Option<&TrackTerrain>,
     tile: TileCoord,
     tier: StationTier,
 ) -> StationPreview {
@@ -55,10 +62,18 @@ pub fn preview_station(
 
     let outcome =
         validate_station_site(stations, industries, network, tile, GROUND_LAYER, tier, None);
-    let mut reject = outcome
-        .as_ref()
-        .err()
-        .map(|err| station_reason(*err, cost, balance));
+    let on_water = terrain.is_some_and(|t| t.contains(tile) && t.is_water(tile));
+    let mut reject = outcome.as_ref().err().map(|err| {
+        match err {
+            // Dry land with no rails is "lay the line first"; a river is not,
+            // and telling somebody hovering a lake to lay track there sends
+            // them to try it.
+            StationPlacementError::NoTrack if on_water => {
+                "That tile is water - bridge it first, or build ashore".to_string()
+            }
+            other => station_reason(*other, cost, balance),
+        }
+    });
     if reject.is_none() && cost > balance {
         reject = Some(station_reason(
             StationPlacementError::InsufficientFunds,
@@ -201,9 +216,16 @@ pub fn station_reason(err: StationPlacementError, cost: i64, balance: i64) -> St
         StationPlacementError::NoIndustryHere => {
             "Goods platforms load an industry - none touches this tile".into()
         }
+        // A refusal that came back from the sim carries no price (a retier
+        // charges a difference, not a build cost), so `cost` is `0` there and
+        // the line says the true thing it can say rather than "Short by $0.00".
         StationPlacementError::InsufficientFunds => {
-            let short = (cost - balance).max(0);
-            format!("Short by {}", format_dollars(short))
+            let short = cost - balance;
+            if short > 0 {
+                format!("Short by {}", format_dollars(short))
+            } else {
+                "Not enough money for that".into()
+            }
         }
         StationPlacementError::UnknownStation => "No station there".into(),
         StationPlacementError::NotUpgradable { from, to } => {
@@ -290,8 +312,8 @@ pub fn format_dollars(cents: i64) -> String {
 mod tests {
     use super::*;
     use rail_sim::stations::MIN_STATION_SPACING;
-    use rail_sim::track::{try_place_track, TrackTerrain};
-    use rail_sim::{IndustryTier, MoneyLedger};
+    use rail_sim::track::try_place_track;
+    use rail_sim::{DemandOpportunity, DemandOpportunityKind, IndustryTier, MoneyLedger};
 
     fn line_of(len: i32) -> TrackNetwork {
         let terrain = TrackTerrain::new(32, 32, (0..32 * 32).map(|_| (false, 0i8)));
@@ -320,6 +342,7 @@ mod tests {
             &TownDensity::default(),
             &DemandSpawner::default(),
             &money,
+            None,
             TileCoord { x, y: 8 },
             tier,
         )
@@ -359,6 +382,151 @@ mod tests {
         assert_eq!(p.reject.as_deref(), Some("Short by $5.00"));
     }
 
+    /// The chip is where a player learns what they are about to buy: the tier
+    /// they are on and what it costs, before the click, at the cursor.
+    #[test]
+    fn the_chip_names_the_tier_and_its_price_before_the_click() {
+        for tier in StationTier::ALL {
+            let p = preview_at(7, tier, Money::new(1_000_000));
+            let chip = station_hud_line(&p);
+            assert!(
+                chip.contains(tier.label()),
+                "{chip:?} does not say which tier is armed"
+            );
+            assert!(
+                chip.contains(&format_dollars(tier.build_cents())),
+                "{chip:?} does not say what {} costs",
+                tier.label()
+            );
+            assert!(chip.is_ascii(), "{chip} would draw as tofu");
+        }
+    }
+
+    /// 04 §6: the ring is what makes siting a decision rather than a guess, so
+    /// the numbers beside it have to be the ones inside it.
+    #[test]
+    fn the_catchment_readout_counts_what_it_claims() {
+        let mut density = TownDensity::default();
+        // Three lots inside a Station's reach of 5, one well outside it.
+        for (x, y) in [(7, 6), (9, 8), (5, 11), (7, 20)] {
+            density.set(TileCoord { x, y }, 0.5);
+        }
+        // And one too faint to read as a standing building.
+        density.set(TileCoord { x: 8, y: 8 }, BUILDING_DENSITY / 2.0);
+
+        let mut stations = StationRegistry::new();
+        let near = stations.insert("Ridgeline", TileCoord { x: 9, y: 5 }, GROUND_LAYER);
+        let far = stations.insert("Longreach", TileCoord { x: 30, y: 30 }, GROUND_LAYER);
+        let mut demand = DemandSpawner::default();
+        for (id, tile) in [(near, TileCoord { x: 9, y: 5 }), (far, TileCoord { x: 30, y: 30 })] {
+            demand.open.push(DemandOpportunity {
+                kind: DemandOpportunityKind::Settlement(id),
+                name: "asking for a railway".into(),
+                tile,
+            });
+        }
+
+        let p = preview_station(
+            &stations,
+            &IndustryRegistry::new(),
+            &line_of(8),
+            &density,
+            &demand,
+            &Money::new(1_000_000),
+            None,
+            TileCoord { x: 7, y: 8 },
+            StationTier::Station,
+        );
+
+        assert_eq!(p.buildings, 3, "only lots inside the ring count");
+        assert_eq!(p.unserved, 1, "only unserved anchors inside the ring count");
+        let chip = station_hud_line(&p);
+        assert!(chip.contains("3 buildings"), "{chip:?}");
+        assert!(chip.contains("1 unserved"), "{chip:?}");
+    }
+
+    /// Hovering open water used to read "lay the line first", which sends the
+    /// player to try laying track on a lake. Name the ground instead.
+    #[test]
+    fn open_water_says_it_is_water() {
+        // A lake at x >= 12 on the station row.
+        let mut cells = Vec::new();
+        for y in 0..32 {
+            for x in 0..32 {
+                let _ = y;
+                cells.push((x >= 12, 0i8));
+            }
+        }
+        let terrain = TrackTerrain::new(32, 32, cells);
+
+        let dry = preview_station(
+            &StationRegistry::new(),
+            &IndustryRegistry::new(),
+            &line_of(8),
+            &TownDensity::default(),
+            &DemandSpawner::default(),
+            &Money::new(1_000_000),
+            Some(&terrain),
+            TileCoord { x: 20, y: 8 },
+            StationTier::Halt,
+        );
+        assert!(!dry.can_commit);
+        assert_eq!(
+            dry.reject.as_deref(),
+            Some("That tile is water - bridge it first, or build ashore")
+        );
+
+        // Dry ground with no rails keeps the rule it actually broke.
+        let inland = preview_at(2, StationTier::Halt, Money::new(1_000_000));
+        assert_eq!(
+            inland.reject.as_deref(),
+            Some("Platforms need track - lay the line first")
+        );
+    }
+
+    /// `MIN_STATION_SPACING` is the rule a player meets soonest — a second stop
+    /// next to the first. It must speak, with both numbers.
+    #[test]
+    fn a_stop_too_near_the_last_one_speaks_at_the_cursor() {
+        let mut stations = StationRegistry::new();
+        stations.insert("Eastgate", TileCoord { x: 5, y: 8 }, GROUND_LAYER);
+
+        let too_near = preview_station(
+            &stations,
+            &IndustryRegistry::new(),
+            &line_of(8),
+            &TownDensity::default(),
+            &DemandSpawner::default(),
+            &Money::new(1_000_000),
+            None,
+            TileCoord { x: 7, y: 8 },
+            StationTier::Halt,
+        );
+        assert!(!too_near.can_commit);
+        assert_eq!(
+            too_near.reject.as_deref(),
+            Some(
+                format!("Too close - 2 tiles, need {MIN_STATION_SPACING}").as_str()
+            ),
+            "the spacing rule must name its number, not fail silently"
+        );
+        assert!(too_near.platforms.is_empty(), "and draw no platforms");
+
+        // Exactly the limit away is a legal site.
+        let far_enough = preview_station(
+            &stations,
+            &IndustryRegistry::new(),
+            &line_of(8),
+            &TownDensity::default(),
+            &DemandSpawner::default(),
+            &Money::new(1_000_000),
+            None,
+            TileCoord { x: 8, y: 8 },
+            StationTier::Halt,
+        );
+        assert!(far_enough.can_commit, "{:?}", far_enough.reject);
+    }
+
     /// 04 §6 last line: the ghost says what the platform would load, and the
     /// refusal says why there is nothing to load.
     #[test]
@@ -378,6 +546,7 @@ mod tests {
             &TownDensity::default(),
             &DemandSpawner::default(),
             &Money::new(1_000_000),
+            None,
             TileCoord { x: 7, y: 8 },
             StationTier::GoodsPlatform,
         );
@@ -393,6 +562,7 @@ mod tests {
             &TownDensity::default(),
             &DemandSpawner::default(),
             &Money::new(1_000_000),
+            None,
             TileCoord { x: 7, y: 8 },
             StationTier::GoodsPlatform,
         );

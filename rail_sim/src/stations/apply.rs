@@ -28,6 +28,7 @@ use crate::history::{CommandHistory, HistoryMode};
 use crate::ids::{LineId, StationId, TileCoord};
 use crate::lines::{LineRegistry, LineStopSlot};
 use crate::money::Money;
+use crate::peeps::{ComplaintEntry, ComplaintFeed, TalkKind};
 use crate::track::TrackNetwork;
 
 use super::industry::IndustryRegistry;
@@ -167,6 +168,76 @@ pub fn apply_station_commands(
     for edit in queued {
         edits.write(edit);
     }
+}
+
+/// Say in Town Talk what the player just did to the railway's stops.
+///
+/// Mirrors [`crate::lines::apply`]: everything the player does to a line says so
+/// in the feed, because an action the world does not acknowledge is an action
+/// the player cannot tell landed. A new platform is the strongest case of all —
+/// it is the moment 04 §6 exists for, and the sentence names the one thing the
+/// player has to do next, which is put a line through it.
+///
+/// Reads [`StationEdit`] rather than living inside the apply pass so the pure
+/// [`apply_station_command`] keeps its signature and its tests.
+pub fn announce_station_edits(
+    mut edits: MessageReader<StationEdit>,
+    service: Res<StationService>,
+    stations: Res<StationRegistry>,
+    mut talk: ResMut<ComplaintFeed>,
+) {
+    let tick = service.tick;
+    for edit in edits.read() {
+        let (tile, sentence) = match edit {
+            StationEdit::Placed { id, tile, tier, .. } => {
+                let name = station_name(&stations, *id, *tier);
+                (
+                    Some(*tile),
+                    format!("{name} opened - no line calls there yet"),
+                )
+            }
+            StationEdit::Retiered { id, tile, to, .. } => {
+                let name = station_name(&stations, *id, *to);
+                (
+                    Some(*tile),
+                    format!(
+                        "{name} rebuilt as {} - reach {} tiles",
+                        to.label(),
+                        to.catchment()
+                    ),
+                )
+            }
+            // A stop the player lifted. The tier is the fact worth keeping:
+            // "Ashford Halt closed" reads as a place, not as an id.
+            StationEdit::Removed { tile, tier, .. } => (
+                Some(*tile),
+                format!("{} closed - platforms lifted", tier.label()),
+            ),
+            StationEdit::Failed { .. } => continue,
+        };
+        talk.push(ComplaintEntry {
+            kind: TalkKind::Opportunity,
+            // Whole-sentence town line: the sentence goes in `peep_name` and
+            // `station_name` stays empty, which is how `display_line` knows not
+            // to quote it as somebody speaking.
+            peep_name: sentence,
+            station_name: String::new(),
+            wait_minutes: 0,
+            sim_tick: tick,
+            peep_id: None,
+            station_id: None,
+            tile,
+            count: 1,
+        });
+    }
+}
+
+/// A stop's name, falling back to its tier for one that has just been lifted.
+fn station_name(stations: &StationRegistry, id: StationId, tier: StationTier) -> String {
+    stations
+        .get(id)
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| tier.label().to_string())
 }
 
 /// Apply one station intent, recording its inverse for undo.
@@ -412,6 +483,76 @@ mod tests {
             tier,
             None,
         ))
+    }
+
+    /// A platform the player paid for has to be visible as news, not only as a
+    /// sprite: Town Talk is where this game acknowledges what the player did,
+    /// and the sentence points at the next move (put a line through it).
+    #[test]
+    fn a_new_platform_opens_in_town_talk() {
+        let mut app = bevy_app::App::new();
+        app.init_resource::<StationRegistry>()
+            .init_resource::<StationService>()
+            .init_resource::<ComplaintFeed>()
+            .add_message::<StationEdit>()
+            .add_systems(bevy_app::Update, announce_station_edits);
+
+        let id = {
+            let mut stations = app.world_mut().resource_mut::<StationRegistry>();
+            stations.insert_tier(
+                "Ashford Halt",
+                TileCoord { x: 6, y: 8 },
+                GROUND_LAYER,
+                StationTier::Halt,
+                StationTier::Halt.build_cents(),
+            )
+        };
+
+        app.world_mut().write_message(StationEdit::Placed {
+            id,
+            tile: TileCoord { x: 6, y: 8 },
+            layer: GROUND_LAYER,
+            tier: StationTier::Halt,
+        });
+        app.update();
+
+        let line = app
+            .world()
+            .resource::<ComplaintFeed>()
+            .latest_line()
+            .expect("the town says something");
+        assert_eq!(line, "Ashford Halt opened - no line calls there yet");
+        assert!(line.is_ascii(), "{line} would draw as tofu");
+
+        // An upgrade is news too, and it names what the money bought.
+        app.world_mut().write_message(StationEdit::Retiered {
+            id,
+            tile: TileCoord { x: 6, y: 8 },
+            from: StationTier::Halt,
+            to: StationTier::Interchange,
+        });
+        app.update();
+        let line = app
+            .world()
+            .resource::<ComplaintFeed>()
+            .latest_line()
+            .expect("a second line");
+        assert_eq!(
+            line,
+            format!(
+                "Ashford Halt rebuilt as Interchange - reach {} tiles",
+                StationTier::Interchange.catchment()
+            )
+        );
+
+        // A refusal is the tool's to voice at the cursor, not the town's.
+        let before = app.world().resource::<ComplaintFeed>().len();
+        app.world_mut().write_message(StationEdit::Failed {
+            error: StationPlacementError::NoTrack,
+            tile: Some(TileCoord { x: 1, y: 1 }),
+        });
+        app.update();
+        assert_eq!(app.world().resource::<ComplaintFeed>().len(), before);
     }
 
     #[test]

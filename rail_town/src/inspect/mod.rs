@@ -13,7 +13,10 @@ use hover::{
     hover_pick, setup_hover, sync_hover_brackets, update_hover_tooltip, HoverProbe, Hovered,
 };
 use outline::{setup_selection_outline, sync_selection_outline};
-use panel::{cause_jump_clicks, setup_inspector_panel, update_inspector_panel};
+use panel::{
+    cause_jump_clicks, paint_station_actions, setup_inspector_panel, station_action_clicks,
+    update_inspector_panel,
+};
 use selection::{
     follow_selection, sample_service_history, selection_click_input, ServiceScoreHistory,
 };
@@ -57,8 +60,12 @@ impl Plugin for InspectPlugin {
                     // close back into a cleared selection), so this only fills
                     // the rows in.
                     update_inspector_panel,
+                    // The station card's own verbs — Upgrade and Demolish live
+                    // on the thing they act on (see `panel::UpgradeOffer`).
+                    paint_station_actions,
                     // After the fill, so a click acts on the row it saw.
                     cause_jump_clicks.after(update_inspector_panel),
+                    station_action_clicks.after(paint_station_actions),
                 ),
             )
             // Hover is the middle tier of interrogation (brief 05 §1): pick,

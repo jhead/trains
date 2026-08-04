@@ -4,13 +4,16 @@
 //! hover shows a live ghost with the catchment ring and its cost, left click
 //! commits, and every rejection names its rule.
 //!
-//! - `P` — select the Station tool; press again to cycle
-//!   Halt → Station → Interchange → Terminus → Goods Platform
+//! - **The Station slot on the menu row**, or `P` — arm the tool. `P` again
+//!   cycles Halt → Station → Interchange → Terminus → Goods Platform, and the
+//!   tier row under the slot picks one directly, with its price.
 //! - Left click — build the selected tier on the track under the cursor
-//! - `U` — upgrade the station under the cursor to the next tier up
+//! - `U` — upgrade the station under the cursor to the next tier up. The
+//!   Inspector's card offers the same thing with the price on it.
 //! - Right click — lift the station under the cursor (full refund). When lines
 //!   call there it asks first, naming them (04 §4).
-//! - `Esc` — leave the tool; `B` / `X` / `T` / `G` / `L` reclaim their own
+//! - `Esc` — leave the tool; `B` / `X` / `T` / `G` / `L` reclaim their own, and
+//!   so does any other slot on the row (`ui::toolbar::apply_toolbar_tool`).
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -22,8 +25,8 @@ use rail_sim::stations::{
     StationRegistry, StationTier, UpgradeStation,
 };
 use rail_sim::{
-    CommandBuffer, DemandSpawner, IndustryRegistry, LineRegistry, Money, TownDensity, TrackNetwork,
-    GROUND_LAYER,
+    CommandBuffer, DemandSpawner, IndustryRegistry, LineRegistry, Money, StationEdit, StationId,
+    TownDensity, TrackNetwork, TrackTerrain, GROUND_LAYER,
 };
 
 use crate::input::{ControlAction, KeyBindings};
@@ -66,7 +69,11 @@ impl StationToolState {
         self.tier = TIER_CYCLE[(i + 1) % TIER_CYCLE.len()];
     }
 
-    fn leave(&mut self) {
+    /// Put the tool down: no ghost, no sticky refusal, no armed pointer.
+    ///
+    /// Public because the menu row disarms it whenever another verb is armed —
+    /// see `ui::toolbar::apply_toolbar_tool`.
+    pub fn disarm(&mut self) {
         self.active = false;
         self.preview = None;
         self.reject = None;
@@ -84,6 +91,9 @@ pub struct SiteWorld<'w> {
     demand: Res<'w, DemandSpawner>,
     money: Res<'w, Money>,
     lines: Res<'w, LineRegistry>,
+    /// Only so a refusal over open water can say *water* rather than *no track*.
+    /// `Option` because the terrain arrives with the map, one frame behind boot.
+    terrain: Option<Res<'w, TrackTerrain>>,
 }
 
 /// The other tools' focus state, so `P` can take the pointer cleanly.
@@ -161,7 +171,7 @@ pub fn station_tool_input(
             ControlAction::LineTool,
         ],
     ) {
-        state.leave();
+        state.disarm();
     }
 
     if !state.active {
@@ -169,7 +179,7 @@ pub fn station_tool_input(
     }
 
     if keys.just_pressed(KeyCode::Escape) {
-        state.leave();
+        state.disarm();
         focus.track.suppress_build_click = false;
         return;
     }
@@ -178,6 +188,7 @@ pub fn station_tool_input(
     state.hover_tile = hover;
 
     let tier = state.tier;
+    let terrain = world.terrain.as_deref();
     state.preview = hover.map(|tile| {
         preview_station(
             &world.stations,
@@ -186,6 +197,7 @@ pub fn station_tool_input(
             &world.density,
             &world.demand,
             &world.money,
+            terrain,
             tile,
             tier,
         )
@@ -308,25 +320,59 @@ fn demolish_under_cursor(
         state.reject = Some(station_reason(StationPlacementError::UnknownStation, 0, 0));
         return;
     };
-    // 04 §4: a demolish with a consequence asks, and names it. Everything else
-    // is a plain reversible lift and goes straight through.
-    if let Some(body) = demolish_consequence(lines, station.id) {
+    state.reject = None;
+    request_demolish(station.id, lines, buffer, confirm);
+}
+
+/// Lift `station`, asking first when lifting it costs somebody a call.
+///
+/// 04 §4: a demolish with a consequence **asks and names it**; everything else
+/// is a plain reversible lift and goes straight through. Shared with the
+/// Inspector's Demolish button so the right-click and the panel cannot disagree
+/// about which lifts are worth a question.
+pub fn request_demolish(
+    station: StationId,
+    lines: &LineRegistry,
+    buffer: &mut CommandBuffer,
+    confirm: &mut ConfirmDialog,
+) {
+    if let Some(body) = demolish_consequence(lines, station) {
         confirm.ask(ConfirmPrompt {
             title: "Demolish station".into(),
             body,
             confirm: "Demolish".into(),
-            action: ConfirmAction::DemolishStation(station.id),
+            action: ConfirmAction::DemolishStation(station),
         });
-        state.reject = None;
         return;
     }
-    state.reject = None;
-    push_station_command(
-        buffer,
-        StationCommand::Demolish(DemolishStation {
-            station: station.id,
-        }),
-    );
+    push_station_command(buffer, StationCommand::Demolish(DemolishStation { station }));
+}
+
+/// Give a refusal the sim made a voice at the cursor.
+///
+/// The ghost speaks for everything the preview can see, but the preview is not
+/// the last word — the sim re-validates every command, and a refusal that only
+/// happens there used to vanish silently: [`StationEdit::Failed`] had no reader
+/// in this crate at all. 04 §3 is explicit that silent rejection is the worst
+/// thing an interface can do, so the reason lands on the same sticky line the
+/// ghost uses.
+pub fn speak_station_refusals(
+    mut edits: MessageReader<StationEdit>,
+    mut state: ResMut<StationToolState>,
+) {
+    for edit in edits.read() {
+        match edit {
+            StationEdit::Failed { error, .. } => {
+                // The price that was refused is not in the message — a retier
+                // charges a difference, not a build cost — so the funds line
+                // falls back to its priceless wording rather than inventing a
+                // number. Every other reason carries its own.
+                state.reject = Some(station_reason(*error, 0, 0));
+            }
+            // Something landed: whatever was refused before is history.
+            _ => state.reject = None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +401,52 @@ mod tests {
         assert!(
             matches!(pending[0].kind, CommandKind::DemolishStation(d) if d.station == StationId(7)),
             "the dialog's yes becomes the command, on the tick boundary"
+        );
+    }
+
+    /// 04 §3: silent rejection is the worst thing an interface can do. The
+    /// ghost speaks for what the preview can see, but the sim gets the last
+    /// word on every command — and until now nothing in this crate read
+    /// [`StationEdit::Failed`], so an upgrade the sim refused said nothing at
+    /// all.
+    #[test]
+    fn a_refusal_from_the_sim_still_reaches_the_cursor() {
+        let mut app = App::new();
+        app.init_resource::<StationToolState>()
+            .add_message::<StationEdit>()
+            .add_systems(Update, speak_station_refusals);
+
+        app.world_mut().write_message(StationEdit::Failed {
+            error: StationPlacementError::NoPlatformRoom { have: 3, need: 4 },
+            tile: Some(TileCoord { x: 6, y: 8 }),
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<StationToolState>().reject.as_deref(),
+            Some("Not enough platform - 3 tiles of line, needs 4"),
+            "the rule and both its numbers"
+        );
+
+        // Something landing clears the last refusal rather than leaving it up.
+        app.world_mut().write_message(StationEdit::Retiered {
+            id: StationId(1),
+            tile: TileCoord { x: 6, y: 8 },
+            from: StationTier::Halt,
+            to: StationTier::Station,
+        });
+        app.update();
+        assert!(app.world().resource::<StationToolState>().reject.is_none());
+
+        // A refused spend has no price to quote here, and says so rather than
+        // claiming the player is short by nothing.
+        app.world_mut().write_message(StationEdit::Failed {
+            error: StationPlacementError::InsufficientFunds,
+            tile: None,
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<StationToolState>().reject.as_deref(),
+            Some("Not enough money for that")
         );
     }
 

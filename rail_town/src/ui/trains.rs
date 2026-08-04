@@ -660,6 +660,7 @@ mod tests {
     // ─ The buttons, in a real schedule ─────────────────────
 
     use crate::lines::LineToolState;
+    use crate::stations::StationToolState;
     use crate::track::TrackToolState;
     use crate::trains::{TrainPlaceKind, TrainToolState};
     use rail_sim::{CommandBuffer, CommandKind};
@@ -671,6 +672,7 @@ mod tests {
             .init_resource::<TrackToolState>()
             .init_resource::<TrainToolState>()
             .init_resource::<LineToolState>()
+            .init_resource::<StationToolState>()
             .init_resource::<TrainYard>()
             .init_resource::<Selection>()
             .init_resource::<CameraFocusRequest>()

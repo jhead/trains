@@ -42,6 +42,7 @@ pub enum CommandKind {
     PlaceTrain(PlaceTrain),
     SellTrain(SellTrain),
     CreateLine(CreateLine),
+    RemoveLine(RemoveLine),
     AssignTrainToLine(AssignTrainToLine),
     UnassignTrain(UnassignTrain),
     PlaceStation(PlaceStation),
@@ -117,6 +118,25 @@ pub struct CreateLine {
     /// Optional override; empty / missing → endpoint suggestion.
     pub name: Option<String>,
     pub stops: Vec<StationId>,
+}
+
+/// Delete a line the player no longer wants.
+///
+/// The counterpart to [`CreateLine`], and the reason lines are not a one-way
+/// door. Its trains are **not** sold or stranded: they lose their
+/// [`TrainOnLine`](crate::TrainOnLine) and go back to taking any job off the
+/// board, which is what an unassigned train has always done. That is the
+/// consequence the confirm dialog names before the player agrees to it.
+///
+/// **Not wired into [`CommandHistory`](crate::CommandHistory)**, for the reason
+/// [`SellTrain`] is not: a faithful inverse would have to mint the same
+/// [`LineId`] again, and `CreateLine` always allocates a fresh one — so undo
+/// would hand back a line the removed one's trains no longer belong to, and
+/// call it the same line. The confirm dialog is the guard instead, and drawing
+/// the route again is the way back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveLine {
+    pub line: LineId,
 }
 
 /// Assign a placed train to a line (prefers line work over free-roam).

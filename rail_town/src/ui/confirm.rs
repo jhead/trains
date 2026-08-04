@@ -31,7 +31,7 @@
 //! into a command.
 
 use bevy::prelude::*;
-use rail_sim::{StationId, TrainId};
+use rail_sim::{LineId, StationId, TrainId};
 
 use crate::palette::{BG0, WARN};
 use crate::ui::kit::{
@@ -53,6 +53,10 @@ pub enum ConfirmAction {
     /// Sell a train back for its full price. Rolling stock is reversible the
     /// way track is, and the price is money the player gets to see first.
     SellTrain(TrainId),
+    /// Delete a line. The consequence the player cannot see from the panel is
+    /// what becomes of its trains — they keep running, unassigned — so the
+    /// prompt names them and how many there are.
+    RemoveLine(LineId),
 }
 
 /// A question on screen: what is at stake, and what saying yes is called.

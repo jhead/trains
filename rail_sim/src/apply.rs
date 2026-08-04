@@ -41,6 +41,7 @@ pub fn apply_commands(
             | CommandKind::PlaceTrain(_)
             | CommandKind::SellTrain(_)
             | CommandKind::CreateLine(_)
+            | CommandKind::RemoveLine(_)
             | CommandKind::AssignTrainToLine(_)
             | CommandKind::UnassignTrain(_)
             | CommandKind::PlaceStation(_)

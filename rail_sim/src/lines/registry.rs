@@ -183,6 +183,36 @@ impl LineRegistry {
         self.lines.remove(&id)
     }
 
+    /// The existing line that already runs `stops`, if there is one.
+    ///
+    /// # A reversed route is the same service
+    ///
+    /// Every line in the MVP is a [`LineDirection::OutAndBack`] shuttle: a train
+    /// on `A - B` runs to B, turns, and runs back to A. So `[A, B]` and `[B, A]`
+    /// are not two services, they are one service written down from either end —
+    /// the same trains calling at the same platforms in the same order. Creating
+    /// both gives the player two rows, two colours and two names for one piece of
+    /// railway, which is exactly what the playtest produced: *"Westbrook -
+    /// Eastgate"* and *"Eastgate - Westbrook"* side by side, indistinguishable in
+    /// the world.
+    ///
+    /// This must be revisited if one-way loops ever land ([`LineDirection`] has
+    /// room for them): on a loop, direction is the whole service.
+    ///
+    /// The lowest [`LineId`] wins so the answer — and the warning naming it — is
+    /// the same on every run, whatever order the `HashMap` yields.
+    pub fn duplicate_of(&self, stops: &[StationId]) -> Option<LineId> {
+        if stops.len() < 2 {
+            return None;
+        }
+        let reversed: Vec<StationId> = stops.iter().rev().copied().collect();
+        self.lines
+            .values()
+            .filter(|line| line.stops == stops || line.stops == reversed)
+            .map(|line| line.id)
+            .min_by_key(|id| id.0)
+    }
+
     /// Every line that calls at `station`, in [`LineId`] order.
     ///
     /// Sorted because the registry is a `HashMap`: the demolish path records an
@@ -439,6 +469,54 @@ mod tests {
 
         assert_eq!(lines.get(id).unwrap().stops, before);
         assert!(!lines.get(id).unwrap().is_dormant());
+    }
+
+    #[test]
+    fn a_route_the_registry_already_holds_is_found_from_either_end() {
+        let mut lines = LineRegistry::new();
+        let (a, b, c) = (StationId(1), StationId(2), StationId(3));
+        let id = lines.create("Eastgate - Westbrook".into(), vec![a, b]).unwrap();
+
+        assert_eq!(lines.duplicate_of(&[a, b]), Some(id), "the same route");
+        assert_eq!(
+            lines.duplicate_of(&[b, a]),
+            Some(id),
+            "an out-and-back shuttle is one service, written from either end"
+        );
+        assert_eq!(lines.duplicate_of(&[a, c]), None, "a different route");
+        assert_eq!(lines.duplicate_of(&[a, b, c]), None, "a longer route");
+        assert_eq!(lines.duplicate_of(&[a]), None, "not a route at all");
+        assert_eq!(lines.duplicate_of(&[]), None);
+    }
+
+    #[test]
+    fn a_longer_route_is_matched_stop_for_stop() {
+        let mut lines = LineRegistry::new();
+        let (a, b, c) = (StationId(1), StationId(2), StationId(3));
+        let id = lines.create("Cross Town".into(), vec![a, b, c]).unwrap();
+
+        assert_eq!(lines.duplicate_of(&[a, b, c]), Some(id));
+        assert_eq!(lines.duplicate_of(&[c, b, a]), Some(id));
+        assert_eq!(
+            lines.duplicate_of(&[a, c, b]),
+            None,
+            "the same stops in a different order call in a different order"
+        );
+    }
+
+    /// The registry is a `HashMap`, and the warning names the line it found.
+    #[test]
+    fn the_duplicate_reported_is_the_oldest_one_every_time() {
+        let mut lines = LineRegistry::new();
+        let (a, b) = (StationId(1), StationId(2));
+        let first = lines.create("First".into(), vec![a, b]).unwrap();
+        // Two copies can only exist in a world saved before the check landed —
+        // the answer still has to be stable.
+        let _second = lines.create("Second".into(), vec![b, a]).unwrap();
+
+        for _ in 0..16 {
+            assert_eq!(lines.duplicate_of(&[a, b]), Some(first));
+        }
     }
 
     #[test]

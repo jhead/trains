@@ -216,6 +216,23 @@ pub fn selection_click_input(
     // Only the Look tool selects. An armed tool owns the world press —
     // otherwise clicking to demolish also selected the piece and popped the
     // Inspector open on a track that was about to stop existing.
+    //
+    // # Why the Lines flow does not get an exception here
+    //
+    // `lines::panel::assign_clicked_train_to_focused_line` turns a train pick
+    // into a crew assignment while a line is focused, and it is tempting to let
+    // that pick through even with a verb armed. It must not. Every armed verb
+    // has a real intent for the tile a train is standing on: Demolish lifts the
+    // track under it, the Station tool builds a platform on it, and the Line
+    // tool adds the stop it is parked at. An exception here would quietly turn
+    // three deliberate clicks into a crew change.
+    //
+    // What made the flow unreachable was never this gate — it was the Line tool
+    // finishing without putting itself down, so the player was left in
+    // `BuildTool::Build` with no way back. That is fixed at the source, in
+    // `lines::tools::return_to_look`, and the flow now ends in Look where the
+    // pick works. When a verb *is* armed, the Lines panel says so in words
+    // rather than acting: "No train picked - press V for Look".
     if track_tool.tool != BuildTool::Select || track_tool.drag.is_some() {
         return;
     }

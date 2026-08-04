@@ -39,7 +39,7 @@ pub use clock::{sim_is_running, SimClock, SimSpeed};
 pub use command_buffer::CommandBuffer;
 pub use commands::{
     AssignTrainToLine, AutoFillTrack, BuyTrain, CommandKind, CreateLine, Demolish, Pause,
-    PlaceTrack, PlaceTrain, SellTrain, SetSpeed, SimCommand, TrainKind, UnassignTrain,
+    PlaceTrack, PlaceTrain, RemoveLine, SellTrain, SetSpeed, SimCommand, TrainKind, UnassignTrain,
 };
 pub use history::{CommandHistory, HistoryEntry, HistoryMode, HISTORY_DEPTH};
 pub use demand::{

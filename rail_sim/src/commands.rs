@@ -40,6 +40,7 @@ pub enum CommandKind {
     AutoFillPath(AutoFillPath),
     BuyTrain(BuyTrain),
     PlaceTrain(PlaceTrain),
+    SellTrain(SellTrain),
     CreateLine(CreateLine),
     AssignTrainToLine(AssignTrainToLine),
     UnassignTrain(UnassignTrain),
@@ -92,6 +93,16 @@ pub struct BuyTrain {
 pub struct PlaceTrain {
     pub train: TrainId,
     pub at_station: StationId,
+}
+
+/// Sell a train back for what it cost.
+///
+/// Rolling stock is reversible the way track is (DESIGN.md — *"demolition
+/// refunds in full"*): a train the player no longer wants is not a sunk cost,
+/// it is money in the yard. Works on a placed train or one still unplaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SellTrain {
+    pub train: TrainId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

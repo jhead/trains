@@ -10,12 +10,13 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use rail_sim::{
-    commands::TrainKind, HouseholdRegistry, IndustryRegistry, Journey, JourneyMemory, LineRegistry,
-    Mood, Peep, Routine, StationRegistry, StationService, TileOccupancy, TrackNetwork, Train,
-    TrainCargo, TrainLocation, WaitingAtStation,
+    buy_cost, commands::TrainKind, HouseholdRegistry, IndustryRegistry, Journey, JourneyMemory,
+    LineRegistry, Mood, Peep, Routine, StationRegistry, StationService, TileOccupancy, TrackNetwork,
+    Train, TrainCargo, TrainLocation, WaitingAtStation,
 };
 
 use crate::palette::{BALLAST_D, OK};
+use crate::ui::format::money_whole;
 use crate::ui::kit::{
     body_font, display_font, micro_font, panel_node, text_accent, text_primary, text_secondary,
     text_warn, WorldClickBlocker, FONT_BODY, SPACE_1,
@@ -484,14 +485,19 @@ fn build_view(
                 cause_tone: tone,
                 cause_jump: blocker.map(Selectable::Train),
                 body: format!(
-                    "{line_note}\nCargo / job\n{job}\n\nPath step {}/{}\n{}",
+                    "{line_note}\nCargo / job\n{job}\n\nPath step {}/{}\n{}\nX sells it back \
+                     for {}",
                     loc.path_index + 1,
                     loc.path.len().max(1),
                     if status == "Blocked" {
                         blocker_line
                     } else {
                         String::new()
-                    }
+                    },
+                    // The verb is only findable if something says it exists, and
+                    // this is the panel a player is already looking at when they
+                    // want the train gone.
+                    money_whole(buy_cost(train.kind))
                 ),
             }
         }

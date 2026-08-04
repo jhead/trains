@@ -217,8 +217,11 @@ impl ControlAction {
             Self::LineTool => "Line tool",
             Self::PlaceStation => "Station tool",
             Self::UpgradeStation => "Upgrade station",
-            Self::BuyTransit => "Buy transit train",
-            Self::BuyTransport => "Buy transport train",
+            // Not "Buy": the verb places stock already in the yard and only
+            // reaches for the bank when there is none, so a label promising a
+            // purchase would be the same lie the tool used to tell.
+            Self::BuyTransit => "Transit train: place / buy",
+            Self::BuyTransport => "Transport train: place / buy",
             Self::CommitLine => "Commit line",
             Self::Undo => "Undo",
             Self::Redo => "Redo",

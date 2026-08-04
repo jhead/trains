@@ -39,6 +39,7 @@
 
 use bevy::input::InputSystems;
 use bevy::prelude::*;
+use rail_sim::{ComplaintEntry, ComplaintFeed, StationService, TalkKind};
 
 pub use crate::shell::controls::{Binding, ControlAction};
 use crate::shell::controls::ControlSettings;
@@ -164,12 +165,33 @@ impl Plugin for InputMapPlugin {
     }
 }
 
-/// Copy `Settings::controls` into the live map.
+/// Copy `Settings::controls` into the live map, and say so if two verbs clash.
 ///
 /// `Settings` is optional so the plugin still builds headless, where the shell
 /// does not exist and the defaults are the whole story.
+///
+/// # Why the warning is here
+///
+/// A playtester reported *"B is a hotkey for both map and build?"*. The shipping
+/// defaults are conflict-free and a test holds them that way, so the only way to
+/// get there is a **stored profile** — one written before a default moved, or one
+/// the player rebound themselves. The Controls tab already flags a clash, but
+/// only for somebody who goes looking; the player who hits it is by definition
+/// not in the menu, they are on the map wondering why one key does two things.
+///
+/// So the moment the game adopts a table it checks it, and one Town Talk line
+/// names both verbs, the key, and where to fix it. Once per adoption: the
+/// adoption itself only happens when the stored map differs from the live one,
+/// so a settings change that leaves the bindings alone says nothing.
+///
+/// One limit worth knowing: starting a **new map** clears the feed with the
+/// rest of the world, so a boot-time notice does not survive into a world made
+/// after it. The line comes back the next time the table is adopted — which is
+/// the next rebind — and the Controls tab flags the clash in the meantime.
 pub fn sync_bindings_from_settings(
     settings: Option<Res<Settings>>,
+    service: Option<Res<StationService>>,
+    mut talk: Option<ResMut<ComplaintFeed>>,
     mut bindings: ResMut<KeyBindings>,
 ) {
     let Some(settings) = settings else {
@@ -177,9 +199,58 @@ pub fn sync_bindings_from_settings(
     };
     let mut next = bindings.clone();
     next.adopt(&settings.controls);
-    if next != *bindings {
-        *bindings = next;
+    if next == *bindings {
+        return;
     }
+    *bindings = next;
+
+    let Some(talk) = talk.as_mut() else {
+        return;
+    };
+    let Some((first, second, binding)) = first_conflict(&settings.controls) else {
+        return;
+    };
+    talk.push(ComplaintEntry {
+        kind: TalkKind::Warning,
+        peep_name: format!(
+            "{} is bound to both {} and {} - fix in Settings > Controls",
+            binding.label(),
+            first.label(),
+            second.label()
+        ),
+        station_name: String::new(),
+        wait_minutes: 0,
+        sim_tick: service.map(|s| s.tick).unwrap_or(0),
+        peep_id: None,
+        station_id: None,
+        tile: None,
+        count: 1,
+    });
+}
+
+/// The first two verbs sharing a key, in [`ControlAction::ALL`] order.
+///
+/// Detection is [`ControlSettings::conflicts`] — the Controls tab's own
+/// machinery, so the map and the menu can never disagree about what a conflict
+/// is. This only picks which pair to name, and it names one pair rather than
+/// every pair because a line the player cannot read is not a warning.
+fn first_conflict(controls: &ControlSettings) -> Option<(ControlAction, ControlAction, Binding)> {
+    let clashing = controls.conflicts();
+    if clashing.is_empty() {
+        return None;
+    }
+    let ordered: Vec<ControlAction> = ControlAction::ALL
+        .iter()
+        .copied()
+        .filter(|a| clashing.contains(a))
+        .collect();
+    let first = *ordered.first()?;
+    let binding = controls.key_for(first);
+    let second = ordered
+        .iter()
+        .copied()
+        .find(|a| *a != first && controls.key_for(*a) == binding)?;
+    Some((first, second, binding))
 }
 
 #[cfg(test)]
@@ -311,6 +382,107 @@ mod tests {
         assert_eq!(
             app.world().resource::<KeyBindings>().key(ControlAction::MapView),
             KeyCode::KeyQ
+        );
+    }
+
+    /// Number of Town Talk lines about a clash.
+    fn warnings(app: &App) -> Vec<String> {
+        app.world()
+            .resource::<ComplaintFeed>()
+            .iter()
+            .filter(|e| e.kind == TalkKind::Warning)
+            .map(|e| e.display_line())
+            .collect()
+    }
+
+    fn app_with(settings: Settings) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::input::InputPlugin))
+            .init_resource::<ComplaintFeed>()
+            .insert_resource(settings)
+            .add_plugins(InputMapPlugin);
+        app
+    }
+
+    /// **The playtest report.** "B is a hotkey for both map and build?" — not
+    /// reachable from the defaults, but a stored profile can carry it, and the
+    /// player who hits it is on the map, not in the menu. The game says so.
+    #[test]
+    fn adopting_a_clashing_profile_says_which_two_verbs_want_the_key() {
+        let mut settings = Settings::default();
+        settings
+            .controls
+            .set(ControlAction::MapView, Binding::key(KeyCode::KeyB));
+
+        let mut app = app_with(settings);
+        app.update();
+
+        let lines = warnings(&app);
+        assert_eq!(lines.len(), 1, "one line per adoption: {lines:?}");
+        assert_eq!(
+            lines[0],
+            "B is bound to both Track tool and Map View - fix in Settings > Controls"
+        );
+        assert!(lines[0].is_ascii(), "the shipped font draws tofu otherwise");
+
+        // A further frame is not a further adoption — the table has not moved.
+        app.update();
+        app.update();
+        assert_eq!(warnings(&app).len(), 1, "the warning does not repeat");
+    }
+
+    #[test]
+    fn a_conflict_free_profile_says_nothing_at_all() {
+        let mut settings = Settings::default();
+        settings
+            .controls
+            .set(ControlAction::MapView, Binding::key(KeyCode::KeyJ));
+
+        let mut app = app_with(settings);
+        app.update();
+
+        assert!(warnings(&app).is_empty());
+        assert_eq!(
+            app.world().resource::<KeyBindings>().key(ControlAction::MapView),
+            KeyCode::KeyJ,
+            "and the rebind still landed"
+        );
+    }
+
+    #[test]
+    fn a_modifier_still_keeps_two_verbs_apart() {
+        // Ctrl+Z and Z are different bindings, and the warning must not invent
+        // a clash the Controls tab does not report.
+        let mut app = app_with(Settings::default());
+        app.update();
+        assert!(first_conflict(&ControlSettings::default()).is_none());
+        assert!(warnings(&app).is_empty());
+    }
+
+    #[test]
+    fn the_named_pair_is_stable_whichever_verb_was_moved() {
+        // Either rebind produces the same sentence, because the pair is read in
+        // the table's own order rather than in the order they were edited.
+        let mut moved_map = ControlSettings::default();
+        moved_map.set(ControlAction::MapView, Binding::key(KeyCode::KeyB));
+        let mut moved_track = ControlSettings::default();
+        moved_track.set(ControlAction::TrackTool, Binding::key(KeyCode::KeyM));
+
+        assert_eq!(
+            first_conflict(&moved_map),
+            Some((
+                ControlAction::TrackTool,
+                ControlAction::MapView,
+                Binding::key(KeyCode::KeyB)
+            ))
+        );
+        assert_eq!(
+            first_conflict(&moved_track),
+            Some((
+                ControlAction::TrackTool,
+                ControlAction::MapView,
+                Binding::key(KeyCode::KeyM)
+            ))
         );
     }
 

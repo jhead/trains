@@ -228,7 +228,11 @@ pub fn apply_confirmed_demolish(
     mut state: ResMut<StationToolState>,
 ) {
     for ConfirmAccepted(action) in accepted.read() {
-        let ConfirmAction::DemolishStation(station) = action;
+        // One dialog serves every confirmable action, so each tool answers only
+        // for its own — a train sale is somebody else's yes.
+        let ConfirmAction::DemolishStation(station) = action else {
+            continue;
+        };
         state.reject = None;
         push_station_command(
             &mut buffer,

@@ -36,7 +36,9 @@
 mod adapters;
 mod alerts;
 mod confirm;
-mod format;
+/// Money / clock strings. `pub(crate)` because a tool that names a price in a
+/// dialog must spell it the way the status strip does.
+pub(crate) mod format;
 mod health;
 pub(crate) mod kit;
 mod ledger;

@@ -39,6 +39,7 @@ pub fn apply_commands(
             | CommandKind::AutoFillPath(_)
             | CommandKind::BuyTrain(_)
             | CommandKind::PlaceTrain(_)
+            | CommandKind::SellTrain(_)
             | CommandKind::CreateLine(_)
             | CommandKind::AssignTrainToLine(_)
             | CommandKind::UnassignTrain(_)

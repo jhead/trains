@@ -39,7 +39,7 @@ pub use clock::{sim_is_running, SimClock, SimSpeed};
 pub use command_buffer::CommandBuffer;
 pub use commands::{
     AssignTrainToLine, AutoFillTrack, BuyTrain, CommandKind, CreateLine, Demolish, Pause,
-    PlaceTrack, PlaceTrain, SetSpeed, SimCommand, TrainKind, UnassignTrain,
+    PlaceTrack, PlaceTrain, SellTrain, SetSpeed, SimCommand, TrainKind, UnassignTrain,
 };
 pub use history::{CommandHistory, HistoryEntry, HistoryMode, HISTORY_DEPTH};
 pub use demand::{
@@ -51,7 +51,8 @@ pub use demand::{
 };
 pub use economy::{
     apply_track_maintenance, apply_train_opex, assign_jobs, drain_peep_demand,
-    goods_delivery_cents, haul_tiles, passenger_fare_cents, refresh_alerts, resolve_deliveries,
+    goods_delivery_cents, haul_tiles, passenger_fare_cents, refresh_alerts, requeue_cargo,
+    resolve_deliveries,
     spawn_demand_jobs, sync_peep_platform_pressure, tick_money_ledger, track_maintenance_total,
     train_opex_total_cents_per_real_min, Alert, AlertBoard, AlertFocus, AlertKind, AlertKey, Job,
     JobBoard, JobKind, MaintenanceAccrual, MoneyCategory, MoneyLedger, ALERT_CASH_LOW_MINUTES,
@@ -177,7 +178,13 @@ impl Plugin for SimPlugin {
                         .after(apply_commands)
                         .before(apply_track_commands),
                     apply_track_commands.after(apply_commands),
-                    apply_train_commands.after(apply_commands),
+                    // Before the line pass for the same reason the station pass
+                    // is: selling a train drops its line assignment, and the
+                    // roster a line edit is applied against must already be the
+                    // one this tick's sales left behind.
+                    apply_train_commands
+                        .after(apply_commands)
+                        .before(apply_line_commands),
                     // Both write `LineRegistry` — the station pass drops the
                     // calls at a demolished stop. Ordering them explicitly is
                     // what keeps a tick carrying both kinds deterministic, and

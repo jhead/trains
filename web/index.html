@@ -148,13 +148,21 @@
     <script type="module">
       const boot = document.getElementById("boot");
       const failed = document.getElementById("failed");
+      const canvas = document.getElementById("rail-town");
 
       // Right-drag is the demolish gesture (brief 04 §4), and the browser's
       // context menu swallows it. Scoped to the canvas, so the rest of the
       // page — and everything else in the browser — keeps its menu.
-      document
-        .getElementById("rail-town")
-        .addEventListener("contextmenu", (e) => e.preventDefault());
+      canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+      // Keyboard events go to the focused element, and a freshly loaded page
+      // focuses the document, not the canvas — so every key the game listens
+      // for did nothing at all until the player happened to click. Take focus
+      // on boot, and take it back whenever the page or the pointer returns.
+      const focusCanvas = () => canvas.focus({ preventScroll: true });
+      canvas.tabIndex = 0;
+      window.addEventListener("focus", focusCanvas);
+      document.addEventListener("pointerdown", focusCanvas);
 
       // Bevy hands control to its own loop and never resolves `init`, so the
       // overlay is cleared on the first painted frame instead of on a promise.
@@ -173,6 +181,9 @@
           }
         });
         requestAnimationFrame(() => requestAnimationFrame(clear));
+        // After init: Bevy has the canvas by now, so this is the frame where
+        // focusing it sticks.
+        focusCanvas();
       } catch (err) {
         console.error(err);
         document.querySelector(".bar").remove();

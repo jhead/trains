@@ -10,12 +10,11 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use rail_sim::commands::BuyTrain;
-use rail_sim::{CommandBuffer, CommandKind, TrainKind};
+use rail_sim::{CommandBuffer, TrainYard};
 
 use crate::lines::LineToolState;
 use crate::track::{BuildTool, TrackToolState};
-use crate::trains::{TrainPlaceKind, TrainToolState};
+use crate::trains::{arm_train_place, TrainPlaceKind, TrainToolState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolbarTool {
@@ -48,12 +47,15 @@ pub struct ToolStates<'w> {
     track: ResMut<'w, TrackToolState>,
     train: ResMut<'w, TrainToolState>,
     line: ResMut<'w, LineToolState>,
+    /// The menu row must cost what the key costs — see [`arm_train_place`].
+    yard: Res<'w, TrainYard>,
 }
 
 impl ToolStates<'_> {
     pub fn arm(&mut self, tool: ToolbarTool) {
         apply_toolbar_tool(
             tool,
+            &self.yard,
             &mut self.buffer,
             &mut self.track,
             &mut self.train,
@@ -64,6 +66,7 @@ impl ToolStates<'_> {
 
 pub fn apply_toolbar_tool(
     tool: ToolbarTool,
+    yard: &TrainYard,
     buffer: &mut CommandBuffer,
     track: &mut TrackToolState,
     train: &mut TrainToolState,
@@ -108,28 +111,10 @@ pub fn apply_toolbar_tool(
             track.suppress_build_click = true;
         }
         ToolbarTool::Transit => {
-            buffer.push(CommandKind::BuyTrain(BuyTrain {
-                kind: TrainKind::Transit,
-            }));
-            train.place_mode = true;
-            train.kind = TrainPlaceKind::Transit;
-            track.anchor = None;
-            track.drag = None;
-            track.suppress_build_click = true;
-            line.active = false;
-            line.clear_draft();
+            arm_train_place(TrainPlaceKind::Transit, yard, buffer, train, track, line);
         }
         ToolbarTool::Transport => {
-            buffer.push(CommandKind::BuyTrain(BuyTrain {
-                kind: TrainKind::Transport,
-            }));
-            train.place_mode = true;
-            train.kind = TrainPlaceKind::Transport;
-            track.anchor = None;
-            track.drag = None;
-            track.suppress_build_click = true;
-            line.active = false;
-            line.clear_draft();
+            arm_train_place(TrainPlaceKind::Transport, yard, buffer, train, track, line);
         }
     }
 }
@@ -160,6 +145,45 @@ pub fn active_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rail_sim::{CommandKind, TrainKind};
+
+    /// The menu row is the same verb as the key, so it must cost the same:
+    /// stock in the yard is placed, not bought twice.
+    #[test]
+    fn the_menu_row_places_a_yard_train_rather_than_buying_a_second() {
+        let mut yard = TrainYard::default();
+        yard.buy(TrainKind::Transit);
+        let mut buffer = CommandBuffer::default();
+        let mut track = TrackToolState::default();
+        let mut train = TrainToolState::default();
+        let mut line = LineToolState::default();
+
+        apply_toolbar_tool(
+            ToolbarTool::Transit,
+            &yard,
+            &mut buffer,
+            &mut track,
+            &mut train,
+            &mut line,
+        );
+
+        assert!(train.place_mode);
+        assert!(buffer.pending().is_empty(), "no second purchase");
+
+        // An empty yard still buys one.
+        apply_toolbar_tool(
+            ToolbarTool::Transport,
+            &yard,
+            &mut buffer,
+            &mut track,
+            &mut train,
+            &mut line,
+        );
+        assert!(matches!(
+            buffer.pending().first().map(|c| &c.kind),
+            Some(CommandKind::BuyTrain(_))
+        ));
+    }
 
     #[test]
     fn active_tool_maps_modes() {

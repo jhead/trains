@@ -204,6 +204,49 @@ pub fn drain_peep_demand(
     }
 }
 
+/// Put the run a train was carrying back on the board.
+///
+/// [`assign_jobs`] **removes** a job from the board when a train takes it, so a
+/// job in transit exists only as that train's [`TrainCargo`]. Selling the train
+/// would therefore delete demand the town still has — the passengers on the
+/// platform did not stop wanting to travel because the player sold the engine.
+/// So the job goes back exactly the way a failed assignment returns it, priced
+/// fresh from the same distance rule so the board never advertises a fare the
+/// delivery will not honour.
+///
+/// Returns `true` when something was put back. An empty train, or one carrying
+/// a run already re-posted, adds nothing.
+pub fn requeue_cargo(
+    board: &mut JobBoard,
+    stations: &StationRegistry,
+    industries: &IndustryRegistry,
+    cargo: &TrainCargo,
+) -> bool {
+    let job = match cargo {
+        TrainCargo::Empty => return false,
+        TrainCargo::Passengers { from, to } => Job {
+            kind: JobKind::Passenger {
+                from: *from,
+                to: *to,
+            },
+            reward_cents: passenger_reward(stations, *from, *to),
+        },
+        TrainCargo::Goods { kind, from, to } => Job {
+            kind: JobKind::Goods {
+                kind: *kind,
+                from: *from,
+                to: *to,
+            },
+            reward_cents: goods_reward(industries, *from, *to),
+        },
+    };
+    if board.jobs.iter().any(|j| j.kind == job.kind) {
+        return false;
+    }
+    board.jobs.push(job);
+    true
+}
+
 fn refresh_waiting(board: &JobBoard, stations: &StationRegistry, service: &mut StationService) {
     for s in stations.iter() {
         let waiting = board

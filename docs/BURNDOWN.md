@@ -121,6 +121,27 @@ carried-debt row from the previous table is resolved.
 | Plugins were not state-gated | `input::PlayerVerbSet` carries every press-to-verb system and `main.rs` runs it only in `ShellState::Playing`. The world stays alive behind the title; it just is not listening. Input suppression remains as the safety net. |
 | Save format | `SCHEMA_VERSION` 4: gen knobs travel with the seed (a save reproduces its world), mirrors destructure exhaustively (a new field is a compile error, and `peep_waiting` was in fact being dropped), `MoneyLedger` counts paid runs, `GoalBoard` carries its generation. |
 
+## Second playtest (2026-08-03): the owner's session, answered
+
+Four worktree branches landed and merged in sequence (builder first — it and
+worldgen both re-premise `rail_map`'s crossing tests), full suite green after
+each. 1,125 → **1,181 tests.**
+
+| Verdict | What landed |
+| --- | --- |
+| "I want to build one by one like RCT... intentional, not an afterthought" | The modifier table flipped: a plain drag is a **straight ray** on the sixteen directions — the player picks the angle by pointing, every tile priced on the ghost, illegal tiles refused loudly. Ctrl one tile, Alt contour lock; the A* is **Shift-only** now and leashed to a six-tile corridor around the drawn segment (integer capsule maths) — it may find a narrows, it may not re-plan the journey. Outside the corridor it refuses: *"No buildable route near this line."* |
+| "There should be a way to build bigger bridges... naturally cost more" | `MAX_BRIDGE_SPAN` 3 → **8**, per-tile ladder 8/14/20/**30/42/56/72/90×**. Spans 1–3 stay the cheap tier the generator authors narrows against (`CHEAP_BRIDGE_SPAN`); a full eight-span crossing is 720× base — a project, not an opening move. No bridge mode: a straight drag across water is the gesture. `rail_map` scouts only cheap narrows as *crossings*; trunks are premium-bridgeable, so rivers pose a decision without being walls. |
+| "Building should always show cost as I'm going" | The cost readout keyed off the mouse-drag, and continuous building spends most of its time between drags — priced ghost, hidden price. Readout and reason chip now key off the **preview** in all four modes, with a fixed-corner fallback when the pointer leaves the window. |
+| "Constantly fighting terrain... mountains and up/down everywhere" | The plain is band 0 and landforms stand *on* it: one anchored massif (truncated, sea-standoff), a tableland seated against its inland end, cols cut clean through the crest. Measured on the six repo seeds, Rolling: flat-versus-all-eight-neighbours **56% → 80%** of land, hill systems 2.3 → **1.0** with zero stray spurs, band crossings per 30-tile line 5.5 → **1.9** (the rock share's geometric floor is ~1.4 — derivation now in brief 02). Rivers read the continuous relief so they still carve valleys on a one-band plain. `MapGenOptions::pack()` byte-identical — saves unaffected. |
+| "Really repetitive and not upbeat... I wanted C418 vibes" | The score is **four pieces per world** rotated by the cue counter — consecutive cues never share key, motif or progression. Each: 4/4 at 88 BPM in D/G/A/C major, intro–A–B–A′–C–A″–outro, functional diatonic harmony cadencing at every section end (`Vsus4` over bare `V`), two motifs restated under variation with the interval signature intact, melody C4–A5 on a four-partial bell over polyBLEP pad, sine bass, and the old Karplus–Strong demoted to off-beat arpeggio. Dusk softens the reading; it no longer drops an octave. Part-writing is *searched*: 96% textbook tier, zero parallel fifths/octaves anywhere, measured across 8 seeds × 4 pieces. Brief 14 rewritten around what shipped. |
+| "With $1,500 left I couldn't place a train, so I'm perma stuck" | The transit/transport verbs pushed `BuyTrain` unconditionally — a failed $3,000 purchase masked the free placement of stock already in the yard. `arm_train_place` asks the yard first (keyboard and menu row share it); buying and entering service now speak in Town Talk (*"Train 3 delivered — click a station to place it"*, *"Train 3 entering service at Eastgate"*); and **SellTrain** refunds full price, requeueing any carried run back onto the JobBoard so demand is never silently deleted. `X` with a train selected asks first, through the existing confirm dialog. |
+| "B is a hotkey for both map and build?" | Diagnosed to the file: the shipped table is conflict-free (a test holds it so), but the owner's `settings.ron` carries `controls_MapView: "KeyB"` — written by an automated UI-driving session against the real profile, adopted silently ever after. The adoption path now names any clash in Town Talk (*"B is bound to both Track tool and Map View — fix in Settings > Controls"*); load keeps honouring stored values because the Controls tab deliberately allows-and-flags conflicts. Automated sessions must set `RAIL_TOWN_CONFIG_DIR`. |
+| Web keys dead until a click | The canvas takes focus after init, on window focus, and on pointer press. |
+
+Also in this batch: briefs 02/04 caught up to the eight-span ladder and the
+crossing target's geometric floor; the `iso-prototype` branch (2:1 dimetric,
+presentation-only) awaits the owner's accept/reject.
+
 ## Carried debt
 
 Things that work but are known-shallow, with the brief that wants more.

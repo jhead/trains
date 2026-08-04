@@ -50,8 +50,13 @@ const DUST_SCATTER: i32 = 3;
 /// One rising puff, mid-life.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ConstructionDust {
-    /// Lot base the puff rises from, in whole world texels.
-    origin: Vec2,
+    /// Lot base the puff rises from, on the **ground plane**, in whole texels.
+    ///
+    /// Ground rather than world, because the lot is a place on the ground and
+    /// the puff has to stand on it in either projection. The rise is added in
+    /// screen space on top: dust goes up the screen whichever way the world is
+    /// being looked at.
+    ground: Vec2,
     secs: f32,
     frame: u8,
 }
@@ -59,17 +64,27 @@ pub struct ConstructionDust {
 /// Kick dust up at a lot's base. Call on entering Scaffold and Settle.
 pub fn spawn_dust(commands: &mut Commands, tile: TileCoord, base: Vec2, salt: u32) {
     let offset = hash_offset(tile.x, tile.y, salt, DUST_SCATTER) as f32;
-    let origin = Vec2::new((base.x + offset).round(), base.y.round());
+    // `base` is the lot base on the ground plane, so the scatter is a ground
+    // scatter — the puff moves along the street, not across the screen.
+    let ground = Vec2::new((base.x + offset).round(), base.y.round());
     let (rise, size, alpha) = DUST_FRAMES[0];
+    let at = world_of(ground);
     commands.spawn((
         ConstructionDust {
-            origin,
+            ground,
             secs: 0.0,
             frame: 0,
         },
         Sprite::from_color(PLASTER_L.with_alpha(alpha), Vec2::splat(size)),
-        Transform::from_xyz(origin.x, origin.y + rise, DUST_Z),
+        Transform::from_xyz(at.x, at.y + rise, DUST_Z),
     ));
+}
+
+/// The puff's ground position, projected for the view being drawn.
+#[inline]
+fn world_of(ground: Vec2) -> Vec2 {
+    let (x, y) = rail_map::ground_to_world(ground.x, ground.y);
+    Vec2::new(x, y)
 }
 
 /// Advance every puff, and despawn it when it has thinned out.
@@ -105,7 +120,9 @@ pub fn step_construction_dust(
         let (rise, size, alpha) = DUST_FRAMES[frame];
         sprite.color = PLASTER_L.with_alpha(alpha);
         sprite.custom_size = Some(Vec2::splat(size));
-        transform.translation.y = dust.origin.y + rise;
+        let origin = world_of(dust.ground);
+        transform.translation.x = origin.x;
+        transform.translation.y = origin.y + rise;
     }
 }
 
@@ -180,7 +197,7 @@ mod tests {
             .add_systems(Update, step_construction_dust);
         app.world_mut().spawn((
             ConstructionDust {
-                origin: Vec2::ZERO,
+                ground: Vec2::ZERO,
                 secs: 0.0,
                 frame: 0,
             },

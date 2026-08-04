@@ -67,10 +67,20 @@ const FOAM_FRAMES: [(f32, f32); 3] = [(12.0, 0.50), (8.0, 0.34), (10.0, 0.22)];
 /// A glint on open water.
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct WaterShimmer {
-    origin: Vec2,
+    /// Where the glint sits on the **ground plane**, in texels. Ground rather
+    /// than world, so a decal belongs to a patch of water and comes back to the
+    /// same patch whichever way the world is being drawn.
+    ground: Vec2,
     color: Color,
     phase: f32,
     frame: u8,
+}
+
+/// A ground-plane point, projected for the view being drawn.
+#[inline]
+fn world_of(ground: Vec2) -> Vec2 {
+    let (x, y) = rail_map::ground_to_world(ground.x, ground.y);
+    Vec2::new(x, y)
 }
 
 /// A foam lip along one land-facing edge of a water tile.
@@ -191,18 +201,22 @@ fn spawn_shimmer(commands: &mut Commands, tile: TileCoord, height: i8) {
     if world_hash(tile.x, tile.y, SHIMMER_PICK_SALT) % SHIMMER_ONE_IN != 0 {
         return;
     }
-    let (cx, cy) = tile_to_world(tile);
-    let origin = Vec2::new(
-        cx + hash_offset(tile.x, tile.y, SHIMMER_X_SALT, SHIMMER_SCATTER) as f32,
-        cy + hash_offset(tile.x, tile.y, SHIMMER_Y_SALT, SHIMMER_SCATTER) as f32,
+    // Scattered on the **ground plane**, so a glint belongs to a patch of water
+    // rather than to a patch of screen — the same rule §2.4 applies to every
+    // other world-anchored decoration.
+    let (gx, gy) = rail_map::tile_to_ground(tile);
+    let ground = Vec2::new(
+        gx + hash_offset(tile.x, tile.y, SHIMMER_X_SALT, SHIMMER_SCATTER) as f32,
+        gy + hash_offset(tile.x, tile.y, SHIMMER_Y_SALT, SHIMMER_SCATTER) as f32,
     );
+    let origin = world_of(ground);
     let color = shimmer_color(height);
     let phase = hash_phase(tile.x, tile.y, SHIMMER_PHASE_SALT, WATER_SHIMMER_PERIOD);
     let (length, shift, alpha) = SHIMMER_FRAMES[0];
 
     commands.spawn((
         WaterShimmer {
-            origin,
+            ground,
             color,
             phase,
             frame: 0,
@@ -270,15 +284,20 @@ pub(crate) fn step_water_shimmer(
             WATER_SHIMMER_PERIOD,
             SHIMMER_FRAMES.len() as u32,
         ) as u8;
-        if frame == shimmer.frame {
+        let (length, shift, alpha) = SHIMMER_FRAMES[frame as usize];
+        let origin = world_of(shimmer.ground);
+        let (x, y) = (origin.x + shift, origin.y);
+        // Same shape as the chimney plumes: the question is "is the glint where
+        // it should be", not "has its frame turned over", so a projection flip
+        // under a mid-frame glint is answered on the frame it happens.
+        if frame == shimmer.frame && transform.translation.x == x && transform.translation.y == y {
             continue;
         }
         shimmer.frame = frame;
-        let (length, shift, alpha) = SHIMMER_FRAMES[frame as usize];
         sprite.custom_size = Some(Vec2::new(length, GLINT_THICKNESS));
         sprite.color = shimmer.color.with_alpha(alpha);
-        transform.translation.x = shimmer.origin.x + shift;
-        transform.translation.y = shimmer.origin.y;
+        transform.translation.x = x;
+        transform.translation.y = y;
     }
 }
 

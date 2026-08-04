@@ -45,6 +45,7 @@ use building_art::{
     bake_atlas, world_hash, BuildingAtlas, BuildingKind, Decay, FRAME_RURAL, FRAME_SCAFFOLD,
     FRAME_SCAR, FRAME_STAKE,
 };
+use crate::map::GroundAnchor;
 use districts::{classify, nearest_good, nearest_station, District};
 use dust::{spawn_dust, DUST_SALT_SCAFFOLD, DUST_SALT_SETTLE};
 use lots::{
@@ -583,6 +584,12 @@ fn spawn_lot(
     kind: BuildingKind,
 ) {
     let (bx, by) = lot_base(tile, slot);
+    // `lot_base` lays the block out on the *ground plane*, in texels, because
+    // that is where a street exists — the jitter and the setback are facts
+    // about the lot, not about the camera. The anchor carries that position and
+    // `map::projection` owns the transform, so the house stands on its own
+    // ground in either view.
+    let anchor = GroundAnchor::new(bx as f32, by as f32);
     let flip = lot_flip(tile, slot);
     let lot = BuildingLot {
         tile,
@@ -598,7 +605,8 @@ fn spawn_lot(
     commands.spawn((
         sprite,
         Anchor::BOTTOM_CENTER,
-        Transform::from_xyz(bx as f32, by as f32, lot_z(by, map_height)),
+        anchor,
+        anchor.transform(lot_z(by, map_height)),
         lot,
         BuildingWindows {
             lit_frame: None,
@@ -613,12 +621,14 @@ fn spawn_prop(commands: &mut Commands, atlas: &BuildingAtlas, map_height: u32, t
     };
     let slot = rural_slot(tile);
     let (bx, by) = lot_base(tile, slot);
+    let anchor = GroundAnchor::new(bx as f32, by as f32);
     let mut sprite = atlas.sprite(FRAME_RURAL + prop);
     sprite.flip_x = lot_flip(tile, slot);
     commands.spawn((
         sprite,
         Anchor::BOTTOM_CENTER,
-        Transform::from_xyz(bx as f32, by as f32, lot_z(by, map_height)),
+        anchor,
+        anchor.transform(lot_z(by, map_height)),
         RuralProp {
             tile,
             kind: RuralKind::Prop(prop),
@@ -658,13 +668,15 @@ fn seed_rural(
             if let Some(kind) = rural_farmstead(tile) {
                 let slot = rural_slot(tile);
                 let (bx, by) = lot_base(tile, slot);
+                let anchor = GroundAnchor::new(bx as f32, by as f32);
                 let flip = lot_flip(tile, slot);
                 let mut sprite = atlas.sprite(kind.frame(Decay::Healthy));
                 sprite.flip_x = flip;
                 commands.spawn((
                     sprite,
                     Anchor::BOTTOM_CENTER,
-                    Transform::from_xyz(bx as f32, by as f32, lot_z(by, map.height)),
+                    anchor,
+                    anchor.transform(lot_z(by, map.height)),
                     RuralProp {
                         tile,
                         kind: RuralKind::Farmstead,

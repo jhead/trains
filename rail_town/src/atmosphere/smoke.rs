@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use rail_map::tile_to_world;
 use rail_sim::TileCoord;
 
 use super::bake::{building_extent, DensityLevels};
@@ -51,10 +50,28 @@ const SMOKE_FRAMES: [(f32, f32, f32); 4] = [
 /// One rising puff.
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct ChimneySmoke {
-    /// Roofline the plume rises from, in whole world texels.
-    origin: Vec2,
+    /// Chimney's place on the **ground plane**, in whole texels.
+    ground: Vec2,
+    /// How far up the screen the roofline sits above that.
+    roof: f32,
     phase: f32,
     frame: u8,
+}
+
+impl ChimneySmoke {
+    /// The roofline in world space, for the projection being drawn.
+    #[inline]
+    fn origin(&self) -> Vec2 {
+        let base = world_of(self.ground);
+        Vec2::new(base.x, base.y + self.roof)
+    }
+}
+
+/// A ground-plane point, projected for the view being drawn.
+#[inline]
+fn world_of(ground: Vec2) -> Vec2 {
+    let (x, y) = rail_map::ground_to_world(ground.x, ground.y);
+    Vec2::new(x, y)
 }
 
 /// Baked plume entities per tile.
@@ -102,18 +119,23 @@ pub(crate) fn bake_chimney_smoke(
 
 fn spawn_plume(commands: &mut Commands, tile: TileCoord, level: u8, salt: u32) -> Entity {
     let (_, height) = building_extent(level);
-    let (cx, cy) = tile_to_world(tile);
     // World-anchored chimney placement: the same house always smokes from the
-    // same corner of its roof.
+    // same corner of its roof. The corner is a place on the *ground*, so it is
+    // chosen there and projected after; the roof height is a screen-space lift
+    // on top, because a chimney stands up the screen in either view.
+    let (gx, gy) = rail_map::tile_to_ground(tile);
     let offset = hash_offset(tile.x, tile.y, salt ^ SMOKE_OFFSET_SALT, CHIMNEY_SCATTER);
-    let origin = Vec2::new(cx + offset as f32, cy + (height / 2) as f32);
+    let ground = Vec2::new(gx + offset as f32, gy);
+    let base = world_of(ground);
+    let origin = Vec2::new(base.x, base.y + (height / 2) as f32);
     let phase = hash_phase(tile.x, tile.y, salt, CHIMNEY_SMOKE_PERIOD);
     let (rise, drift, alpha) = SMOKE_FRAMES[0];
 
     commands
         .spawn((
             ChimneySmoke {
-                origin,
+                ground,
+                roof: (height / 2) as f32,
                 phase,
                 frame: 0,
             },
@@ -136,14 +158,21 @@ pub(crate) fn step_chimney_smoke(
             CHIMNEY_SMOKE_PERIOD,
             SMOKE_FRAMES.len() as u32,
         ) as u8;
-        if frame == smoke.frame {
+        let (rise, drift, alpha) = SMOKE_FRAMES[frame as usize];
+        let origin = smoke.origin();
+        let (x, y) = (origin.x + drift, origin.y + rise);
+        // The idle case is still free, but the test is "is the puff where it
+        // should be" rather than "has its own animation turned over". A plume
+        // mid-frame when the projection flips underneath it is standing in the
+        // other view's place, and asking only about the frame would leave it
+        // there until its animation happened to come round.
+        if frame == smoke.frame && transform.translation.x == x && transform.translation.y == y {
             continue;
         }
         smoke.frame = frame;
-        let (rise, drift, alpha) = SMOKE_FRAMES[frame as usize];
         sprite.color = BALLAST_L.with_alpha(alpha);
-        transform.translation.x = smoke.origin.x + drift;
-        transform.translation.y = smoke.origin.y + rise;
+        transform.translation.x = x;
+        transform.translation.y = y;
     }
 }
 

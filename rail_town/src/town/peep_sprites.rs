@@ -212,8 +212,13 @@ struct Pose {
 /// (and tested) without a `World`.
 fn pose_for(peep: &Peep, pos: &PeepPosition, journey: &Journey, map_height: u32) -> Pose {
     // Sub-tile motion is the sim's; whole texels are the renderer's.
-    let wx = ((pos.x + 0.5) * TILE_SIZE).round();
-    let wy = ((pos.y + 0.5) * TILE_SIZE).round();
+    //
+    // `pos` is a place on the **ground plane** in tile units, so it is projected
+    // rather than scaled. Writing `(pos.x + 0.5) * TILE_SIZE` here is the
+    // top-down projection spelled out by hand, and it is what put every peep in
+    // the game up-and-right of the diamond they were walking on.
+    let (px, py) = rail_map::ground_to_world((pos.x + 0.5) * TILE_SIZE, (pos.y + 0.5) * TILE_SIZE);
+    let (wx, wy) = (px.round(), py.round());
     let rows = map_height.max(1) as f32;
     let depth = ((rows - pos.y).clamp(0.0, rows) / rows) * PEEP_Z_SPAN;
 
@@ -365,6 +370,61 @@ mod tests {
         let mut j = Journey::new(&routine);
         j.set_stage(stage);
         j
+    }
+
+    /// A peep stands on the ground, and the ground is drawn two ways.
+    ///
+    /// This is the regression: `pose_for` computed `(pos.x + 0.5) * TILE_SIZE`,
+    /// which is the top-down projection written out by hand. Every peep in the
+    /// game was therefore placed at top-down coordinates in both views, sitting
+    /// up-and-right of the diamond they were supposed to be walking on.
+    #[test]
+    fn a_peep_stands_where_the_projection_puts_its_tile() {
+        let tile = TileCoord { x: 11, y: 7 };
+        for projection in [rail_map::Projection::TopDown, rail_map::Projection::Iso] {
+            let _guard = crate::map::tests::ProjectionGuard::new(projection);
+            let pose = pose_for(
+                &peep(Mood::Content, 0),
+                &PeepPosition::at_tile(tile, 3),
+                &journey(JourneyStage::WalkingToStation),
+                64,
+            );
+            // The sim's own sub-tile jitter is in `pos`, so compare against the
+            // same ground point run through the projection rather than against
+            // the tile centre.
+            let pos = PeepPosition::at_tile(tile, 3);
+            let (gx, gy) = (
+                (pos.x + 0.5) * rail_map::TILE_SIZE,
+                (pos.y + 0.5) * rail_map::TILE_SIZE,
+            );
+            let (wx, wy) = rail_map::ground_to_world(gx, gy);
+            assert_eq!(
+                (pose.translation.x, pose.translation.y),
+                (wx.round(), wy.round()),
+                "a peep is off its own ground in {projection:?}"
+            );
+        }
+    }
+
+    /// ... and the two views really do disagree, so the test above is not
+    /// passing because both branches compute the same thing.
+    #[test]
+    fn the_two_views_put_a_peep_in_different_places() {
+        let tile = TileCoord { x: 11, y: 7 };
+        let at = |projection| {
+            let _guard = crate::map::tests::ProjectionGuard::new(projection);
+            let pose = pose_for(
+                &peep(Mood::Content, 0),
+                &PeepPosition::at_tile(tile, 3),
+                &journey(JourneyStage::WalkingToStation),
+                64,
+            );
+            (pose.translation.x, pose.translation.y)
+        };
+        assert_ne!(
+            at(rail_map::Projection::TopDown),
+            at(rail_map::Projection::Iso)
+        );
     }
 
     #[test]

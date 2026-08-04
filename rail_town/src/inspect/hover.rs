@@ -536,13 +536,21 @@ fn sprite_bounds(atlas: &BuildingAtlas, sprite: &Sprite, tf: &Transform) -> Opti
 }
 
 /// The tile's own rectangle, as a fallback highlight for tile-resident things.
+///
+/// Written as a centre and a size rather than two corners, because a tile is
+/// only an axis-aligned square from above. In isometric it is a 64 x 32 diamond,
+/// and the box that frames it is the diamond's bounding box — which is what a
+/// bracket around "this tile" should hug either way. The top-down answer is
+/// unchanged: `tile.x * TILE_SIZE .. (tile.x + 1) * TILE_SIZE` is exactly a
+/// tile-sized square centred on `tile_to_world`.
 fn tile_world_rect(tile: TileCoord) -> Rect {
-    Rect::new(
-        tile.x as f32 * TILE_SIZE,
-        tile.y as f32 * TILE_SIZE,
-        (tile.x + 1) as f32 * TILE_SIZE,
-        (tile.y + 1) as f32 * TILE_SIZE,
-    )
+    let (x, y) = rail_map::tile_to_world(tile);
+    let size = if rail_map::projection_is_iso() {
+        Vec2::new(rail_map::ISO_TILE_W, rail_map::ISO_TILE_H)
+    } else {
+        Vec2::splat(TILE_SIZE)
+    };
+    Rect::from_center_size(Vec2::new(x, y), size)
 }
 
 /// Where a clickable world object sits, so the bracket can frame it too.

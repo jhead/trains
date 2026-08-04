@@ -306,6 +306,36 @@ pub fn tile_lift(coord: TileCoord) -> f32 {
 
 // ── The contract the rest of the game uses ─────────────────────────────────
 
+/// World-space position of a point **on the ground plane**, in the live
+/// projection.
+///
+/// [`tile_to_world`] is this for a tile centre, and is defined in terms of it.
+/// Use this wherever something stands at a *sub-tile* position and its own
+/// layout maths already works in ground texels: a peep mid-stride between two
+/// tiles, a house on one of four lots inside a block, a puff of dust scattered
+/// a few texels off a doorway.
+///
+/// The lift is the one belonging to the tile the point is standing on, so a
+/// house on the shoulder of a hill rides up with the hill.
+///
+/// **This is the function a new world-anchored spawner wants**, not
+/// `(x + 0.5) * TILE_SIZE`. That expression is the top-down projection written
+/// out by hand, and every copy of it is a sprite that will sit in the wrong
+/// place the moment the player looks at the world from anywhere else. Two of
+/// them shipped, which is why this exists and why
+/// `rail_town::map::projection` has a test that sweeps for more.
+#[inline]
+pub fn ground_to_world(gx: f32, gy: f32) -> (f32, f32) {
+    match projection() {
+        // Top-down world space *is* the ground plane.
+        Projection::TopDown => (gx, gy),
+        Projection::Iso => {
+            let (sx, sy) = project(gx, gy);
+            (sx, sy + tile_lift(top_down_world_to_tile(gx, gy)))
+        }
+    }
+}
+
 /// World-space centre of a tile, in the live projection.
 #[inline]
 pub fn tile_to_world(coord: TileCoord) -> (f32, f32) {
@@ -707,6 +737,62 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A tile centre is just one ground point, so the two have to agree — or a
+    /// house on a lot and the station on the same tile would disagree about
+    /// where that tile is.
+    #[test]
+    fn a_tile_centre_is_the_ground_point_at_its_centre() {
+        for mode in [Projection::TopDown, Projection::Iso] {
+            let _g = Guard::with(mode);
+            let mut map = flat_map(16, 16);
+            for y in 0..16i32 {
+                for x in 0..16i32 {
+                    map.get_mut(TileCoord { x, y }).unwrap().height = ((x * 3 + y) % 13) as i8;
+                }
+            }
+            set_iso_heights(&map);
+            for y in 0..16i32 {
+                for x in 0..16i32 {
+                    let c = TileCoord { x, y };
+                    let (gx, gy) = tile_to_ground(c);
+                    assert_eq!(
+                        ground_to_world(gx, gy),
+                        tile_to_world(c),
+                        "{c:?} disagreed in {}",
+                        mode.label()
+                    );
+                }
+            }
+        }
+    }
+
+    /// A point walking across a tile boundary must arrive exactly where the
+    /// next tile's centre says it is — this is what makes a peep's stride and a
+    /// train's interpolation land on the grid rather than near it.
+    #[test]
+    fn a_ground_point_moves_continuously_across_the_plane() {
+        for mode in [Projection::TopDown, Projection::Iso] {
+            let _g = Guard::with(mode);
+            clear_iso_heights();
+            let (ax, ay) = ground_to_world(4.5 * TILE_SIZE, 4.5 * TILE_SIZE);
+            let (bx, by) = ground_to_world(5.5 * TILE_SIZE, 4.5 * TILE_SIZE);
+            let (mx, my) = ground_to_world(5.0 * TILE_SIZE, 4.5 * TILE_SIZE);
+            // Flat ground, so the map is linear and the midpoint is the mean.
+            assert!((mx - (ax + bx) * 0.5).abs() < 1e-3);
+            assert!((my - (ay + by) * 0.5).abs() < 1e-3);
+        }
+    }
+
+    /// Top-down has to stay the identity, or every ground-plane layout in the
+    /// game (lot bases, scatter offsets, stride positions) would move.
+    #[test]
+    fn top_down_ground_is_world_space_unchanged() {
+        let _g = Guard::top_down();
+        for &(gx, gy) in &[(0.0, 0.0), (37.5, 912.25), (-16.0, 48.0)] {
+            assert_eq!(ground_to_world(gx, gy), (gx, gy));
         }
     }
 

@@ -101,6 +101,8 @@ pub use map_options::{
 };
 #[allow(unused_imports)]
 pub use save::{AutosaveTimer, SaveStatus, ShellSaveRequest};
+#[cfg(test)]
+pub(crate) use save::lock_save_root;
 #[allow(unused_imports)]
 pub use settings::{Settings, SettingsTab};
 #[allow(unused_imports)]
@@ -1063,9 +1065,7 @@ mod tests {
     /// that is genuinely on screen at the time and genuinely different.
     #[test]
     fn loading_a_save_brings_back_the_map_it_was_played_on() {
-        rail_sim::save::set_save_root(
-            std::env::temp_dir().join(format!("rail_town_shell_saves_{}", std::process::id())),
-        );
+        let _root = save::lock_save_root("shell_saves");
         let slot = rail_sim::save::SaveSlot::named("shell map reload").expect("valid name");
         let _ = rail_sim::save::delete_slot(&slot);
 

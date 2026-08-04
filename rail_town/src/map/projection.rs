@@ -88,6 +88,78 @@ impl ViewProjection {
     }
 }
 
+/// Where a sprite stands on the **ground plane**, so it can be put back.
+///
+/// # The bug this exists to make unrepeatable
+///
+/// Most presentation reconciles: stations, industries, trains, ghosts and
+/// overlays all re-derive their `Transform` from a tile every frame, so a
+/// projection flip reaches them for free and so does spawning under one. The
+/// rest spawn once, write a `Transform`, and never think about it again — town
+/// buildings, rural props, water shimmer, chimney smoke, construction dust.
+/// Those need two separate things to be true, and the shipped code had neither:
+/// the position has to be *projected* when it is computed, and it has to be
+/// *recomputed* when the projection changes underneath it.
+///
+/// Both were missed the same way. `lot_base` returns ground texels
+/// (`tile.x * TILE_TEXELS + jitter`) and the spawner passed them straight into
+/// a `Transform`; `pose_for` wrote `(pos.x + 0.5) * TILE_SIZE`. Those are the
+/// top-down projection written out by hand, so both were correct from above and
+/// both put their sprites up-and-right of the diamond in isometric — houses out
+/// over the river, some off the map entirely.
+///
+/// So: carry the ground position, and let [`anchor_world_sprites`] own the
+/// `Transform`. A spawner that attaches one of these cannot get the projection
+/// wrong, because it never writes the projected value; and a flip repositions
+/// everything wearing one without knowing what any of it is.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct GroundAnchor(pub Vec2);
+
+impl GroundAnchor {
+    #[inline]
+    pub fn new(gx: f32, gy: f32) -> Self {
+        Self(Vec2::new(gx, gy))
+    }
+
+    /// The world position this anchor resolves to right now.
+    #[inline]
+    pub fn world(self) -> Vec2 {
+        let (x, y) = rail_map::ground_to_world(self.0.x, self.0.y);
+        Vec2::new(x, y)
+    }
+
+    /// A transform at this anchor, on layer `z`. What a spawner writes, so the
+    /// sprite is in the right place on the frame it appears rather than on the
+    /// one after.
+    #[inline]
+    pub fn transform(self, z: f32) -> Transform {
+        let world = self.world();
+        Transform::from_xyz(world.x, world.y, z)
+    }
+}
+
+/// Keep every [`GroundAnchor`] over the ground it is anchored to.
+///
+/// Writes `x` and `y` only: `z` belongs to whoever spawned the sprite (its
+/// layer) and, in isometric, to `iso_sort` (its depth). Writes only when the
+/// value actually moves, so a still frame costs a comparison per anchored
+/// sprite and no change-detection traffic at all.
+///
+/// This runs every frame rather than only on a flip. A flip is the case that
+/// motivated it, but "the sprite is where its anchor says" is the invariant,
+/// and an invariant that is only restored at one moment is one a later change
+/// can quietly break between moments.
+pub fn anchor_world_sprites(mut anchored: Query<(&GroundAnchor, &mut Transform)>) {
+    let _perf = crate::overlays::perf::scope("anchor_world_sprites");
+    for (anchor, mut transform) in &mut anchored {
+        let world = anchor.world();
+        if transform.translation.x != world.x || transform.translation.y != world.y {
+            transform.translation.x = world.x;
+            transform.translation.y = world.y;
+        }
+    }
+}
+
 /// Run condition: the world is being drawn in 2:1 dimetric.
 pub fn drawing_iso(view: Res<ViewProjection>) -> bool {
     view.is_iso()
@@ -119,14 +191,33 @@ pub fn install_boot_projection(mut commands: Commands, settings: Res<Settings>) 
     commands.insert_resource(ViewProjection(wanted));
 }
 
-/// Install the boot world's heights before anything draws it.
+/// Keep the projection's height field on the map that is actually installed.
 ///
-/// `MapPlugin::build` installs the heights of the grid *it* generated, and the
-/// shell then replaces that grid during `PreStartup`. Nothing in `Startup` reads
-/// a lifted position today, but "the height field belongs to the map on screen"
-/// is the invariant, and the cheapest place to keep it true is here.
-pub fn install_map_heights(map: Res<MapGrid>) {
-    rail_map::set_iso_heights(&map);
+/// # This is a load-bearing invariant, and it was violated
+///
+/// The lift `tile_to_world` applies in isometric comes from a process-global
+/// height field, so **whoever installs a `MapGrid` owes it an installed height
+/// field, before anything asks where a tile is**. Three places install one: this
+/// plugin at boot, the shell's New Map, and the shell's *load*.
+///
+/// The load did not, and it was the one that mattered. A load replaces the map
+/// mid-`Update` (`shell::save::regenerate_map_from_save`) and inserts a restored
+/// `TrackNetwork` in the same breath. `track::visuals` treats a freshly inserted
+/// network as a wholesale rebuild and spawns a sprite per piece through
+/// `tile_to_world` — reading, on that frame, the *previous* world's heights. The
+/// terrain caught up on the next frame and the track never did, because a track
+/// sprite is placed once and then left alone. Every piece of the loaded railway
+/// stood at the wrong elevation, on a map that otherwise looked correct.
+///
+/// So the field follows the resource rather than being a side effect of the
+/// terrain build. Running in `PreUpdate` puts it ahead of all of `Update` by the
+/// schedule instead of by anyone remembering an `.after()`; the load reinstalls
+/// it inline as well, because a mid-`Update` swap cannot wait for the next
+/// frame's `PreUpdate` and the rebuild it triggers happens immediately.
+pub fn follow_map_heights(map: Res<MapGrid>) {
+    if map.is_changed() {
+        rail_map::set_iso_heights(&map);
+    }
 }
 
 /// The bound key cycles the *setting*, never the projection directly, so the
@@ -284,6 +375,7 @@ mod tests {
     use bevy::input::InputPlugin;
     use bevy::state::app::StatesPlugin;
     use rail_sim::ids::TileCoord;
+    use rail_sim::track::try_place_track;
     use std::collections::BTreeMap;
 
     /// A headless app running the real map plugin over a real generated world.
@@ -685,6 +777,541 @@ mod tests {
             }
         }
         rail_sim::TrackTerrain::new(map.width, map.height, cells)
+    }
+
+    // ── Everything that stands on the ground ──────────────────────────────
+
+    /// Every anchored sprite, by the ground it is anchored to.
+    fn anchored(app: &mut App) -> BTreeMap<(i32, i32), (f32, f32)> {
+        app.world_mut()
+            .query::<(&GroundAnchor, &Transform)>()
+            .iter(app.world())
+            .map(|(anchor, tf)| {
+                (
+                    (anchor.0.x as i32, anchor.0.y as i32),
+                    (tf.translation.x, tf.translation.y),
+                )
+            })
+            .collect()
+    }
+
+    /// Assert every anchored sprite is standing on its own ground right now.
+    fn assert_all_anchored(app: &mut App, whose: &str) -> usize {
+        let mut checked = 0;
+        for (ground, drawn) in anchored(app) {
+            let (wx, wy) =
+                rail_map::ground_to_world(ground.0 as f32, ground.1 as f32);
+            assert_eq!(
+                drawn,
+                (wx, wy),
+                "{whose}: the sprite anchored at {ground:?} is drawn at {drawn:?}, \
+                 but that ground is at ({wx}, {wy}) in {}",
+                rail_map::projection().label()
+            );
+            checked += 1;
+        }
+        checked
+    }
+
+    /// Houses, farmsteads and rural props are placed once and then left alone,
+    /// which is what made them the bug: `lot_base` lays a block out in ground
+    /// texels and the spawner wrote those straight into a `Transform`. Correct
+    /// from above, and up-and-right of the diamond in isometric — out over the
+    /// river, some off the map.
+    ///
+    /// The real spawners are used here, not a stand-in: `seed_rural` plants the
+    /// countryside at boot and this checks what it actually produced.
+    #[test]
+    fn everything_standing_on_the_ground_moves_with_the_ground() {
+        let _guard = crate::map::tests::ProjectionGuard::new(MapProjection::TopDown);
+        let mut app = game_app(7_707);
+        settle(&mut app);
+
+        let flat = anchored(&mut app);
+        assert!(
+            flat.len() > 20,
+            "the countryside planted almost nothing to check: {}",
+            flat.len()
+        );
+        assert_all_anchored(&mut app, "top-down");
+
+        // Into isometric: everything has to move, and land on its own ground.
+        set_iso(&mut app, true);
+        let iso = anchored(&mut app);
+        assert_eq!(iso.len(), flat.len(), "the flip lost or duplicated sprites");
+        assert_all_anchored(&mut app, "isometric");
+        let moved = iso.iter().filter(|(g, p)| flat.get(*g) != Some(*p)).count();
+        assert!(
+            moved * 2 > iso.len(),
+            "only {moved} of {} anchored sprites moved; the projection is not \
+             reaching them",
+            iso.len()
+        );
+
+        // ... and back is exactly where they started.
+        set_iso(&mut app, false);
+        assert_eq!(anchored(&mut app), flat, "a round trip moved the town");
+    }
+
+    /// Nothing in the world is standing anywhere the world does not reach.
+    ///
+    /// The two tests above ask whether the things wearing a [`GroundAnchor`] are
+    /// in the right place, which is only half a question: a spawner that never
+    /// attached one is invisible to them. This asks the other half, of every
+    /// world sprite there is, by the one property a misprojected sprite cannot
+    /// fake — a position that resolves back to a tile on the map.
+    ///
+    /// It is exactly the sweep that would have caught the shipped bug. A house
+    /// at top-down `(1400, 1400)` drawn into an isometric world unprojects to
+    /// ground `(2100, 700)`, which is tile `(65, 21)` on a 48-tile map: off the
+    /// east edge by seventeen tiles, which is what "some of them cleared the
+    /// map" looked like.
+    ///
+    /// Deliberately a *class* test with no list of types in it. Anything that
+    /// grows a new world sprite is covered the day it is written.
+    #[test]
+    fn no_world_sprite_stands_off_the_map() {
+        let _guard = crate::map::tests::ProjectionGuard::new(MapProjection::Iso);
+        let mut app = game_app(5_150);
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .display
+            .isometric = true;
+        settle(&mut app);
+
+        let map = app.world().resource::<MapGrid>().clone();
+        // Generous: a sprite may legitimately hang a little past the edge (a
+        // roof, a cliff face, the plinth). Seventeen tiles out is not that.
+        let margin = 4;
+        let mut checked = 0;
+        let mut strays = Vec::new();
+        // `IsoLayer` is exactly "a root world sprite the depth sorter adopted",
+        // which is the population this is about: the day tint and the Map View
+        // plate live above the band and are never adopted, and terrain sorts
+        // itself and is on the map by construction.
+        let mut query = app
+            .world_mut()
+            .query_filtered::<&Transform, (With<Sprite>, With<IsoLayer>, Without<ChildOf>)>();
+        for transform in query.iter(app.world()) {
+            let at = transform.translation;
+            checked += 1;
+            let tile = rail_map::world_to_tile(at.x, at.y);
+            let inside = tile.x >= -margin
+                && tile.y >= -margin
+                && tile.x < map.width as i32 + margin
+                && tile.y < map.height as i32 + margin;
+            if !inside {
+                strays.push((at.x, at.y, tile));
+            }
+        }
+        assert!(checked > 100, "the sweep saw almost nothing: {checked}");
+        assert!(
+            strays.is_empty(),
+            "{} of {checked} world sprites are drawn off a {}x{} map: {:?}",
+            strays.len(),
+            map.width,
+            map.height,
+            &strays[..strays.len().min(5)]
+        );
+    }
+
+    /// The other half: a thing that appears *while* isometric is on has to be
+    /// right when it appears, not one flip later. A spawner that writes ground
+    /// texels into a transform passes the flip test and fails this one.
+    #[test]
+    fn something_that_spawns_in_isometric_is_placed_in_isometric() {
+        let _guard = crate::map::tests::ProjectionGuard::new(MapProjection::Iso);
+        let mut app = game_app(31_415);
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .display
+            .isometric = true;
+        settle(&mut app);
+
+        let born_here = anchored(&mut app);
+        assert!(born_here.len() > 20, "nothing was planted to check");
+        assert_all_anchored(&mut app, "spawned in isometric");
+
+        // The same world booted from above and then flipped has to agree, or
+        // "spawned under this projection" and "moved into it" are two different
+        // answers and one of them is wrong.
+        drop(app);
+        rail_map::set_projection(MapProjection::TopDown);
+        let mut flipped = game_app(31_415);
+        settle(&mut flipped);
+        set_iso(&mut flipped, true);
+        assert_eq!(
+            anchored(&mut flipped),
+            born_here,
+            "a town spawned in isometric and a town flipped into it disagree"
+        );
+    }
+
+    /// The ground itself can move — a load brings a different world, and the
+    /// elevation under a tile changes with it. An anchored sprite follows,
+    /// whatever caused the change and whatever order the systems ran in.
+    ///
+    /// This is what makes the load path safe rather than lucky.
+    /// `shell::save::regenerate_map_from_save` installs the new heights inline
+    /// so the first frame is already right, but the ordering between the load
+    /// and the systems that read a tile position is not constrained, and this
+    /// is the net under that.
+    #[test]
+    fn an_anchored_sprite_follows_a_change_of_world() {
+        let _guard = crate::map::tests::ProjectionGuard::new(MapProjection::Iso);
+        let mut app = flip_app(2_024);
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .display
+            .isometric = true;
+        app.update();
+        app.update();
+
+        let tile = TileCoord { x: 9, y: 9 };
+        let (gx, gy) = rail_map::tile_to_ground(tile);
+        let anchor = GroundAnchor::new(gx, gy);
+        let entity = app
+            .world_mut()
+            .spawn((Sprite::default(), anchor, anchor.transform(2.0)))
+            .id();
+        app.update();
+        let before = app.world().entity(entity).get::<Transform>().unwrap().translation;
+
+        // A different world, raised sharply under that very tile.
+        let mut swapped = app.world().resource::<MapGrid>().clone();
+        for t in swapped.tiles_mut() {
+            t.height = 0;
+            t.water = false;
+        }
+        swapped.get_mut(tile).unwrap().height = 15;
+        app.insert_resource(swapped);
+        app.update();
+        app.update();
+
+        let after = app.world().entity(entity).get::<Transform>().unwrap().translation;
+        assert_ne!(
+            before.y, after.y,
+            "the ground under the sprite rose 15 bands and the sprite did not"
+        );
+        let (wx, wy) = rail_map::ground_to_world(gx, gy);
+        assert_eq!((after.x, after.y), (wx, wy));
+        assert_eq!(
+            after.y - rail_map::project(gx, gy).1,
+            15.0 * rail_map::ISO_LIFT,
+            "the sprite is not standing on the new summit"
+        );
+    }
+
+    // ── Saving, loading, and the world the sprites were built for ─────────
+
+    /// The whole game, headless: sim, shell (so saves and loads run through the
+    /// real path), map and track.
+    fn game_app(seed: u64) -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            InputPlugin,
+            AssetPlugin::default(),
+        ))
+        .init_asset::<Image>()
+        .init_asset::<bevy::image::TextureAtlasLayout>()
+        .init_resource::<UiScale>()
+        .init_resource::<crate::ui::UiBlocksWorld>()
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f64(1.0 / 60.0),
+        ))
+        .add_plugins(rail_sim::SimPlugin)
+        .add_plugins(crate::shell::ShellPlugin {
+            boot_seed: crate::shell::BootSeed::Fixed(seed),
+            suppress_world_input: false,
+        })
+        .add_plugins(super::super::MapPlugin {
+            width: 48,
+            height: 48,
+            seed,
+        })
+        .add_plugins(crate::track::TrackPlugin)
+        // The town is where the anchored sprites come from: `seed_rural` plants
+        // the countryside, and the lot phase machine grows houses on it.
+        .add_plugins(crate::town::TownPresentationPlugin);
+        app.insert_resource(Settings::default());
+        app
+    }
+
+    /// Run until the town has planted itself.
+    ///
+    /// `sync_building_sprites` spends its first frame baking the atlas and then
+    /// waits three more before the one-shot rural seed fires, so a test that
+    /// updates twice sees an empty countryside and proves nothing.
+    fn settle(app: &mut App) {
+        for _ in 0..8 {
+            app.update();
+        }
+    }
+
+    /// Lay a railway with something of everything on it: a straight run, two
+    /// turns, a junction leg, and — where the map offers one — a water crossing
+    /// wider than the cheap tier.
+    fn lay_a_railway(app: &mut App) -> Vec<TileCoord> {
+        let map = app.world().resource::<MapGrid>().clone();
+        let terrain = track_terrain_of(&map);
+        let mut network = app.world().resource::<rail_sim::TrackNetwork>().clone();
+        let mut money = rail_sim::Money::new(50_000_000);
+        let mut ledger = rail_sim::MoneyLedger::default();
+        let mut laid = Vec::new();
+
+        // Sweep the map for a run that includes a bridge above the cheap span,
+        // so the piece kinds under test are the ones the ladder actually has.
+        let mut best: Option<Vec<TileCoord>> = None;
+        for y in 2..(map.height as i32 - 2) {
+            let row: Vec<TileCoord> = (2..(map.width as i32 - 2))
+                .map(|x| TileCoord { x, y })
+                .collect();
+            let spans = row
+                .iter()
+                .filter(|t| terrain.is_water(**t))
+                .count();
+            if spans > rail_sim::CHEAP_BRIDGE_SPAN as usize {
+                best = Some(row);
+                break;
+            }
+        }
+        let run = best.unwrap_or_else(|| {
+            (2..20).map(|x| TileCoord { x, y: 8 }).collect()
+        });
+
+        for tile in run {
+            if try_place_track(
+                &mut network,
+                &mut money,
+                &mut ledger,
+                &terrain,
+                tile,
+                rail_sim::GROUND_LAYER,
+            )
+            .is_ok()
+            {
+                laid.push(tile);
+            }
+        }
+        // A junction and two turns hanging off whatever went down.
+        if let Some(mid) = laid.get(laid.len() / 2).copied() {
+            for (dx, dy) in [(0, 1), (1, 1), (1, 2), (0, -1), (-1, -2)] {
+                let tile = TileCoord {
+                    x: mid.x + dx,
+                    y: mid.y + dy,
+                };
+                if try_place_track(
+                    &mut network,
+                    &mut money,
+                    &mut ledger,
+                    &terrain,
+                    tile,
+                    rail_sim::GROUND_LAYER,
+                )
+                .is_ok()
+                {
+                    laid.push(tile);
+                }
+            }
+        }
+        assert!(laid.len() > 8, "the test laid almost no track: {}", laid.len());
+
+        // A station platform on the line, so a stop is in the save too.
+        let mut stations = app.world().resource::<rail_sim::StationRegistry>().clone();
+        stations.insert("Testfield", laid[0], rail_sim::GROUND_LAYER);
+        app.insert_resource(stations);
+        app.insert_resource(network);
+        app.insert_resource(money);
+        app.update();
+        laid
+    }
+
+    /// Every track sprite, by the tile its piece stands on.
+    fn track_positions(app: &mut App) -> BTreeMap<(i32, i32), (f32, f32)> {
+        let network = app.world().resource::<rail_sim::TrackNetwork>().clone();
+        let mut by_id = BTreeMap::new();
+        for piece in network.iter() {
+            by_id.insert(piece.id.0, piece.tile);
+        }
+        app.world_mut()
+            .query::<(&TrackSprite, &Transform)>()
+            .iter(app.world())
+            .filter_map(|(sprite, tf)| {
+                by_id.get(&sprite.id.0).map(|tile| {
+                    (
+                        (tile.x, tile.y),
+                        (tf.translation.x, tf.translation.y),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Save in one session, load in a fresh one, and check the railway is drawn
+    /// on the world it was saved on.
+    ///
+    /// # The bug
+    ///
+    /// A load replaces the `MapGrid` mid-`Update` and inserts the restored
+    /// `TrackNetwork` in the same breath. `track::visuals` reads a freshly
+    /// inserted network as a wholesale rebuild and spawns one sprite per piece
+    /// through `tile_to_world` — which, in isometric, adds the elevation lift
+    /// from a process-global height field. Nothing reinstalled that field for
+    /// the loaded map, so every piece was placed at the *previous* world's
+    /// elevation. The terrain caught up on the next frame; the track never did,
+    /// because a track sprite is positioned once and then left alone.
+    ///
+    /// The two worlds here are deliberately different maps, so a stale height
+    /// field cannot accidentally agree with a fresh one.
+    fn save_then_load_in(save_view: MapProjection, load_view: MapProjection) {
+        let _guard = crate::map::tests::ProjectionGuard::new(save_view);
+        // The save root is a process global; hold it still for the round trip.
+        let _root = crate::shell::lock_save_root("iso_load");
+        let slot =
+            rail_sim::save::SaveSlot::named(&format!("iso load {:?} {:?}", save_view, load_view))
+                .expect("valid slot name");
+        let _ = rail_sim::save::delete_slot(&slot);
+
+        // ── Session one: build a railway and save it ──────────────────────
+        let mut app = game_app(4_242);
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .display
+            .isometric = save_view == MapProjection::Iso;
+        app.update();
+        app.update();
+        let laid = lay_a_railway(&mut app);
+        let saved_map = app.world().resource::<MapGrid>().clone();
+        rail_sim::save::save_to_slot(app.world(), &slot).expect("save");
+        let saved_network: Vec<_> = app
+            .world()
+            .resource::<rail_sim::TrackNetwork>()
+            .iter()
+            .map(|p| (p.id.0, p.tile, p.links.0))
+            .collect();
+        drop(app);
+
+        // ── Session two: a different world, then load ─────────────────────
+        rail_map::set_projection(load_view);
+        let mut app = game_app(90_210);
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .display
+            .isometric = load_view == MapProjection::Iso;
+        app.update();
+        app.update();
+        let other = app.world().resource::<MapGrid>().clone();
+        assert_ne!(
+            other.tiles().to_vec(),
+            saved_map.tiles().to_vec(),
+            "the two sessions have to be different worlds or the test proves nothing"
+        );
+        // ... and different *under the railway*, which is what a stale height
+        // field would be read from.
+        let differs = laid
+            .iter()
+            .filter(|t| {
+                other.get(**t).map(|c| rail_map::surface_height_of(c))
+                    != saved_map.get(**t).map(|c| rail_map::surface_height_of(c))
+            })
+            .count();
+        assert!(
+            differs > 0,
+            "the two worlds stand at the same height under every rail; a stale \
+             lift would be invisible and this test would pass for free"
+        );
+
+        app.world_mut()
+            .resource_mut::<crate::shell::ShellSaveRequest>()
+            .load = Some(slot.clone());
+        app.update();
+        app.update();
+
+        // A load that quietly failed would leave the previous world in place
+        // and every assertion below would be measuring the wrong thing.
+        let status = app
+            .world()
+            .resource::<crate::shell::SaveStatus>()
+            .message
+            .clone()
+            .unwrap_or_default();
+        assert!(
+            status.starts_with("Loaded"),
+            "the load did not happen: {status:?}"
+        );
+
+        // (a) The sim got its network back.
+        let loaded: Vec<_> = app
+            .world()
+            .resource::<rail_sim::TrackNetwork>()
+            .iter()
+            .map(|p| (p.id.0, p.tile, p.links.0))
+            .collect();
+        let sorted = |mut v: Vec<(u64, TileCoord, u16)>| {
+            v.sort_by_key(|(id, _, _)| *id);
+            v
+        };
+        assert_eq!(
+            sorted(loaded.clone()),
+            sorted(saved_network),
+            "the save round-trip lost track pieces"
+        );
+
+        // (b) The height field belongs to the world that was loaded.
+        let installed = app.world().resource::<MapGrid>().clone();
+        assert_eq!(
+            installed.tiles().to_vec(),
+            saved_map.tiles().to_vec(),
+            "the load did not bring back the saved world"
+        );
+        for tile in &laid {
+            assert_eq!(
+                rail_map::tile_height(*tile),
+                installed.get(*tile).map(rail_map::surface_height_of).unwrap_or(0),
+                "the projection's lift at {tile:?} belongs to some other map"
+            );
+        }
+
+        // (c) Every piece is drawn where the loaded world says its tile is.
+        let drawn = track_positions(&mut app);
+        assert_eq!(
+            drawn.len(),
+            loaded.len(),
+            "the loaded railway is missing sprites"
+        );
+        for (&(x, y), &(sx, sy)) in &drawn {
+            let tile = TileCoord { x, y };
+            let (wx, wy) = rail_map::tile_to_world(tile);
+            assert_eq!(
+                (sx, sy),
+                (wx, wy),
+                "the rail at {tile:?} is drawn at ({sx}, {sy}) but its tile is \
+                 at ({wx}, {wy}) in {}",
+                rail_map::projection().label()
+            );
+        }
+
+        let _ = rail_sim::save::delete_slot(&slot);
+    }
+
+    #[test]
+    fn a_loaded_railway_is_drawn_on_the_world_it_was_saved_on_top_down() {
+        save_then_load_in(MapProjection::TopDown, MapProjection::TopDown);
+    }
+
+    #[test]
+    fn a_loaded_railway_is_drawn_on_the_world_it_was_saved_on_iso() {
+        save_then_load_in(MapProjection::Iso, MapProjection::Iso);
+    }
+
+    /// The view is not part of the world, so a save made from above has to load
+    /// into isometric and back again with the railway on the ground either way.
+    #[test]
+    fn a_save_made_in_one_view_loads_into_the_other() {
+        save_then_load_in(MapProjection::TopDown, MapProjection::Iso);
+        save_then_load_in(MapProjection::Iso, MapProjection::TopDown);
     }
 
     /// FNV-1a over the sim state a flip could plausibly disturb.

@@ -43,12 +43,12 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageSampler};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use rail_map::tile_to_world;
 use rail_sim::ids::TileCoord;
 use rail_sim::track::{DIR16, DIR_COUNT};
 use rail_sim::{TileOccupancy, TrackEdit, TrackId, TrackNetwork};
 
 use crate::hash::world_hash;
+use crate::map::GroundAnchor;
 use crate::palette::{
     BALLAST_D, BALLAST_L, BALLAST_M, RAIL_D, RAIL_L, RAIL_M, RAIL_S, TIE_D, TIE_L, TIE_M, WOOD_D,
     WOOD_M,
@@ -104,12 +104,18 @@ const VARIANTS: u32 = 3;
 const WALK_STEP: f32 = 0.5;
 
 /// Marker on a track piece's baked sprite.
+///
+/// Everything the art was baked from, so the reconcile in [`apply_track_sprites`]
+/// can tell at a glance whether it is still the right drawing.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct TrackSprite {
     pub id: TrackId,
     /// The link mask this art was baked for; a change means a re-bake.
     pub links: u16,
     pub bridge: bool,
+    /// The projection it was baked for. A flip re-bakes rather than re-uses,
+    /// because the bake walks projected direction axes.
+    pub projection: rail_map::Projection,
 }
 
 /// The railhead gleam layer for one piece, a child of its [`TrackSprite`].
@@ -438,18 +444,57 @@ fn paint_railheads(canvas: &mut Canvas, key: ArtKey, dir: usize, reach: f32, pas
 
 // ── Systems ────────────────────────────────────────────────────────────────
 
-/// A track sprite's transform. Always identity rotation — see the module docs.
-fn track_transform(tile: TileCoord) -> Transform {
-    let (wx, wy) = tile_to_world(tile);
-    Transform::from_xyz(wx, wy, TRACK_Z)
+/// Where a piece stands on the ground plane.
+///
+/// A track sprite is placed once and then left alone, which puts it in exactly
+/// the class [`GroundAnchor`] exists for — so it wears one and
+/// `map::projection::anchor_world_sprites` owns its position from then on.
+///
+/// That is not tidiness. A load replaces the map and the network in the same
+/// `Update`, and whether this system runs before or after the one that does it
+/// is not ordered. Landing on the wrong side meant baking the whole railway
+/// against the *previous* world's elevation, permanently. With the anchor there
+/// is no wrong side: whatever frame the heights arrive on, the pieces are over
+/// their own tiles by the end of it.
+fn track_anchor(tile: TileCoord) -> GroundAnchor {
+    let (gx, gy) = rail_map::tile_to_ground(tile);
+    GroundAnchor::new(gx, gy)
 }
 
-/// Re-bake the pieces an edit changed, and the neighbours whose links moved
-/// with it.
+/// Reconcile the track sprites against the network.
 ///
-/// Placing one tile changes the link mask of everything within a direction step
-/// of it, including the far ends of any half-step that used to run across it, so
-/// the neighbourhood is re-read rather than just the edited tile.
+/// # Why this reconciles instead of listening
+///
+/// It used to be driven purely by [`TrackEdit`] messages, with one extra
+/// trigger for a wholesale swap: `network.is_added()`. That trigger does not
+/// fire on a load, and the reason is a detail of Bevy's change detection —
+/// `World::insert_resource` over a resource that **already exists** replaces the
+/// value and sets its *changed* tick, but not its *added* tick. A load restores
+/// `TrackNetwork` into a session that already had one, so `is_added()` is false,
+/// no edit messages come with a restored network, and this system returned
+/// early having done nothing. The player's railway came back in the simulation
+/// and never appeared on screen; whatever track the previous world had drawn
+/// stayed where it was. Stations did not have the bug because
+/// `stations::visuals` has always reconciled against its registry.
+///
+/// So the question this asks is no longer "did something tell me?" but "does
+/// what is drawn match what exists?", which has no trigger to miss:
+///
+/// - a piece with no sprite gets one,
+/// - a sprite with no piece is despawned,
+/// - a sprite whose link mask or bridge flag disagrees with its piece is
+///   rebuilt.
+///
+/// That subsumes every trigger the old version needed. Placing one tile changes
+/// the mask of everything within a direction step of it — including the far ends
+/// of any half-step running across it — and the mask comparison finds those
+/// without anyone having to walk the neighbourhood. A new map, a load and a
+/// projection flip are all just "the drawing does not match", and so is a
+/// re-bake after the projection changes, because [`ArtKey`] carries it.
+///
+/// The pixel contract's §2.5 is untouched: nothing is *baked* here that is not
+/// new. The bank is content-addressed, so a reconcile that finds everything in
+/// order costs one hash lookup per piece and paints nothing.
 pub fn apply_track_sprites(
     mut commands: Commands,
     mut edits: MessageReader<TrackEdit>,
@@ -459,57 +504,39 @@ pub fn apply_track_sprites(
     existing: Query<(Entity, &TrackSprite)>,
 ) {
     let _perf = crate::overlays::perf::scope("apply_track_sprites");
-    let mut touched: HashSet<TrackId> = HashSet::new();
-    let mut gone: HashSet<TrackId> = HashSet::new();
+    // The messages are still drained — a reader that stops reading loses rather
+    // than queues — but nothing downstream depends on having seen them.
+    edits.clear();
 
-    for edit in edits.read() {
-        match *edit {
-            TrackEdit::Placed { id, tile, layer, .. } => {
-                touched.insert(id);
-                mark_neighbours(&network, tile, layer, &mut touched);
+    // What is drawn, and whether it still agrees with the piece under it.
+    let mut wanted: HashSet<TrackId> = network.iter().map(|p| p.id).collect();
+    let projection = rail_map::projection();
+    for (entity, sprite) in existing.iter() {
+        match network.piece(sprite.id) {
+            // Drawn correctly: leave the entity alone, and take it off the list
+            // of pieces still wanting art.
+            Some(piece)
+                if sprite.links == piece.links.0
+                    && sprite.bridge == piece.is_bridge()
+                    && sprite.projection == projection =>
+            {
+                wanted.remove(&sprite.id);
             }
-            TrackEdit::Removed { id, tile, layer } => {
-                gone.insert(id);
-                mark_neighbours(&network, tile, layer, &mut touched);
-            }
-            TrackEdit::Failed { .. } => {}
+            // Drawn, but the mask, the bridge flag or the projection has moved
+            // under it. Drop the stale art; the spawn pass below redoes it.
+            Some(_) => commands.entity(entity).despawn(),
+            // Drawn, but there is no such piece any more.
+            None => commands.entity(entity).despawn(),
         }
     }
 
-    // A wholesale swap — a load, a new map, or a projection flip — brings its
-    // own pieces with no edit messages behind them, and every sprite it wants
-    // is missing. `map::projection` despawns the lot on its way past, so
-    // "there are pieces and no art for them" is the whole trigger; the bake is
-    // keyed on the projection, so the art that comes back is this view's.
-    let rebuild_all = network.is_added() || (existing.is_empty() && network.len() > 0);
-    if rebuild_all {
-        touched.extend(network.iter().map(|p| p.id));
-    }
-
-    if touched.is_empty() && gone.is_empty() && !rebuild_all {
+    if wanted.is_empty() {
         return;
     }
 
-    for (entity, sprite) in existing.iter() {
-        if rebuild_all || gone.contains(&sprite.id) {
-            commands.entity(entity).despawn();
-            continue;
-        }
-        let Some(piece) = network.piece(sprite.id).filter(|_| touched.contains(&sprite.id)) else {
-            continue;
-        };
-        if sprite.links == piece.links.0 && sprite.bridge == piece.is_bridge() {
-            // Art already matches the mask; leave the entity alone.
-            touched.remove(&sprite.id);
-        } else {
-            // Mask moved: drop the stale art and let the spawn pass redo it.
-            commands.entity(entity).despawn();
-        }
-    }
-
-    // What is left in `touched` is exactly what needs art: newly placed pieces,
-    // neighbours whose mask moved, and everything after a wholesale swap.
-    for id in touched {
+    // What is left is exactly what needs art: newly placed pieces, neighbours
+    // whose mask moved, and everything at all after a load or a new world.
+    for id in wanted {
         let Some(piece) = network.piece(id) else {
             continue;
         };
@@ -520,17 +547,20 @@ pub fn apply_track_sprites(
             projection: rail_map::projection(),
         };
         let (base, polish) = art.get(&mut images, key);
+        let anchor = track_anchor(piece.tile);
         commands
             .spawn((
                 Sprite {
                     image: base,
                     ..default()
                 },
-                track_transform(piece.tile),
+                anchor,
+                anchor.transform(TRACK_Z),
                 TrackSprite {
                     id,
                     links: key.links,
                     bridge: key.bridge,
+                    projection: key.projection,
                 },
             ))
             .with_children(|piece_entity| {
@@ -544,25 +574,6 @@ pub fn apply_track_sprites(
                     TrackPolish { id },
                 ));
             });
-    }
-}
-
-/// Mark every piece within one direction step of `tile` as needing a re-bake.
-fn mark_neighbours(
-    network: &TrackNetwork,
-    tile: TileCoord,
-    layer: u8,
-    touched: &mut HashSet<TrackId>,
-) {
-    for dir in 0..DIR_COUNT {
-        let (dx, dy) = DIR16[dir];
-        let n = TileCoord {
-            x: tile.x + dx,
-            y: tile.y + dy,
-        };
-        if let Some(id) = network.id_at(n, layer) {
-            touched.insert(id);
-        }
     }
 }
 
@@ -644,9 +655,29 @@ mod tests {
         let _flat = flat();
         for x in -3..=3 {
             for y in -3..=3 {
-                let tf = track_transform(TileCoord { x, y });
+                let tf = track_anchor(TileCoord { x, y }).transform(TRACK_Z);
                 assert_eq!(tf.rotation, Quat::IDENTITY);
                 assert_eq!(tf.scale, Vec3::ONE);
+            }
+        }
+    }
+
+    /// A piece's anchor and its tile have to be the same place, or the railway
+    /// and the station on the same tile would disagree about where that tile is.
+    #[test]
+    fn a_piece_is_anchored_on_its_own_tile() {
+        for projection in [rail_map::Projection::TopDown, rail_map::Projection::Iso] {
+            let _guard = crate::map::tests::ProjectionGuard::new(projection);
+            for x in -2..=6 {
+                for y in -2..=6 {
+                    let tile = TileCoord { x, y };
+                    let (wx, wy) = rail_map::tile_to_world(tile);
+                    assert_eq!(
+                        track_anchor(tile).world(),
+                        Vec2::new(wx, wy),
+                        "{tile:?} in {projection:?}"
+                    );
+                }
             }
         }
     }

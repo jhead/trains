@@ -21,7 +21,10 @@
 //! - [`TILE_SIZE`] — ground-plane units per tile edge (32)
 //! - [`tile_to_world`] / [`world_to_tile`] / [`map_center_world`]
 //!
-//! Those three follow the live [`Projection`]: top-down squares by default, or
+//! - [`ground_to_world`] — the same for a *sub-tile* point (a peep mid-stride,
+//!   a house on its lot)
+//!
+//! Those follow the live [`Projection`]: top-down squares by default, or
 //! 2:1 dimetric diamonds with an elevation lift once [`set_projection`] says so.
 //! See [`coords`] for the projection, the lift and [`set_iso_heights`], which
 //! installs the height field the lift reads. Use [`top_down_tile_to_world`] and
@@ -79,11 +82,11 @@ mod tile;
 pub mod measure;
 
 pub use coords::{
-    clear_iso_heights, map_center_world, project, project_offset, projection, projection_is_iso,
-    set_iso_heights, set_projection, surface_height_of, tile_height, tile_lift, tile_to_world,
-    tile_to_world_flat, top_down_map_center, top_down_tile_to_world, top_down_world_to_tile,
-    unproject, unproject_offset, world_to_tile, Projection, ISO_LIFT, ISO_TILE_H, ISO_TILE_W,
-    TILE_SIZE,
+    clear_iso_heights, ground_to_world, map_center_world, project, project_offset, projection,
+    projection_is_iso, set_iso_heights, set_projection, surface_height_of, tile_height, tile_lift,
+    tile_to_ground, tile_to_world, tile_to_world_flat, top_down_map_center, top_down_tile_to_world,
+    top_down_world_to_tile, unproject, unproject_offset, world_to_tile, Projection, ISO_LIFT,
+    ISO_TILE_H, ISO_TILE_W, TILE_SIZE,
 };
 pub use features::{MapFeatures, RiverCrossing, SiteHint, SiteKind, Surface};
 pub use gen::{generate, generate_map, generate_map_with};

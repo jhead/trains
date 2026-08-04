@@ -46,8 +46,8 @@ use map_view::{
     toggle_map_view,
 };
 use projection::{
-    apply_projection_setting, drawing_iso, drawing_top_down, install_boot_projection,
-    install_map_heights, toggle_projection_hotkey,
+    anchor_world_sprites, apply_projection_setting, drawing_iso, drawing_top_down,
+    follow_map_heights, install_boot_projection, toggle_projection_hotkey,
 };
 use schematic::{
     mark_schematic_dirty, rebake_schematic, setup_schematic, sync_schematic_trains,
@@ -58,7 +58,7 @@ use terrain::iso::{rebuild_iso_terrain, setup_iso_atlas, IsoTerrainState};
 
 pub use camera::{ortho_scale_for_zoom, CameraFocusRequest, MapCamera};
 pub use map_view::MapViewState;
-pub use projection::ViewProjection;
+pub use projection::{GroundAnchor, ViewProjection};
 pub use schematic::SCHEMATIC_OVERLAY_Z;
 // The tile-shaped footprint every ghost / ring / overlay cell tints: a square
 // from above, a diamond in isometric, so nothing draws a square onto a diamond
@@ -106,10 +106,14 @@ impl Plugin for MapPlugin {
             // installs its world; this reads `Settings`, which the shell has
             // already loaded in its `build`.
             .add_systems(PreStartup, install_boot_projection)
+            // Ahead of all of `Update` by the schedule rather than by anyone
+            // remembering an `.after()`: the lift has to be this world's before
+            // a single system asks where a tile is. See `follow_map_heights`.
+            .add_systems(PreUpdate, follow_map_heights)
             .add_systems(
                 Startup,
                 (
-                    install_map_heights,
+                    follow_map_heights,
                     setup_map_camera,
                     // Both banks, whichever view opens: a flip is then a
                     // re-spawn and never a bake.
@@ -134,6 +138,10 @@ impl Plugin for MapPlugin {
                     rebuild_iso_terrain
                         .after(apply_projection_setting)
                         .run_if(drawing_iso),
+                    // Everything that spawns once and then holds still. Late
+                    // in `Update`, so a spawner that ran this frame is already
+                    // covered, and before `PostUpdate`'s depth sort.
+                    anchor_world_sprites.after(apply_projection_setting),
                     map_view_click_fly.in_set(crate::input::PlayerVerbSet),
                     exit_map_view_before_focus.after(map_view_click_fly),
                     apply_camera_focus.after(exit_map_view_before_focus),

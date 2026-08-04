@@ -176,12 +176,40 @@ fn regenerate_map_from_save(world: &mut World) {
     // Sized from the descriptor rather than from the packed `size`, so a world
     // that was never square — a test map, a neighbour's chunk — comes back at
     // its own dimensions instead of being squared off.
-    world.insert_resource(rail_map::generate_map_with(
+    let map = rail_map::generate_map_with(
         descriptor.width,
         descriptor.height,
         descriptor.seed,
         options,
-    ));
+    );
+    // The projection's height field belongs to the map that is installed, and
+    // this is the moment it changes. Waiting for the next frame's
+    // `map::projection::follow_map_heights` is too late: the restored
+    // `TrackNetwork` went in a few lines above, and the track rebuild it
+    // triggers runs later in *this* `Update` — placing every piece of the
+    // loaded railway at the previous world's elevation, permanently, because a
+    // track sprite is positioned once and then left alone.
+    rail_map::set_iso_heights(&map);
+    world.insert_resource(map);
+}
+
+/// Serialises the tests that point the save root somewhere of their own.
+///
+/// `rail_sim::save::set_save_root` writes a process-global, and Rust runs a
+/// crate's tests in parallel — so two tests that each set it will straddle each
+/// other's writes and one of them will save into one directory and look for it
+/// in another. Take this for as long as a test needs the root to hold still.
+#[cfg(test)]
+pub(crate) static SAVE_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Point the save root at a directory of this test's own, and hold it there.
+#[cfg(test)]
+pub(crate) fn lock_save_root(name: &str) -> std::sync::MutexGuard<'static, ()> {
+    let guard = SAVE_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    save::set_save_root(
+        std::env::temp_dir().join(format!("rail_town_{name}_{}", std::process::id())),
+    );
+    guard
 }
 
 /// Quick and named slots are explicit writes; the autosave slot rotates itself.

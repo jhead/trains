@@ -3341,7 +3341,7 @@ mod tests {
     /// actually sounds like anything:
     ///
     /// ```text
-    /// cargo test -p rail_town --lib score::tests::write_a_sample_to_listen_to -- --ignored --nocapture
+    /// cargo test -p rail_town audio::score::tests::write_a_sample_to_listen_to -- --ignored --nocapture
     /// ```
     ///
     /// `RAIL_TOWN_SCORE_WAV`, `_SECS`, `_SEED`, `_PIECE`, `_WARMTH`, `_DENSITY`

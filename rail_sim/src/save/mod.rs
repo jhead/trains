@@ -49,11 +49,12 @@
 //! Schemas from [`MIN_READABLE_SCHEMA`] up are **migrated on load** rather than
 //! refused. Migration is not free and is not automatic: it needs a frozen mirror
 //! of the old shape, because positional bincode has no field names to fall back
-//! on. Schema 4 → 5 (desire paths) is cheap only because it added one field to
-//! the top level and reshaped nothing nested; see
-//! [`WorldSnapshotV4`](snapshot::WorldSnapshotV4) for the caveat that comes with
-//! that. Saving always writes the current schema, so a migrated world is v5 the
-//! next time it is written.
+//! on. Schema 4 → 5 (desire paths) was cheap because it added one field to the
+//! top level and reshaped nothing nested. Schema 5 → 6 (train consists) is the
+//! other kind: it added a field *inside* the trains section, so
+//! [`TrainsSnapshotV5`](snapshot::TrainsSnapshotV5) is a frozen copy of the old
+//! shape and both older versions decode through it. Saving always writes the
+//! current schema, so a migrated world is v6 the next time it is written.
 //!
 //! # Extending the snapshot
 //!
@@ -112,7 +113,7 @@ pub use snapshot::{
     BudgetSnapshot, ClockSnapshot, EconomySnapshot, MapDescriptor, MapGenOptions, MapSnapshot,
     PathsSnapshot, PeepSnapshot, PeepsSnapshot, RestoreReport, ServiceScoreSnapshot,
     StationsSnapshot, TalkKindSnapshot, TerrainChunk, TownSnapshot, TownTalkSnapshot, TrainSnapshot,
-    TrainsSnapshot, WorldSnapshot, WorldSnapshotV4, GENERATOR_VERSION, MIN_READABLE_SCHEMA,
-    SCHEMA_VERSION,
+    TrainSnapshotV5, TrainsSnapshot, TrainsSnapshotV5, WorldSnapshot, WorldSnapshotV4,
+    WorldSnapshotV5, GENERATOR_VERSION, MIN_READABLE_SCHEMA, SCHEMA_VERSION,
 };
 pub use storage::{save_root_display, set_save_root, SAVE_DIR_ENV, SAVE_EXTENSION};

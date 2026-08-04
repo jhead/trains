@@ -75,10 +75,55 @@ The vision calls them sidegrades with distinct constraint profiles. That require
 | Operating cost | Lower | Higher | yes |
 | Stop pattern | Frequent, short hops | Point to point | emergent |
 | Drives | Residential and commercial growth | Cash flow and industry | emergent |
-| **Capacity** | Modest per car, many cars | Large per car, fewer cars | **no** |
+| **Capacity** | Up to three cars, a load each | One wagon — see §3.4 | **yes** |
 | **Acceleration** | Brisk | Slow — this is meant to be the defining trait | **no** |
 
-**The last two rows are the debt, and they are the two that matter most.** Both kinds carry exactly one job at a time today, so "capacity" is not yet a dimension at all, and there is no acceleration model — a train crosses tiles at a rate and does not build up to it. The profile the sim keeps has the seams for both; neither is filled in. Until they are, the differences that *do* exist are speed, grade, curve, dwell and cost, which is enough for the two kinds to want different alignments and not enough for the "defining trait" claim above to be true. Dwell scaling with crowd and with load is part of the same unbuilt piece.
+**Capacity is built and acceleration is not.** A train is no longer one job: a transit couples up to three cars, each carrying one more load, and the consist costs it time on the road and time at the platform. What is still missing is acceleration — a train crosses tiles at a rate and does not build up to it — so the "defining trait" claim in the last row is still a claim rather than a behaviour. The profile has the seam for it (`base_ticks` is a flat rate, with no ramp in front of it) and the consist penalty rides on that same field, which is the honest half-measure: a longer freight train is slower everywhere rather than slower *away from a stop*, which is where the difference should really bite.
+
+### 3.1 What a car does
+
+**Every car past the first carries one more load, and makes the train a tick slower per tile and slower to board.** That is the whole model, and it is one sentence because a player has to be able to recite it.
+
+The numbers live in `TrainProfile` next to the ones they modify:
+
+| | Transit | Transport |
+| --- | --- | --- |
+| Ticks a flat tile, one car | 6 | 10 |
+| …per extra car | **+1** | +2 |
+| Dwell, one car | 4 | 12 |
+| …per extra car | **+2** | +6 |
+| Longest consist | **3 cars** | 1 wagon |
+
+A two-car transit therefore runs at 6/7 of a single car's speed and boards half again as slowly; a three-car at 3/4 speed and double the dwell. The platform grade scales the dwell it is given, so a long consist is exactly what makes an Interchange worth its price — **the station tier is a cost on length, never a cap on it**. Tying the cap to tiers was considered and rejected: a free-roaming train has no fixed set of stops, so a tier-derived limit would be a number the player cannot see, predict, or plan around, and it would change under them when they demolished a halt three towns away.
+
+### 3.2 Where a queue comes from
+
+A car is only worth having when there is a queue for it, and the queue is real demand that used to be discarded. A pair of stops used to hold **one** open job: a second traveller wanting the same trip while one was already posted was dropped. Peep departures now stack instead, three deep — `MAX_PENDING_PER_PAIR`, the same number as the longest transit, so no carriage exists that the board can never fill. The station-pair walk is deliberately left alone at one per pair: that is a synthetic heartbeat so a new line has something to carry, and letting it stack would mint fares out of the spawn interval.
+
+A train boards **one working** and fills as many cars as that pair's queue can supply. Whatever it cannot lift stays posted for the next train, which is what makes a second train and a second carriage genuinely different purchases.
+
+### 3.3 What a car costs, and when it beats a second train
+
+A car is **half a train**: `$1,500` against a transit's `$3,000`. Selling returns the whole consist, so lengthening a train is as reversible as laying track.
+
+Measured on a ten-tile double-track corridor (`rail_sim/tests/consist_capacity.rs`), per real minute:
+
+| | one car | **+ a car** | + a second train |
+| --- | --- | --- | --- |
+| Thin line — one working per pair | $1,370 | **$1,250** (−$120) | $1,500 (+$130) |
+| Busy line — a queue three deep | $826 | **$1,696** (+$870) | $1,990 (+$1,164) |
+| Payback, thin | — | **never** | 23 min |
+| Payback, busy | — | **1.7 min** | 2.6 min |
+
+**On the opening beat the car is a loss and the second train is not.** That is the design: the first car is not the correct opening move, and it is not gated by a price or a tech tree — it is gated by there being nobody on the platform for it. The lever turns rational the first time a stop's queue is deeper than one carriage, which the pair walk alone never produces; it takes a district generating repeat departures, and [17 §5](17-time-and-pacing.md) puts a district's growth at days rather than minutes.
+
+Once the queue is there the car is the cheaper way to lift it — half the capital, faster payback — and the second train is still the more *flexible* one: it serves another pair, and it keeps running when the first is held. Neither dominates, which is the point.
+
+### 3.4 Why freight runs one wagon
+
+`max_cars` is `1` for Transport, and that is a statement about the world rather than about the locomotive. A car pays when there is a queue, and freight has no queue to have: an industry produces and consumes a good with no stockpile behind it, so the board carries exactly one working per producer→consumer pair however long the train takes to come back. A second wagon would be permanently empty and permanently slowing the train down, sold at a price the player could never earn back — a trap with a price tag.
+
+So the seam is filled in and the number is one. Give an industry a stock level and this becomes two lines: raise the cap, and let goods jobs stack the way passenger jobs do. Until then the Trains window does not offer the verb on a goods train, and the sim says why if the command arrives anyway.
 
 The consequences are the interesting part, and they should be discoverable by playing rather than by reading:
 

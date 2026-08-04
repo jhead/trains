@@ -40,6 +40,7 @@ pub fn apply_commands(
             | CommandKind::BuyTrain(_)
             | CommandKind::PlaceTrain(_)
             | CommandKind::SellTrain(_)
+            | CommandKind::AddTrainCar(_)
             | CommandKind::CreateLine(_)
             | CommandKind::RemoveLine(_)
             | CommandKind::AssignTrainToLine(_)

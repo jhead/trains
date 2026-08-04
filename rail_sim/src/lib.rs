@@ -115,11 +115,12 @@ pub use track::{
     MOUNTAIN_HEIGHT_MIN, TRACK_COST_CENTS, TRACK_MAINT_WEIGHT,
 };
 pub use trains::{
-    advance_trains, apply_train_commands, blocked_chain_head, blocker_for, buy_cost, find_path,
-    find_path_avoiding, find_path_for_kind,
-    ticks_for_piece, track_for_station, TileOccupancy, Train, TrainCargo, TrainEdit, TrainLocation,
-    TrainOnLine, TrainProfile, TrainYard, TRANSIT_COST_CENTS, TRANSIT_PROFILE, TRANSPORT_COST_CENTS,
-    TRANSPORT_PROFILE,
+    advance_trains, apply_train_commands, blocked_chain_head, blocker_for, buy_cost, car_cost,
+    cars_of, consist_cost, find_path, find_path_avoiding, find_path_for_kind,
+    ticks_for_consist_piece, ticks_for_piece, track_for_station, TileOccupancy, Train, TrainCargo,
+    TrainConsist, TrainEdit, TrainLocation, TrainOnLine, TrainProfile, TrainYard,
+    TRANSIT_CAR_COST_CENTS, TRANSIT_COST_CENTS, TRANSIT_PROFILE, TRANSPORT_CAR_COST_CENTS,
+    TRANSPORT_COST_CENTS, TRANSPORT_PROFILE,
 };
 
 use bevy_app::{App, FixedUpdate, Plugin, Update};

@@ -43,7 +43,7 @@ use crate::ids::TileCoord;
 use crate::money::Money;
 use crate::stations::{IndustryRegistry, StationRegistry, StationService};
 use crate::track::{TrackNetwork, GROUND_LAYER};
-use crate::trains::{track_for_station, Train, TrainCargo, TrainLocation};
+use crate::trains::{track_for_station, Train, TrainCargo, TrainConsist, TrainLocation};
 
 use super::ledger::{MoneyCategory, MoneyLedger};
 
@@ -184,6 +184,15 @@ pub fn haul_tiles(from: TileCoord, to: TileCoord) -> i64 {
 }
 
 /// When a train with cargo sits at its path destination, pay out and clear cargo.
+///
+/// # A carload is a fare
+///
+/// A consist carries several loads of one working
+/// ([`TrainConsist`](crate::trains::TrainConsist)), and each is a separate job
+/// that was taken off the board — so each is paid separately, at the same
+/// distance-scaled rate, and each counts as one paid run. A two-car transit
+/// arriving with two carloads has collected two fares, and the ledger says two
+/// because two people's journeys ended.
 pub fn resolve_deliveries(
     mut money: ResMut<Money>,
     mut ledger: ResMut<MoneyLedger>,
@@ -191,12 +200,22 @@ pub fn resolve_deliveries(
     industries: Res<IndustryRegistry>,
     network: Res<TrackNetwork>,
     mut service: ResMut<StationService>,
-    mut q: Query<(&Train, &mut TrainLocation, &mut TrainCargo)>,
+    mut q: Query<(
+        &Train,
+        &mut TrainLocation,
+        &mut TrainCargo,
+        Option<&mut TrainConsist>,
+    )>,
 ) {
-    for (train, mut loc, mut cargo) in q.iter_mut() {
+    for (train, mut loc, mut cargo, mut consist) in q.iter_mut() {
         if loc.parked || loc.dwell_remaining > 0 || !loc.at_destination() || cargo.is_empty() {
             continue;
         }
+        // A train with no consist component is the single car it always was;
+        // one that has a consist and somehow no load still delivers the one
+        // working its cargo names.
+        let cars = consist.as_ref().map(|c| c.cars.max(1)).unwrap_or(1);
+        let loads = i64::from(consist.as_ref().map(|c| c.laden.max(1)).unwrap_or(1));
 
         match *cargo {
             TrainCargo::Passengers { from, to } => {
@@ -218,14 +237,22 @@ pub fn resolve_deliveries(
                     .get(from)
                     .map(|origin| haul_tiles(origin.tile, station.tile))
                     .unwrap_or(1);
-                ledger.credit_paid_run(
-                    &mut money,
-                    MoneyCategory::Fares,
-                    passenger_fare_cents(tiles),
-                );
+                for _ in 0..loads {
+                    ledger.credit_paid_run(
+                        &mut money,
+                        MoneyCategory::Fares,
+                        passenger_fare_cents(tiles),
+                    );
+                }
+                // One call at the platform, however long the train: service is
+                // a statement about the timetable, and a longer train is not a
+                // more frequent one.
                 service.record_arrival(to);
                 *cargo = TrainCargo::Empty;
-                loc.begin_dwell_at(train.kind, station.tier);
+                if let Some(c) = consist.as_mut() {
+                    c.unload();
+                }
+                loc.begin_dwell_at(train.kind, cars, station.tier);
             }
             TrainCargo::Goods { to, from, .. } => {
                 let Some(ind) = industries.get(to) else {
@@ -242,18 +269,23 @@ pub fn resolve_deliveries(
                     .get(from)
                     .map(|origin| haul_tiles(origin.tile, ind.tile))
                     .unwrap_or(1);
-                ledger.credit_paid_run(
-                    &mut money,
-                    MoneyCategory::Deliveries,
-                    goods_delivery_cents(tiles),
-                );
+                for _ in 0..loads {
+                    ledger.credit_paid_run(
+                        &mut money,
+                        MoneyCategory::Deliveries,
+                        goods_delivery_cents(tiles),
+                    );
+                }
                 *cargo = TrainCargo::Empty;
+                if let Some(c) = consist.as_mut() {
+                    c.unload();
+                }
                 // Loading at a proper goods platform takes its 140%; a bare
                 // railhead against the works falls back to the train's own
                 // dwell.
                 match super::jobs::goods_platform_for(&stations, ind) {
-                    Some(platform) => loc.begin_dwell_at(train.kind, platform.tier),
-                    None => loc.begin_dwell(train.kind),
+                    Some(platform) => loc.begin_dwell_at(train.kind, cars, platform.tier),
+                    None => loc.begin_dwell(train.kind, cars),
                 }
             }
             TrainCargo::Empty => {}
@@ -494,6 +526,114 @@ mod tests {
         assert_eq!(halt, base * 150 / 100, "150% of the transit profile's dwell");
         assert_eq!(interchange, base * 60 / 100, "60% of it, floored, never zero");
         assert!(interchange >= 1);
+    }
+
+    /// **A carload is a fare.** Three carriages of people arriving is three
+    /// fares and three paid runs — but *one* call at the platform, because a
+    /// longer train is not a more frequent one.
+    #[test]
+    fn every_carload_pays_its_own_fare_and_the_stop_counts_one_call() {
+        use crate::trains::TrainConsist;
+
+        let banked = |cars: u8, laden: u8| -> (i64, u64, u32, u16) {
+            let mut app = App::new();
+            app.init_resource::<StationRegistry>()
+                .init_resource::<IndustryRegistry>()
+                .init_resource::<StationService>()
+                .init_resource::<TrackNetwork>()
+                .init_resource::<crate::economy::MoneyLedger>()
+                .insert_resource(Money::new(0));
+
+            let terrain = TrackTerrain::new(8, 8, (0..64).map(|_| (false, 0i8)));
+            let mut network = TrackNetwork::new();
+            let mut place_money = Money::new(500_000);
+            let mut place_ledger = crate::economy::MoneyLedger::default();
+            let mut ids = Vec::new();
+            for x in 1..=4 {
+                ids.push(
+                    try_place_track(
+                        &mut network,
+                        &mut place_money,
+                        &mut place_ledger,
+                        &terrain,
+                        TileCoord { x, y: 2 },
+                        GROUND_LAYER,
+                    )
+                    .unwrap()
+                    .id,
+                );
+            }
+            app.insert_resource(network);
+
+            let (east, west) = {
+                let mut stations = app.world_mut().resource_mut::<StationRegistry>();
+                (
+                    stations.insert("East", TileCoord { x: 1, y: 2 }, GROUND_LAYER),
+                    stations.insert("West", TileCoord { x: 4, y: 2 }, GROUND_LAYER),
+                )
+            };
+
+            app.world_mut().spawn((
+                Train {
+                    id: TrainId(1),
+                    kind: TrainKind::Transit,
+                },
+                TrainLocation {
+                    track: *ids.last().unwrap(),
+                    path: ids.clone(),
+                    path_index: ids.len() - 1,
+                    progress: 0,
+                    parked: false,
+                    dwell_remaining: 0,
+                },
+                TrainCargo::Passengers {
+                    from: east,
+                    to: west,
+                },
+                TrainConsist { cars, laden },
+            ));
+
+            app.add_systems(bevy_app::Update, resolve_deliveries);
+            app.world_mut().run_schedule(bevy_app::Update);
+
+            let world = app.world_mut();
+            let dwell = world
+                .query::<&TrainLocation>()
+                .iter(world)
+                .next()
+                .unwrap()
+                .dwell_remaining;
+            let consist = *world.query::<&TrainConsist>().iter(world).next().unwrap();
+            assert_eq!(consist.laden, 0, "everything aboard got off");
+            (
+                app.world().resource::<Money>().cents(),
+                app.world()
+                    .resource::<crate::economy::MoneyLedger>()
+                    .paid_runs(),
+                app.world().resource::<StationService>().score(west).deliveries,
+                dwell,
+            )
+        };
+
+        let fare = passenger_fare_cents(3);
+        let (one_cash, one_runs, one_calls, one_dwell) = banked(1, 1);
+        assert_eq!(one_cash, fare, "a single car pays exactly what it always did");
+        assert_eq!(one_runs, 1);
+        assert_eq!(one_calls, 1);
+
+        let (three_cash, three_runs, three_calls, three_dwell) = banked(3, 3);
+        assert_eq!(three_cash, fare * 3, "three carloads, three fares");
+        assert_eq!(three_runs, 3, "and three journeys somebody paid for");
+        assert_eq!(three_calls, 1, "but one call at the platform");
+        assert!(
+            three_dwell > one_dwell,
+            "a longer train boards for longer: {three_dwell} against {one_dwell}"
+        );
+
+        // Half-empty pays for what it carried, not for what it could have.
+        let (half_cash, half_runs, ..) = banked(3, 1);
+        assert_eq!(half_cash, fare);
+        assert_eq!(half_runs, 1);
     }
 
     #[test]

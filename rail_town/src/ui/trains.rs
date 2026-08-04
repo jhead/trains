@@ -29,9 +29,11 @@
 
 use bevy::prelude::*;
 use rail_map::tile_to_world;
+use rail_sim::commands::AddTrainCar;
 use rail_sim::{
-    buy_cost, IndustryRegistry, LineRegistry, StationRegistry, TrackNetwork, Train, TrainCargo,
-    TrainId, TrainKind, TrainLocation, TrainYard, GROUND_LAYER,
+    car_cost, cars_of, consist_cost, CommandKind, IndustryRegistry, LineRegistry, StationRegistry,
+    TrackNetwork, Train, TrainCargo, TrainConsist, TrainId, TrainKind, TrainLocation, TrainProfile,
+    TrainYard, GROUND_LAYER,
 };
 
 use crate::inspect::{Selectable, Selection};
@@ -90,13 +92,24 @@ pub struct TrainRow {
     pub cargo: Option<String>,
     /// Where "locate" should fly to. `None` for yard stock.
     pub tile: Option<rail_sim::TileCoord>,
+    /// Cars in the consist. `1` for everything the player has not lengthened.
+    pub cars: u8,
 }
 
 impl TrainRow {
     /// The row's own name — matching the Inspector's and Town Talk's wording, so
     /// a player can carry a train's identity between the three.
+    ///
+    /// A single car says nothing about its length, because every train is one
+    /// car until the player buys otherwise and a row that says so on all of them
+    /// is a column of noise. Two or more names itself.
     pub fn title(&self) -> String {
-        format!("{} train {}", kind_label(self.kind), self.id.0)
+        let name = format!("{} train {}", kind_label(self.kind), self.id.0);
+        if self.cars > 1 {
+            format!("{name} ({} cars)", self.cars)
+        } else {
+            name
+        }
     }
 
     /// Title and status, as the row draws them.
@@ -116,9 +129,12 @@ fn kind_label(kind: TrainKind) -> &'static str {
 ///
 /// Yard stock first, then the map, each group by id — so a row does not move
 /// under the player's cursor because a train crossed a tile.
+// Identity, position, load and composition: what a train is, in the order the
+// row reads them.
+#[allow(clippy::type_complexity)]
 pub fn train_rows(
     yard: &TrainYard,
-    placed: &[(&Train, &TrainLocation, &TrainCargo)],
+    placed: &[(&Train, &TrainLocation, &TrainCargo, Option<&TrainConsist>)],
     lines: &LineRegistry,
     stations: &StationRegistry,
     industries: &IndustryRegistry,
@@ -133,13 +149,16 @@ pub fn train_rows(
             standing: TrainStanding::InYard,
             cargo: None,
             tile: None,
+            // Yard stock is always a single car: cars are coupled to trains in
+            // service (`CommandKind::AddTrainCar`).
+            cars: 1,
         })
         .collect();
     rows.sort_by_key(|r| r.id.0);
 
     let mut running: Vec<TrainRow> = placed
         .iter()
-        .map(|(train, loc, cargo)| {
+        .map(|(train, loc, cargo, consist)| {
             let tile = network.piece(loc.track).map(|p| p.tile);
             // Stranded is checked *before* the line, deliberately: a crewed
             // train whose rails were lifted is still going nowhere, and "on
@@ -160,6 +179,7 @@ pub fn train_rows(
                 standing,
                 cargo: cargo_label(cargo, stations, industries),
                 tile,
+                cars: cars_of(*consist),
             }
         })
         .collect();
@@ -215,6 +235,8 @@ pub struct TrainRowButton {
     pub train: TrainId,
     pub kind: TrainKind,
     pub action: TrainRowAction,
+    /// Cars the row was drawn with — what the sale is worth.
+    pub cars: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,14 +247,23 @@ pub enum TrainRowAction {
     Place,
     /// Ask, then sell.
     Sell,
+    /// Buy one more car for this train.
+    AddCar,
 }
 
 impl TrainRowAction {
-    fn label(self) -> &'static str {
+    /// The button's words, priced where the verb costs money.
+    ///
+    /// Buying a car is the one verb in this window that spends without a dialog
+    /// in front of it, so the price is on the button rather than behind it —
+    /// the player reads what it costs before their finger is down, which is the
+    /// same bargain the toolbar's build plates strike.
+    fn label(self, kind: TrainKind) -> String {
         match self {
-            Self::Locate => "Find",
-            Self::Place => "Place",
-            Self::Sell => "Sell",
+            Self::Locate => "Find".into(),
+            Self::Place => "Place".into(),
+            Self::Sell => "Sell".into(),
+            Self::AddCar => format!("Add car {}", money_whole(car_cost(kind))),
         }
     }
 }
@@ -274,7 +305,16 @@ pub struct TrainsWorld<'w, 's> {
     stations: Res<'w, StationRegistry>,
     industries: Res<'w, IndustryRegistry>,
     network: Res<'w, TrackNetwork>,
-    trains: Query<'w, 's, (&'static Train, &'static TrainLocation, &'static TrainCargo)>,
+    trains: Query<
+        'w,
+        's,
+        (
+            &'static Train,
+            &'static TrainLocation,
+            &'static TrainCargo,
+            Option<&'static TrainConsist>,
+        ),
+    >,
 }
 
 /// Repaint the list when — and only when — it has actually changed.
@@ -289,7 +329,9 @@ pub fn update_trains_ui(
     if !manager.is_open(WindowId::Trains) {
         return;
     }
-    let placed: Vec<(&Train, &TrainLocation, &TrainCargo)> = world.trains.iter().collect();
+    #[allow(clippy::type_complexity)]
+    let placed: Vec<(&Train, &TrainLocation, &TrainCargo, Option<&TrainConsist>)> =
+        world.trains.iter().collect();
     let rows = train_rows(
         &world.yard,
         &placed,
@@ -374,13 +416,18 @@ fn spawn_row(list: &mut ChildSpawnerCommands, row: &TrainRow) {
                             train: row.id,
                             kind: row.kind,
                             action,
+                            cars: row.cars,
                         },
                         node,
                         bg,
                         border,
                     ))
                     .with_children(|b| {
-                        b.spawn((Text::new(action.label()), micro_font(), text_secondary()));
+                        b.spawn((
+                            Text::new(action.label(row.kind)),
+                            micro_font(),
+                            text_secondary(),
+                        ));
                     });
             }
         });
@@ -392,12 +439,25 @@ fn spawn_row(list: &mut ChildSpawnerCommands, row: &TrainRow) {
 /// A train in the yard cannot be flown to, because it is nowhere; a train on the
 /// map cannot be placed, because it already is. Selling is always available —
 /// rolling stock is reversible wherever it stands (DESIGN.md).
+///
+/// **Adding a car is offered on any placed train of a kind that couples them**,
+/// including one already at its limit. That is deliberate: pressing it there
+/// answers with the rule — *"already runs 3 cars, the longest a transit
+/// couples"* — and a cap the player can discover by pressing a button is worth
+/// more than a button that quietly disappears at the moment it becomes
+/// interesting. A goods train never offers it, because freight runs one wagon
+/// and the reason is a property of the world rather than of the train
+/// ([`TRANSPORT_PROFILE`](rail_sim::TRANSPORT_PROFILE)).
 pub fn row_actions(row: &TrainRow) -> Vec<TrainRowAction> {
     if row.standing.is_unplaced() {
-        vec![TrainRowAction::Place, TrainRowAction::Sell]
-    } else {
-        vec![TrainRowAction::Locate, TrainRowAction::Sell]
+        return vec![TrainRowAction::Place, TrainRowAction::Sell];
     }
+    let mut actions = vec![TrainRowAction::Locate];
+    if TrainProfile::for_kind(row.kind).max_cars > 1 {
+        actions.push(TrainRowAction::AddCar);
+    }
+    actions.push(TrainRowAction::Sell);
+    actions
 }
 
 /// Turn a row button into the verb the rest of the game already has.
@@ -438,7 +498,9 @@ pub fn train_row_clicks(
                 TrainKind::Transport => ToolbarTool::Transport,
             }),
             // Straight into the one confirm dialog, with the same sentence `X`
-            // on a selected train produces.
+            // on a selected train produces. The figure is the *consist's* price,
+            // because that is what comes back — a player who bought two cars and
+            // is offered the bare engine's price would read the sale as a loss.
             TrainRowAction::Sell => {
                 if confirm.is_open() {
                     continue;
@@ -448,11 +510,19 @@ pub fn train_row_clicks(
                     body: format!(
                         "Sell Train {} for {}? It returns its full price.",
                         button.train.0,
-                        money_whole(buy_cost(button.kind))
+                        money_whole(consist_cost(button.kind, button.cars))
                     ),
                     confirm: "Sell".into(),
                     action: ConfirmAction::SellTrain(button.train),
                 });
+            }
+            // No dialog: the price is on the button, and the sale that reverses
+            // it is one row away. The sim owns every refusal — at the cap, or
+            // short of the money — and says so in Town Talk.
+            TrainRowAction::AddCar => {
+                tools.queue(CommandKind::AddTrainCar(AddTrainCar {
+                    train: button.train,
+                }));
             }
         }
     }
@@ -539,7 +609,7 @@ mod tests {
 
         let rows = train_rows(
             &yard,
-            &[(&running, &loc, &cargo)],
+            &[(&running, &loc, &cargo, None)],
             &lines,
             &stations,
             &industries,
@@ -562,7 +632,13 @@ mod tests {
         assert_eq!(rows[1].id, TrainId(9));
         assert_eq!(
             row_actions(&rows[1]),
-            vec![TrainRowAction::Locate, TrainRowAction::Sell]
+            vec![
+                TrainRowAction::Locate,
+                // A transit in service can be lengthened; a train in the yard
+                // has to be placed first.
+                TrainRowAction::AddCar,
+                TrainRowAction::Sell
+            ]
         );
     }
 
@@ -596,7 +672,7 @@ mod tests {
 
         let rows = train_rows(
             &yard,
-            &[(&idle, &at_stop, &empty), (&hauling, &mid, &goods)],
+            &[(&idle, &at_stop, &empty, None), (&hauling, &mid, &goods, None)],
             &lines,
             &stations,
             &industries,
@@ -629,7 +705,7 @@ mod tests {
 
         let rows = train_rows(
             &TrainYard::default(),
-            &[(&train, &nowhere, &cargo)],
+            &[(&train, &nowhere, &cargo, None)],
             &lines,
             &stations,
             &industries,
@@ -667,6 +743,16 @@ mod tests {
 
     /// Everything `train_row_clicks` reads, plus a pressed button.
     fn clicked(action: TrainRowAction, kind: TrainKind, network: TrackNetwork) -> App {
+        clicked_on(action, kind, 1, network)
+    }
+
+    /// The same, on a row drawn for a train of `cars` cars.
+    fn clicked_on(
+        action: TrainRowAction,
+        kind: TrainKind,
+        cars: u8,
+        network: TrackNetwork,
+    ) -> App {
         let mut app = App::new();
         app.init_resource::<CommandBuffer>()
             .init_resource::<TrackToolState>()
@@ -686,6 +772,7 @@ mod tests {
                 train: TrainId(2),
                 kind,
                 action,
+                cars,
             },
         ));
         app
@@ -771,6 +858,163 @@ mod tests {
         assert!(prompt.body.is_ascii());
     }
 
+    /// A lengthened train says how long it is, and a single car says nothing —
+    /// "1 car" on every row is a column of noise, and the row a player is
+    /// looking for is the one that is *not* ordinary.
+    #[test]
+    fn a_consist_names_its_length_and_a_single_car_does_not() {
+        let (network, stations, industries, lines, _) = world();
+        let short = Train {
+            id: TrainId(1),
+            kind: TrainKind::Transit,
+        };
+        let long = Train {
+            id: TrainId(2),
+            kind: TrainKind::Transit,
+        };
+        let a = TrainLocation::at_track(track_at(&network, 3));
+        let b = TrainLocation::at_track(track_at(&network, 6));
+        let empty = TrainCargo::Empty;
+        let three = TrainConsist { cars: 3, laden: 0 };
+        let one = TrainConsist { cars: 1, laden: 0 };
+
+        let rows = train_rows(
+            &TrainYard::default(),
+            &[
+                (&short, &a, &empty, Some(&one)),
+                (&long, &b, &empty, Some(&three)),
+            ],
+            &lines,
+            &stations,
+            &industries,
+            &network,
+        );
+
+        assert_eq!(rows[0].headline(), "Transit train 1 - in service at Eastgate");
+        assert_eq!(rows[1].headline(), "Transit train 2 (3 cars) - in service");
+        assert_eq!(rows[0].cars, 1);
+        assert_eq!(rows[1].cars, 3);
+
+        // A train with no consist component at all is the single car it always
+        // was — which is every train in a world loaded from schema 5.
+        let rows = train_rows(
+            &TrainYard::default(),
+            &[(&short, &a, &empty, None)],
+            &lines,
+            &stations,
+            &industries,
+            &network,
+        );
+        assert_eq!(rows[0].cars, 1);
+        assert_eq!(rows[0].headline(), "Transit train 1 - in service at Eastgate");
+    }
+
+    /// The verb is offered where it can be used, priced where it is offered,
+    /// and never on stock the yard is still holding.
+    #[test]
+    fn the_add_car_verb_is_offered_on_transit_in_service_and_priced_on_its_button() {
+        let (network, stations, industries, lines, _) = world();
+        let transit = Train {
+            id: TrainId(1),
+            kind: TrainKind::Transit,
+        };
+        let freight = Train {
+            id: TrainId(2),
+            kind: TrainKind::Transport,
+        };
+        let a = TrainLocation::at_track(track_at(&network, 3));
+        let b = TrainLocation::at_track(track_at(&network, 6));
+        let empty = TrainCargo::Empty;
+        let mut yard = TrainYard::default();
+        yard.buy(TrainKind::Transit);
+
+        let rows = train_rows(
+            &yard,
+            &[(&transit, &a, &empty, None), (&freight, &b, &empty, None)],
+            &lines,
+            &stations,
+            &industries,
+            &network,
+        );
+
+        // Yard stock first: place it before you lengthen it.
+        assert!(rows[0].standing.is_unplaced());
+        assert_eq!(
+            row_actions(&rows[0]),
+            vec![TrainRowAction::Place, TrainRowAction::Sell]
+        );
+        // The transit in service offers it, between Find and Sell.
+        assert_eq!(
+            row_actions(&rows[1]),
+            vec![
+                TrainRowAction::Locate,
+                TrainRowAction::AddCar,
+                TrainRowAction::Sell
+            ]
+        );
+        // Freight never does — one wagon is the rule, not a cap it is under.
+        assert_eq!(
+            row_actions(&rows[2]),
+            vec![TrainRowAction::Locate, TrainRowAction::Sell]
+        );
+
+        assert_eq!(
+            TrainRowAction::AddCar.label(TrainKind::Transit),
+            "Add car $1,500",
+            "the price is on the button, not behind it"
+        );
+        // …and it is offered even at the cap, so pressing it teaches the rule
+        // rather than the button vanishing at the interesting moment.
+        let full = TrainConsist { cars: 3, laden: 0 };
+        let rows = train_rows(
+            &TrainYard::default(),
+            &[(&transit, &a, &empty, Some(&full))],
+            &lines,
+            &stations,
+            &industries,
+            &network,
+        );
+        assert!(row_actions(&rows[0]).contains(&TrainRowAction::AddCar));
+    }
+
+    /// The button spends money, so it goes through the command buffer like
+    /// every other intent — never a direct mutation.
+    #[test]
+    fn the_add_car_button_buffers_the_command_the_sim_applies() {
+        let (network, ..) = world();
+        let mut app = clicked(TrainRowAction::AddCar, TrainKind::Transit, network);
+        app.update();
+
+        let buffer = app.world().resource::<CommandBuffer>();
+        assert_eq!(
+            buffer.pending().first().map(|c| &c.kind),
+            Some(&CommandKind::AddTrainCar(rail_sim::commands::AddTrainCar {
+                train: TrainId(2)
+            })),
+            "the row asks the sim; it does not reach into the world"
+        );
+        // No dialog: the price was on the button and the sale reverses it.
+        assert!(!app.world().resource::<ConfirmDialog>().is_open());
+    }
+
+    /// Selling a consist offers the consist's price. A player who paid for two
+    /// cars and is quoted the bare engine would read a full refund as a loss.
+    #[test]
+    fn selling_a_lengthened_train_offers_what_the_whole_consist_cost() {
+        let (network, ..) = world();
+        let mut app = clicked_on(TrainRowAction::Sell, TrainKind::Transit, 3, network);
+        app.update();
+
+        let dialog = app.world().resource::<ConfirmDialog>();
+        let prompt = dialog.prompt().expect("the dialog asks first");
+        assert_eq!(
+            prompt.body,
+            "Sell Train 2 for $6,000? It returns its full price.",
+            "$3,000 of engine and two $1,500 cars"
+        );
+        assert!(prompt.body.is_ascii());
+    }
+
     /// 03 §3 — the shipped font has no glyphs beyond ASCII.
     #[test]
     fn every_string_the_window_draws_is_ascii() {
@@ -788,7 +1032,7 @@ mod tests {
         };
         let rows = train_rows(
             &yard,
-            &[(&train, &loc, &cargo)],
+            &[(&train, &loc, &cargo, None)],
             &lines,
             &stations,
             &industries,
@@ -800,7 +1044,7 @@ mod tests {
                 assert!(cargo.is_ascii(), "{cargo}");
             }
             for action in row_actions(row) {
-                assert!(action.label().is_ascii());
+                assert!(action.label(row.kind).is_ascii());
             }
         }
     }

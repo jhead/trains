@@ -20,7 +20,7 @@ use crate::track::TrackNetwork;
 
 use super::congestion::{way_round, TrainIntent, Way, YIELD_COOLDOWN_TICKS};
 use super::profile::TrainProfile;
-use super::train::{Train, TrainLocation, TrainYard};
+use super::train::{cars_of, Train, TrainConsist, TrainLocation, TrainYard};
 
 /// Movement ticks a crossing is remembered for (railhead polish / usage).
 pub const POLISH_MEMORY_TICKS: u64 = 512;
@@ -99,12 +99,12 @@ impl TileOccupancy {
 /// it, so it goes back to the yard to be placed again rather than deleted.
 fn stranded_trains(
     network: &TrackNetwork,
-    q: &Query<(Entity, &Train, &mut TrainLocation)>,
+    q: &Query<(Entity, &Train, &mut TrainLocation, Option<&TrainConsist>)>,
 ) -> Vec<(TrainId, Entity, TrainKind)> {
     let mut stranded: Vec<(TrainId, Entity, TrainKind)> = q
         .iter()
-        .filter(|(_, _, loc)| network.piece(loc.track).is_none())
-        .map(|(entity, train, _)| (train.id, entity, train.kind))
+        .filter(|(_, _, loc, _)| network.piece(loc.track).is_none())
+        .map(|(entity, train, _, _)| (train.id, entity, train.kind))
         .collect();
     stranded.sort_unstable_by_key(|(id, _, _)| id.0);
     stranded
@@ -116,7 +116,7 @@ pub fn advance_trains(
     mut occupancy: ResMut<TileOccupancy>,
     mut yard: ResMut<TrainYard>,
     mut commands: Commands,
-    mut q: Query<(Entity, &Train, &mut TrainLocation)>,
+    mut q: Query<(Entity, &Train, &mut TrainLocation, Option<&TrainConsist>)>,
 ) {
     // Before anything is moved, make sure everything *can* be moved. Recalled
     // entities are despawned through `Commands`, so they are still visible to
@@ -141,7 +141,7 @@ pub fn advance_trains(
     // each train wants next (so a standoff reads the same whoever moves first).
     let mut order: Vec<(TrainId, Entity)> = Vec::new();
     let mut intent: HashMap<TrainId, TrainIntent> = HashMap::new();
-    for (entity, train, loc) in q.iter() {
+    for (entity, train, loc, _) in q.iter() {
         if recalled.contains(&train.id) {
             continue;
         }
@@ -159,7 +159,7 @@ pub fn advance_trains(
     }
 
     for (_, entity) in order {
-        let Ok((_, train, mut loc)) = q.get_mut(entity) else {
+        let Ok((_, train, mut loc, consist)) = q.get_mut(entity) else {
             continue;
         };
         if loc.parked {
@@ -179,7 +179,10 @@ pub fn advance_trains(
         let Some(piece) = network.piece(loc.track) else {
             continue;
         };
-        let profile = TrainProfile::for_kind(train.kind);
+        // The consist is part of the train's pace, not a separate charge: a
+        // longer train crosses every tile slower, and the same slowed profile
+        // is what its dwell and its sprite interpolation read.
+        let profile = TrainProfile::for_kind(train.kind).for_consist(cars_of(consist));
         // Charge for the leg actually being travelled, not for "a tile". A
         // half-step link spans sqrt(5) tiles; billing it as one would make
         // shallow runs 2.24x faster than the geometry allows.
@@ -278,7 +281,24 @@ pub fn advance_trains(
 
 /// Grade / curve slow trains using the kind's [`TrainProfile`].
 pub fn ticks_for_piece(kind: crate::commands::TrainKind, max_grade: u8, curve: u8) -> u16 {
-    TrainProfile::for_kind(kind).ticks_for_piece(max_grade, curve)
+    ticks_for_consist_piece(kind, 1, max_grade, curve)
+}
+
+/// The same, for a train of `cars` cars.
+///
+/// The presentation interpolates a train's position against this number, so a
+/// consist that the sim moves slower and the sprite moves at single-car pace
+/// would arrive at the next tile early and snap back. One function, both
+/// callers.
+pub fn ticks_for_consist_piece(
+    kind: crate::commands::TrainKind,
+    cars: u8,
+    max_grade: u8,
+    curve: u8,
+) -> u16 {
+    TrainProfile::for_kind(kind)
+        .for_consist(cars)
+        .ticks_for_piece(max_grade, curve)
 }
 
 /// Blocker id for a waiting train, if any.

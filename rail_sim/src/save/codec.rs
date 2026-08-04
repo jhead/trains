@@ -17,7 +17,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::error::{SaveError, SaveResult};
-use super::snapshot::{WorldSnapshot, WorldSnapshotV4, MIN_READABLE_SCHEMA, SCHEMA_VERSION};
+use super::snapshot::{
+    WorldSnapshot, WorldSnapshotV4, WorldSnapshotV5, MIN_READABLE_SCHEMA, SCHEMA_VERSION,
+};
 
 /// File magic — "Rail Town SaVe".
 pub const SAVE_MAGIC: [u8; 4] = *b"RTSV";
@@ -143,14 +145,14 @@ pub fn encode_save(meta: &SaveMeta, snapshot: &WorldSnapshot) -> SaveResult<Vec<
     Ok(out)
 }
 
-/// Write a world in schema 4's envelope and shape — **test only**.
+/// Write a world in an older envelope and shape — **test only**.
 ///
-/// The v4 → v5 migration is only worth anything if it is proved against bytes
-/// laid out the way the shipped v4 build laid them out. Encoding a
-/// [`WorldSnapshotV4`] through the same bincode config the real encoder uses is
-/// how that is done without checking a binary fixture into the repo.
+/// A migration is only worth anything if it is proved against bytes laid out
+/// the way the shipped build laid them out. Encoding an old snapshot type
+/// through the same bincode config the real encoder uses is how that is done
+/// without checking a binary fixture into the repo.
 #[cfg(test)]
-pub fn encode_save_v4(meta: &SaveMeta, snapshot: &WorldSnapshotV4) -> SaveResult<Vec<u8>> {
+fn encode_save_as<T: Serialize>(version: u16, meta: &SaveMeta, snapshot: &T) -> SaveResult<Vec<u8>> {
     let header = bincode::serde::encode_to_vec(meta, config())
         .map_err(|e| SaveError::Encode(e.to_string()))?;
     let payload = bincode::serde::encode_to_vec(snapshot, config())
@@ -158,7 +160,7 @@ pub fn encode_save_v4(meta: &SaveMeta, snapshot: &WorldSnapshotV4) -> SaveResult
 
     let mut out = Vec::with_capacity(PREFIX_LEN + header.len() + payload.len() + CHECKSUM_LEN);
     out.extend_from_slice(&SAVE_MAGIC);
-    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&version.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes()); // flags
     out.extend_from_slice(&(header.len() as u32).to_le_bytes());
     out.extend_from_slice(&header);
@@ -167,6 +169,18 @@ pub fn encode_save_v4(meta: &SaveMeta, snapshot: &WorldSnapshotV4) -> SaveResult
     let checksum = crc32(&out);
     out.extend_from_slice(&checksum.to_le_bytes());
     Ok(out)
+}
+
+/// Write a world in schema 4's envelope and shape — **test only**.
+#[cfg(test)]
+pub fn encode_save_v4(meta: &SaveMeta, snapshot: &WorldSnapshotV4) -> SaveResult<Vec<u8>> {
+    encode_save_as(4, meta, snapshot)
+}
+
+/// Write a world in schema 5's envelope and shape — **test only**.
+#[cfg(test)]
+pub fn encode_save_v5(meta: &SaveMeta, snapshot: &WorldSnapshotV5) -> SaveResult<Vec<u8>> {
+    encode_save_as(5, meta, snapshot)
 }
 
 /// Validate the envelope and split it into version, header bytes, payload bytes.
@@ -244,6 +258,18 @@ pub fn decode_save(bytes: &[u8]) -> SaveResult<(SaveMeta, WorldSnapshot)> {
                 return Err(SaveError::VersionMismatch {
                     found: old.schema_version,
                     expected: 4,
+                });
+            }
+            old.upgrade()
+        }
+        5 => {
+            let (old, _) =
+                bincode::serde::decode_from_slice::<WorldSnapshotV5, _>(payload, config())
+                    .map_err(|e| SaveError::Decode(e.to_string()))?;
+            if old.schema_version != 5 {
+                return Err(SaveError::VersionMismatch {
+                    found: old.schema_version,
+                    expected: 5,
                 });
             }
             old.upgrade()

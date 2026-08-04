@@ -57,6 +57,27 @@ pub struct TrainProfile {
     pub opex_cents_per_real_min: i64,
     /// Ticks to wait at a stop after arrival before taking new work.
     pub dwell_ticks: u16,
+    /// Extra ticks per tile for **each car beyond the first**.
+    ///
+    /// The consist penalty, and one of the two seams 07 §3 left for it. A car is
+    /// weight on the drawbar: more of it is slower, and freight — which has the
+    /// worse power-to-weight of the two — pays double what transit pays.
+    pub car_tick_cost: u16,
+    /// Extra dwell ticks for **each car beyond the first**.
+    ///
+    /// The other seam. Loading a second carriage takes a second carriage's
+    /// worth of time, and the platform grade scales the whole figure
+    /// ([`StationTier::dwell_ticks`](crate::stations::StationTier::dwell_ticks))
+    /// — which is what makes a long consist want a better station.
+    pub car_dwell_ticks: u16,
+    /// Longest consist this kind will run, in cars. `1` is a single car.
+    ///
+    /// Transit stops at three because three is the deepest a single pair's
+    /// queue ever gets ([`MAX_PENDING_PER_PAIR`](crate::economy::MAX_PENDING_PER_PAIR)),
+    /// so a fourth carriage could never be filled by anything the board offers.
+    /// Transport stops at one for a reason that is about the world rather than
+    /// about the train — see [`TRANSPORT_PROFILE`].
+    pub max_cars: u8,
 }
 
 /// Transit: brisk, climbs well, cheap to run, short dwell.
@@ -72,9 +93,34 @@ pub const TRANSIT_PROFILE: TrainProfile = TrainProfile {
     max_grade: 4, // matches track [`MAX_GRADE`](crate::track::MAX_GRADE)
     opex_cents_per_real_min: 14_000,
     dwell_ticks: 4,
+    // A sixth slower per carriage, and half again as long at the platform. Both
+    // are deliberately small enough that a *filled* car wins and large enough
+    // that an *empty* one is a mistake the player can feel: a two-car transit
+    // running one load banks 6/7 of what a single car would.
+    car_tick_cost: 1,
+    car_dwell_ticks: 2,
+    max_cars: 3,
 };
 
 /// Transport: slow, poor grade tolerance, expensive, long dwell.
+///
+/// # Why freight runs one wagon
+///
+/// [`max_cars`](TrainProfile::max_cars) is `1`, and that is a statement about
+/// the *world*, not about the locomotive. A car is worth having when there is a
+/// queue for it to take, and a passenger queue is real: peep routines produce
+/// more departures for a pair than one carriage can lift, and
+/// [`drain_peep_demand`](crate::economy::drain_peep_demand) now keeps them
+/// instead of dropping them. Industries have no equivalent — an
+/// [`Industry`](crate::stations::Industry) produces and consumes a good with no
+/// stockpile behind it, so the board carries exactly one working per
+/// producer→consumer pair however long the train takes to come back. A second
+/// wagon would be a wagon that is always empty and always slowing the train
+/// down, sold at a price the player could never earn back.
+///
+/// The seam is filled in and the number is `1`. Give an industry a stock level
+/// and this becomes a two-line change: raise it, and let goods jobs stack the
+/// way passenger jobs do. See `docs/design/07-trains-and-lines.md` §3.
 pub const TRANSPORT_PROFILE: TrainProfile = TrainProfile {
     base_ticks: 10,
     grade_tick_cost: 4,
@@ -82,6 +128,11 @@ pub const TRANSPORT_PROFILE: TrainProfile = TrainProfile {
     max_grade: 1,
     opex_cents_per_real_min: 24_000,
     dwell_ticks: 12,
+    // Twice transit's drag per car and three times the loading time: freight is
+    // the kind that would be worst at running long, if it ran long.
+    car_tick_cost: 2,
+    car_dwell_ticks: 6,
+    max_cars: 1,
 };
 
 impl TrainProfile {
@@ -90,6 +141,36 @@ impl TrainProfile {
             TrainKind::Transit => TRANSIT_PROFILE,
             TrainKind::Transport => TRANSPORT_PROFILE,
         }
+    }
+
+    /// This profile as a consist of `cars` runs it.
+    ///
+    /// The whole consist model is here: **every car past the first costs time
+    /// on the road and time at the platform, and buys one more load.** Applying
+    /// it as a modified profile rather than as a parameter on every call means
+    /// pathfinding, movement, dwell and the presentation's interpolation all
+    /// read the same slowed-down train without any of them having to know that
+    /// consists exist.
+    ///
+    /// `cars` of `0` is read as `1`: a train is never less than a car, and a
+    /// zero would otherwise make an empty consist the fastest thing on the map.
+    pub fn for_consist(self, cars: u8) -> Self {
+        let extra = u16::from(cars.max(1).saturating_sub(1));
+        Self {
+            base_ticks: self
+                .base_ticks
+                .saturating_add(extra.saturating_mul(self.car_tick_cost)),
+            dwell_ticks: self
+                .dwell_ticks
+                .saturating_add(extra.saturating_mul(self.car_dwell_ticks)),
+            ..self
+        }
+    }
+
+    /// Cars this kind will run at most, never below one.
+    #[inline]
+    pub fn cap_cars(self, cars: u8) -> u8 {
+        cars.clamp(1, self.max_cars.max(1))
     }
 
     /// Ticks needed to finish the current tile given grade / curve.
@@ -263,5 +344,71 @@ mod tests {
     fn opex_and_dwell_differ() {
         assert!(TRANSPORT_PROFILE.opex_cents_per_real_min > TRANSIT_PROFILE.opex_cents_per_real_min);
         assert!(TRANSPORT_PROFILE.dwell_ticks > TRANSIT_PROFILE.dwell_ticks);
+    }
+
+    /// **The consist rule, on the profile that owns it.** A car costs road time
+    /// and platform time, in that order of magnitude — and a single car is
+    /// exactly the train the game had before consists existed.
+    #[test]
+    fn a_car_costs_road_time_and_platform_time() {
+        let one = TRANSIT_PROFILE.for_consist(1);
+        assert_eq!(one, TRANSIT_PROFILE, "one car is the profile itself");
+        // Zero cars cannot be faster than one — the clamp is what stops a
+        // default-constructed consist outrunning the railway.
+        assert_eq!(TRANSIT_PROFILE.for_consist(0), TRANSIT_PROFILE);
+
+        let two = TRANSIT_PROFILE.for_consist(2);
+        let three = TRANSIT_PROFILE.for_consist(3);
+        assert_eq!(two.ticks_for_piece(0, 0), 7, "6 + 1 tick a tile");
+        assert_eq!(three.ticks_for_piece(0, 0), 8);
+        assert_eq!(two.dwell_ticks, 6, "4 + 2 ticks at the platform");
+        assert_eq!(three.dwell_ticks, 8);
+
+        // Freight drags harder per car, which is the profile difference and not
+        // an accident of the numbers.
+        let heavy = TRANSPORT_PROFILE.for_consist(2);
+        assert_eq!(heavy.ticks_for_piece(0, 0), 12, "10 + 2 ticks a tile");
+        assert!(
+            heavy.base_ticks - TRANSPORT_PROFILE.base_ticks
+                > two.base_ticks - TRANSIT_PROFILE.base_ticks
+        );
+
+        // Grade and curve are untouched: a car is weight, not a worse driver.
+        assert_eq!(two.grade_tick_cost, TRANSIT_PROFILE.grade_tick_cost);
+        assert_eq!(two.max_grade, TRANSIT_PROFILE.max_grade);
+        assert_eq!(two.opex_cents_per_real_min, TRANSIT_PROFILE.opex_cents_per_real_min);
+    }
+
+    /// The cap is per kind, and freight's is one — see [`TRANSPORT_PROFILE`].
+    #[test]
+    fn the_consist_cap_is_a_property_of_the_kind() {
+        assert_eq!(TRANSIT_PROFILE.max_cars, 3);
+        assert_eq!(TRANSPORT_PROFILE.max_cars, 1);
+        assert_eq!(TRANSIT_PROFILE.cap_cars(9), 3);
+        assert_eq!(TRANSIT_PROFILE.cap_cars(0), 1);
+        assert_eq!(TRANSPORT_PROFILE.cap_cars(3), 1);
+        // Transit's cap and the board's queue depth are the same number on
+        // purpose: a fourth carriage could never be filled.
+        assert_eq!(
+            usize::from(TRANSIT_PROFILE.max_cars),
+            crate::economy::MAX_PENDING_PER_PAIR
+        );
+    }
+
+    /// A longer consist is slower over the same ground, on every leg shape.
+    #[test]
+    fn a_longer_consist_is_never_quicker() {
+        for (grade, curve, length_sq) in [(0, 0, 1), (1, 40, 2), (2, 90, 5)] {
+            let mut previous = 0;
+            for cars in 1..=3u8 {
+                let ticks = TRANSIT_PROFILE.for_consist(cars).ticks_for_leg(grade, curve, length_sq);
+                assert!(
+                    ticks >= previous,
+                    "{cars} cars ran a ({grade},{curve},{length_sq}) leg in {ticks} \
+                     against {previous} for one fewer"
+                );
+                previous = ticks;
+            }
+        }
     }
 }

@@ -41,6 +41,7 @@ pub enum CommandKind {
     BuyTrain(BuyTrain),
     PlaceTrain(PlaceTrain),
     SellTrain(SellTrain),
+    AddTrainCar(AddTrainCar),
     CreateLine(CreateLine),
     RemoveLine(RemoveLine),
     AssignTrainToLine(AssignTrainToLine),
@@ -103,6 +104,23 @@ pub struct PlaceTrain {
 /// it is money in the yard. Works on a placed train or one still unplaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SellTrain {
+    pub train: TrainId,
+}
+
+/// Couple one more car onto a train already in service.
+///
+/// The later-game capacity lever (07 §3): a car carries one more load and costs
+/// the train time on the road and at the platform. It applies to a **placed**
+/// train, because a consist is something a railway operates rather than
+/// something the yard stocks — and because the Trains window offers the verb
+/// only on rows that are on the map, the refusal below is only ever reached by
+/// a click racing a sale.
+///
+/// **Not wired into [`CommandHistory`](crate::CommandHistory)**, for the reason
+/// [`SellTrain`] is not: selling returns the whole consist's price
+/// ([`consist_cost`](crate::consist_cost)), so the money is its own undo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddTrainCar {
     pub train: TrainId,
 }
 

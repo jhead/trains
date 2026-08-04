@@ -28,6 +28,55 @@ pub fn buy_cost(kind: TrainKind) -> i64 {
     }
 }
 
+/// Cost to couple one more car to a transit: **$1,500** — half a train.
+///
+/// # Why half, and not less
+///
+/// A car and a second train are the two ways to move more people, and the
+/// choice between them has to be a real one at the moment the player makes it.
+/// A second train serves a **second pair**: new demand, its own route, its own
+/// flexibility, and it keeps running when the first is held. A car **deepens
+/// one pair**: it lifts the queue that is already forming at one platform, and
+/// only while that queue is more than one carriage deep — at every other moment
+/// it is weight ([`TrainProfile::for_consist`](super::TrainProfile::for_consist)).
+///
+/// Half the price of a train is what makes that trade honest. Cheaper, and the
+/// car is a reflex — a player would buy one on the first line, where the board
+/// never has two loads waiting, and simply run slower for it. Dearer, and it
+/// could never beat a second train even on a line that badly wants one. At half
+/// price the second car pays its own capital back in about the same time the
+/// second train does *given a queue*, and never at all without one, which is
+/// the state the opening beat is in.
+///
+/// See `docs/design/07-trains-and-lines.md` §3 for the measured comparison.
+pub const TRANSIT_CAR_COST_CENTS: i64 = TRANSIT_COST_CENTS / 2;
+
+/// Cost to couple one more wagon to a goods train: **$2,250**.
+///
+/// Priced by the same rule, and today unreachable: freight runs one wagon until
+/// industries carry stock (see [`TRANSPORT_PROFILE`](super::TRANSPORT_PROFILE)).
+/// It is a real number rather than a `None` so that the day the cap moves, the
+/// price is already the one this rule implies.
+pub const TRANSPORT_CAR_COST_CENTS: i64 = TRANSPORT_COST_CENTS / 2;
+
+/// What one more car costs on a train of this kind.
+pub fn car_cost(kind: TrainKind) -> i64 {
+    match kind {
+        TrainKind::Transit => TRANSIT_CAR_COST_CENTS,
+        TrainKind::Transport => TRANSPORT_CAR_COST_CENTS,
+    }
+}
+
+/// What a whole consist of `cars` cost to put together — the sale price.
+///
+/// Rolling stock is reversible in full (07 §5), and a consist is rolling stock:
+/// selling a three-car transit has to hand back the train *and* both cars, or
+/// the reversibility promise quietly stops applying to the upgrade.
+pub fn consist_cost(kind: TrainKind, cars: u8) -> i64 {
+    let extra = i64::from(cars.max(1).saturating_sub(1));
+    buy_cost(kind).saturating_add(car_cost(kind).saturating_mul(extra))
+}
+
 /// Bought trains waiting to be placed at a station.
 #[derive(Debug, Clone, Default, PartialEq, Resource, Serialize, Deserialize)]
 pub struct TrainYard {
@@ -78,6 +127,71 @@ impl TrainYard {
 pub struct Train {
     pub id: TrainId,
     pub kind: TrainKind,
+}
+
+/// How many cars a train runs, and how many of them are loaded.
+///
+/// # Why this is its own component
+///
+/// A train's composition is a separate fact from its identity, the same way its
+/// [`TrainLocation`], its [`TrainCargo`] and its [`TrainOnLine`] are — and, like
+/// `TrainOnLine`, **its absence is a true statement**: a train with no consist
+/// is a single car, which is every train the game had before this existed. That
+/// is what lets a hundred existing spawns keep saying `Train { id, kind }` and
+/// mean exactly what they meant.
+///
+/// [`Self::laden`] rides here rather than on [`TrainCargo`] on purpose. The
+/// cargo says *what working the train is on* — one origin, one destination, one
+/// commodity — and that is unchanged by carrying three carloads of it. The
+/// count of carloads is a property of the consist, and keeping it here leaves
+/// the cargo enum the exact shape it has always been.
+///
+/// The invariant, held by [`Self::load`] and [`Self::unload`]: `laden` is `0`
+/// whenever the cargo is [`TrainCargo::Empty`], and never exceeds `cars`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Component, Serialize, Deserialize)]
+pub struct TrainConsist {
+    /// Cars in the consist, including the locomotive's own. Never below 1.
+    pub cars: u8,
+    /// Loads aboard right now — all of them the same working.
+    pub laden: u8,
+}
+
+impl Default for TrainConsist {
+    fn default() -> Self {
+        Self { cars: 1, laden: 0 }
+    }
+}
+
+impl TrainConsist {
+    /// A consist of `cars` cars, empty.
+    pub fn of(cars: u8) -> Self {
+        Self {
+            cars: cars.max(1),
+            laden: 0,
+        }
+    }
+
+    /// Cars with nothing in them — how many more loads this train can take.
+    #[inline]
+    pub fn free_cars(self) -> u8 {
+        self.cars.max(1).saturating_sub(self.laden)
+    }
+
+    /// Record `loads` boarding, never past the length of the train.
+    pub fn load(&mut self, loads: u8) {
+        self.laden = self.laden.saturating_add(loads).min(self.cars.max(1));
+    }
+
+    /// Everything aboard gets off; returns what did.
+    pub fn unload(&mut self) -> u8 {
+        std::mem::take(&mut self.laden)
+    }
+}
+
+/// Cars a train is running, reading an absent consist as the single car it is.
+#[inline]
+pub fn cars_of(consist: Option<&TrainConsist>) -> u8 {
+    consist.map(|c| c.cars.max(1)).unwrap_or(1)
 }
 
 /// Position along the track graph + remaining path.
@@ -144,16 +258,28 @@ impl TrainLocation {
         self.path_index + 1 >= self.path.len()
     }
 
-    pub fn begin_dwell(&mut self, kind: TrainKind) {
-        self.dwell_remaining = TrainProfile::for_kind(kind).dwell_ticks;
+    pub fn begin_dwell(&mut self, kind: TrainKind, cars: u8) {
+        self.dwell_remaining = TrainProfile::for_kind(kind).for_consist(cars).dwell_ticks;
     }
 
     /// Dwell scaled by the platform actually stopped at — an interchange
     /// turns a train around at 60%, a halt boards at 150%. This is what makes
     /// a tier a service upgrade rather than a catchment number
     /// ([`StationTierSpec::dwell_percent`](crate::stations::StationTierSpec)).
-    pub fn begin_dwell_at(&mut self, kind: TrainKind, tier: crate::stations::StationTier) {
-        self.dwell_remaining = tier.dwell_ticks(TrainProfile::for_kind(kind).dwell_ticks);
+    ///
+    /// The consist is inside the figure the tier scales, which is where the two
+    /// systems meet: a three-car transit boards in 8 ticks at a Station, 12 at a
+    /// Halt and 5 at an Interchange. **A long train is what makes a better
+    /// platform worth paying for**, and it is a cost rather than a cap — no tier
+    /// refuses a consist, they only board them at different speeds.
+    pub fn begin_dwell_at(
+        &mut self,
+        kind: TrainKind,
+        cars: u8,
+        tier: crate::stations::StationTier,
+    ) {
+        self.dwell_remaining =
+            tier.dwell_ticks(TrainProfile::for_kind(kind).for_consist(cars).dwell_ticks);
     }
 }
 

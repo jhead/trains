@@ -12,7 +12,9 @@ use crate::stations::{
 };
 use crate::track::{TrackNetwork, GROUND_LAYER};
 use crate::trains::find_path_for_kind;
-use crate::trains::{track_for_station, Train, TrainCargo, TrainLocation, TrainOnLine};
+use crate::trains::{
+    track_for_station, Train, TrainCargo, TrainConsist, TrainLocation, TrainOnLine,
+};
 
 use super::payout::{goods_delivery_cents, haul_tiles, passenger_fare_cents};
 
@@ -69,6 +71,28 @@ pub struct JobBoard {
 const MAX_PASSENGER_JOBS: usize = 8;
 const MAX_GOODS_JOBS: usize = 4;
 const SPAWN_EVERY_TICKS: u16 = 45;
+
+/// How deep a single origin→destination queue is allowed to get.
+///
+/// # The demand a queue is made of
+///
+/// A pair used to hold **one** open job, and every further departure between
+/// the same two places was dropped on the floor — see [`drain_peep_demand`].
+/// With one carriage that cost nothing, because a train that can only take one
+/// load cannot tell a queue of one from a queue of three. With
+/// [consists](crate::TrainConsist) it is the whole difference between a second
+/// carriage that earns and a second carriage that is weight, so real departures
+/// now queue instead of vanishing.
+///
+/// **Three, and only from people.** `spawn_demand_jobs`' station-pair walk is
+/// synthetic demand — a fixed heartbeat that exists so a new line has something
+/// to carry — and letting *that* stack would mint fares out of the spawn
+/// interval. Peep departures are people who decided to travel and are standing
+/// on a platform; keeping them is bookkeeping, not generosity. Three is the
+/// deepest queue the board will hold and exactly the longest consist a transit
+/// couples ([`TRANSIT_PROFILE`](crate::TRANSIT_PROFILE)), so no carriage exists
+/// that the board can never fill.
+pub const MAX_PENDING_PER_PAIR: usize = 3;
 
 /// The board only carries work a train could actually take.
 ///
@@ -300,13 +324,21 @@ pub fn drain_peep_demand(
         if !passenger_route_exists(&network, &stations, from, to) {
             continue;
         }
-        let already = board.jobs.iter().any(|j| {
-            matches!(
-                &j.kind,
-                JobKind::Passenger { from: f, to: t } if *f == from && *t == to
-            )
-        });
-        if already {
+        // A queue, up to [`MAX_PENDING_PER_PAIR`] deep. This used to drop any
+        // departure for a pair that already had one open, which threw away the
+        // only demand signal in the game that says *more people are waiting
+        // than one carriage can lift*.
+        let queued = board
+            .jobs
+            .iter()
+            .filter(|j| {
+                matches!(
+                    &j.kind,
+                    JobKind::Passenger { from: f, to: t } if *f == from && *t == to
+                )
+            })
+            .count();
+        if queued >= MAX_PENDING_PER_PAIR {
             continue;
         }
         let reward_cents = passenger_reward(&stations, from, to);
@@ -327,13 +359,17 @@ pub fn drain_peep_demand(
 /// fresh from the same distance rule so the board never advertises a fare the
 /// delivery will not honour.
 ///
-/// Returns `true` when something was put back. An empty train, or one carrying
-/// a run already re-posted, adds nothing.
+/// `loads` is how many carloads of it there were — a three-car transit sold
+/// mid-run puts three runs back, because three carriages of people were on it.
+///
+/// Returns `true` when something was put back. An empty train, or one whose
+/// queue is already at [`MAX_PENDING_PER_PAIR`], adds nothing.
 pub fn requeue_cargo(
     board: &mut JobBoard,
     stations: &StationRegistry,
     industries: &IndustryRegistry,
     cargo: &TrainCargo,
+    loads: u8,
 ) -> bool {
     let job = match cargo {
         TrainCargo::Empty => return false,
@@ -353,11 +389,35 @@ pub fn requeue_cargo(
             reward_cents: goods_reward(industries, *from, *to),
         },
     };
-    if board.jobs.iter().any(|j| j.kind == job.kind) {
-        return false;
+    let mut queued = board.jobs.iter().filter(|j| j.kind == job.kind).count();
+    let mut put_back = false;
+    for _ in 0..loads.max(1) {
+        if queued >= MAX_PENDING_PER_PAIR {
+            break;
+        }
+        board.jobs.push(job.clone());
+        queued += 1;
+        put_back = true;
     }
-    board.jobs.push(job);
-    true
+    put_back
+}
+
+/// Take up to `extra` further copies of `kind` off the board.
+///
+/// The board holds a queue for a pair, and a consist lifts as much of it as it
+/// has cars for. Every entry with the same [`JobKind`] is the same working
+/// between the same two places, so the train's route is already right — this is
+/// only how many carriages of it are filled.
+fn take_extra_loads(board: &mut JobBoard, kind: &JobKind, extra: u8) -> u8 {
+    let mut taken = 0;
+    while taken < extra {
+        let Some(idx) = board.jobs.iter().position(|j| j.kind == *kind) else {
+            break;
+        };
+        board.jobs.remove(idx);
+        taken = taken.saturating_add(1);
+    }
+    taken
 }
 
 fn refresh_waiting(board: &JobBoard, stations: &StationRegistry, service: &mut StationService) {
@@ -375,6 +435,20 @@ fn refresh_waiting(board: &JobBoard, stations: &StationRegistry, service: &mut S
 ///
 /// Trains on a line prefer jobs whose endpoints lie on that line; otherwise they
 /// shuttle to the next stop. Free-roam trains take any compatible job.
+///
+/// # Boarding fills the train, not a car
+///
+/// A train takes one working — one origin, one destination — and then fills as
+/// many of its cars as the queue for that pair can supply
+/// ([`take_extra_loads`]). What is left stays on the board for whatever calls
+/// next, so a car nobody is waiting for earns nothing and a queue three deep is
+/// cleared in one call by a train long enough to do it. **That is the whole
+/// capacity model**, and it is why a second carriage is worthless on a quiet
+/// line and worth its price on a busy one.
+// The query is a five-tuple with two optional components in it, which is what a
+// train *is* — identity, position, load, assignment, composition. Naming a type
+// alias for it would move the list somewhere the reader has to go and find.
+#[allow(clippy::type_complexity)]
 pub fn assign_jobs(
     mut board: ResMut<JobBoard>,
     stations: Res<StationRegistry>,
@@ -387,12 +461,16 @@ pub fn assign_jobs(
         &mut TrainLocation,
         &mut TrainCargo,
         Option<&mut TrainOnLine>,
+        Option<&mut TrainConsist>,
     )>,
 ) {
-    for (train, mut loc, mut cargo, on_line) in q.iter_mut() {
+    for (train, mut loc, mut cargo, on_line, mut consist) in q.iter_mut() {
         if loc.parked || loc.dwell_remaining > 0 || !cargo.is_empty() || !loc.at_destination() {
             continue;
         }
+        // An empty train has every car free; a train with no consist component
+        // is the single car it always was.
+        let cars = consist.as_ref().map(|c| c.cars.max(1)).unwrap_or(1);
 
         // Line-assigned: prefer on-line jobs, else shuttle.
         if let Some(mut on) = on_line {
@@ -403,7 +481,7 @@ pub fn assign_jobs(
             // that leaves a platform has called there, and 06 §5 counts that as
             // service whether or not anybody was riding to it.
             let calling_at = station_at_track(&network, &stations, loc.track);
-            if try_assign_line_job(
+            let loads = try_assign_line_job(
                 &mut board,
                 &stations,
                 &industries,
@@ -412,7 +490,12 @@ pub fn assign_jobs(
                 &mut loc,
                 &mut cargo,
                 line,
-            ) {
+                cars,
+            );
+            if loads > 0 {
+                if let Some(c) = consist.as_mut() {
+                    c.load(loads);
+                }
                 if let Some(here) = calling_at {
                     service.record_call(here);
                 }
@@ -466,43 +549,44 @@ pub fn assign_jobs(
         };
         let job = board.jobs.remove(idx);
 
-        match job.kind {
-            JobKind::Passenger { from, to } => {
-                if !take_passenger_job(
-                    &mut board,
-                    &stations,
-                    &network,
-                    train,
-                    &mut loc,
-                    &mut cargo,
-                    from,
-                    to,
-                    job.reward_cents,
-                ) {
-                    continue;
-                }
-            }
-            JobKind::Goods { kind, from, to } => {
-                if !take_goods_job(
-                    &mut board,
-                    &stations,
-                    &industries,
-                    &network,
-                    train,
-                    &mut loc,
-                    &mut cargo,
-                    kind,
-                    from,
-                    to,
-                    job.reward_cents,
-                ) {
-                    continue;
-                }
+        let loads = match job.kind {
+            JobKind::Passenger { from, to } => take_passenger_job(
+                &mut board,
+                &stations,
+                &network,
+                train,
+                &mut loc,
+                &mut cargo,
+                from,
+                to,
+                job.reward_cents,
+                cars,
+            ),
+            JobKind::Goods { kind, from, to } => take_goods_job(
+                &mut board,
+                &stations,
+                &industries,
+                &network,
+                train,
+                &mut loc,
+                &mut cargo,
+                kind,
+                from,
+                to,
+                job.reward_cents,
+                cars,
+            ),
+        };
+        if loads > 0 {
+            if let Some(c) = consist.as_mut() {
+                c.load(loads);
             }
         }
     }
 }
 
+/// Loads boarded — `0` when the line had no work this train could take.
+#[allow(clippy::too_many_arguments)]
 fn try_assign_line_job(
     board: &mut JobBoard,
     stations: &StationRegistry,
@@ -512,7 +596,8 @@ fn try_assign_line_job(
     loc: &mut TrainLocation,
     cargo: &mut TrainCargo,
     line: &crate::lines::Line,
-) -> bool {
+    cars: u8,
+) -> u8 {
     match train.kind {
         TrainKind::Transit => {
             let idx = board.jobs.iter().position(|j| match j.kind {
@@ -524,7 +609,7 @@ fn try_assign_line_job(
                 _ => false,
             });
             let Some(idx) = idx else {
-                return false;
+                return 0;
             };
             let job = board.jobs.remove(idx);
             match job.kind {
@@ -538,8 +623,9 @@ fn try_assign_line_job(
                     from,
                     to,
                     job.reward_cents,
+                    cars,
                 ),
-                _ => false,
+                _ => 0,
             }
         }
         TrainKind::Transport => {
@@ -553,7 +639,7 @@ fn try_assign_line_job(
                 _ => false,
             });
             let Some(idx) = idx else {
-                return false;
+                return 0;
             };
             let job = board.jobs.remove(idx);
             match job.kind {
@@ -569,13 +655,19 @@ fn try_assign_line_job(
                     from,
                     to,
                     job.reward_cents,
+                    cars,
                 ),
-                _ => false,
+                _ => 0,
             }
         }
     }
 }
 
+/// Board a passenger working, filling as many cars as the queue allows.
+///
+/// Returns the loads aboard, or `0` when the run could not be taken at all —
+/// in which case the job has already been put back exactly as it was.
+#[allow(clippy::too_many_arguments)]
 fn take_passenger_job(
     board: &mut JobBoard,
     stations: &StationRegistry,
@@ -586,20 +678,21 @@ fn take_passenger_job(
     from: StationId,
     to: StationId,
     reward_cents: i64,
-) -> bool {
+    cars: u8,
+) -> u8 {
     let Some(leg) = path_stations(network, stations, train.kind, from, to) else {
         board.jobs.push(Job {
             kind: JobKind::Passenger { from, to },
             reward_cents,
         });
-        return false;
+        return 0;
     };
     let Some(from_track) = station_track(network, stations, from) else {
         board.jobs.push(Job {
             kind: JobKind::Passenger { from, to },
             reward_cents,
         });
-        return false;
+        return 0;
     };
     let full = if loc.track == from_track {
         leg
@@ -609,13 +702,18 @@ fn take_passenger_job(
                 kind: JobKind::Passenger { from, to },
                 reward_cents,
             });
-            return false;
+            return 0;
         };
         join_paths(to_from, leg)
     };
     loc.set_path(full);
     *cargo = TrainCargo::Passengers { from, to };
-    true
+    // The rest of the queue for this pair, up to the length of the train.
+    1 + take_extra_loads(
+        board,
+        &JobKind::Passenger { from, to },
+        cars.max(1).saturating_sub(1),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -631,20 +729,21 @@ fn take_goods_job(
     from: IndustryId,
     to: IndustryId,
     reward_cents: i64,
-) -> bool {
+    cars: u8,
+) -> u8 {
     let Some(leg) = path_industries(network, stations, industries, train.kind, from, to) else {
         board.jobs.push(Job {
             kind: JobKind::Goods { kind, from, to },
             reward_cents,
         });
-        return false;
+        return 0;
     };
     let Some(from_track) = industry_track(network, stations, industries, from) else {
         board.jobs.push(Job {
             kind: JobKind::Goods { kind, from, to },
             reward_cents,
         });
-        return false;
+        return 0;
     };
     let full = if loc.track == from_track {
         leg
@@ -654,13 +753,20 @@ fn take_goods_job(
                 kind: JobKind::Goods { kind, from, to },
                 reward_cents,
             });
-            return false;
+            return 0;
         };
         join_paths(to_from, leg)
     };
     loc.set_path(full);
     *cargo = TrainCargo::Goods { kind, from, to };
-    true
+    // Freight runs one wagon today, so this asks for nothing extra — but it is
+    // the same call the passenger side makes, so the day an industry carries
+    // stock the wagons fill without a second code path.
+    1 + take_extra_loads(
+        board,
+        &JobKind::Goods { kind, from, to },
+        cars.max(1).saturating_sub(1),
+    )
 }
 
 fn join_paths(mut a: Vec<TrackId>, b: Vec<TrackId>) -> Vec<TrackId> {
@@ -907,10 +1013,51 @@ mod tests {
             }
         }
 
+        /// The same, as a train of `cars` cars.
+        fn spawn_consist(&mut self, kind: TrainKind, at: TrackId, cars: u8) {
+            self.app.world_mut().spawn((
+                Train {
+                    id: TrainId(1),
+                    kind,
+                },
+                TrainLocation::at_track(at),
+                TrainCargo::Empty,
+                TrainConsist::of(cars),
+            ));
+        }
+
         fn location(&mut self) -> TrainLocation {
             let mut q = self.app.world_mut().query::<&TrainLocation>();
             q.iter(self.app.world()).next().expect("a train").clone()
         }
+
+        fn consist(&mut self) -> TrainConsist {
+            let mut q = self.app.world_mut().query::<&TrainConsist>();
+            *q.iter(self.app.world()).next().expect("a consist")
+        }
+
+        fn board_len(&self) -> usize {
+            self.app.world().resource::<JobBoard>().jobs.len()
+        }
+    }
+
+    /// Put `count` copies of one passenger working on the board.
+    fn queue_pair(sim: &mut Sim, from: StationId, to: StationId, count: usize) {
+        let mut board = sim.app.world_mut().resource_mut::<JobBoard>();
+        for _ in 0..count {
+            board.jobs.push(Job {
+                kind: JobKind::Passenger { from, to },
+                reward_cents: passenger_fare_cents(6),
+            });
+        }
+    }
+
+    /// Two stops on the straight line, six tiles apart.
+    fn two_stops() -> StationRegistry {
+        let mut stations = StationRegistry::new();
+        stations.insert("Eastgate", TileCoord { x: 3, y: 8 }, GROUND_LAYER);
+        stations.insert("Westbrook", TileCoord { x: 9, y: 8 }, GROUND_LAYER);
+        stations
     }
 
     fn railhead(network: &TrackNetwork, x: i32) -> TrackId {
@@ -1062,6 +1209,296 @@ mod tests {
             sim.app.world().resource::<JobBoard>().jobs.is_empty(),
             "the job was taken"
         );
+    }
+
+    // ─ Consists ────────────────────────────────────────────
+
+    /// **The capacity claim, at the platform.** A three-car train clears a
+    /// three-deep queue in one call; a single car takes one and leaves the rest
+    /// standing, exactly as it always did.
+    #[test]
+    fn a_consist_boards_one_load_per_car_and_leaves_the_rest_on_the_board() {
+        let network = line_world();
+        let stations = two_stops();
+        let (east, west) = (StationId(1), StationId(2));
+        let start = railhead(&network, 3);
+
+        let mut sim = Sim::new(
+            network,
+            stations,
+            IndustryRegistry::new(),
+            LineRegistry::new(),
+        );
+        queue_pair(&mut sim, east, west, 3);
+        sim.spawn_consist(TrainKind::Transit, start, 3);
+        sim.app.update();
+
+        assert_eq!(
+            sim.consist(),
+            TrainConsist { cars: 3, laden: 3 },
+            "three carriages of a three-deep queue"
+        );
+        assert_eq!(sim.board_len(), 0, "the platform is cleared");
+
+        // One car, same queue: one load, and two people still waiting.
+        let network = line_world();
+        let start = railhead(&network, 3);
+        let mut sim = Sim::new(
+            network,
+            two_stops(),
+            IndustryRegistry::new(),
+            LineRegistry::new(),
+        );
+        queue_pair(&mut sim, east, west, 3);
+        sim.spawn_consist(TrainKind::Transit, start, 1);
+        sim.app.update();
+        assert_eq!(sim.consist(), TrainConsist { cars: 1, laden: 1 });
+        assert_eq!(sim.board_len(), 2, "the rest wait for the next train");
+    }
+
+    /// **The trap, made real.** A car with no queue behind it carries nothing —
+    /// it is weight the train drags round for free, which is why buying one on
+    /// a quiet line is a mistake and buying one on a busy line is not.
+    #[test]
+    fn a_car_with_no_queue_behind_it_boards_nothing() {
+        let network = line_world();
+        let (east, west) = (StationId(1), StationId(2));
+        let start = railhead(&network, 3);
+        let mut sim = Sim::new(
+            network,
+            two_stops(),
+            IndustryRegistry::new(),
+            LineRegistry::new(),
+        );
+        queue_pair(&mut sim, east, west, 1);
+        sim.spawn_consist(TrainKind::Transit, start, 3);
+        sim.app.update();
+
+        assert_eq!(
+            sim.consist(),
+            TrainConsist { cars: 3, laden: 1 },
+            "one fare, three carriages: two of them are dead weight"
+        );
+    }
+
+    /// A consist only ever carries **one working**. Two carloads for different
+    /// destinations would be two routes, and a train has one path.
+    #[test]
+    fn a_consist_takes_one_working_not_a_carriage_for_each_destination() {
+        let network = line_world();
+        let mut stations = two_stops();
+        let north = stations.insert("Northgate", TileCoord { x: 15, y: 8 }, GROUND_LAYER);
+        let (east, west) = (StationId(1), StationId(2));
+        let start = railhead(&network, 3);
+
+        let mut sim = Sim::new(
+            network,
+            stations,
+            IndustryRegistry::new(),
+            LineRegistry::new(),
+        );
+        queue_pair(&mut sim, east, west, 1);
+        queue_pair(&mut sim, east, north, 1);
+        sim.spawn_consist(TrainKind::Transit, start, 3);
+        sim.app.update();
+
+        assert_eq!(
+            sim.consist().laden,
+            1,
+            "the other working is somebody else's run"
+        );
+        assert_eq!(sim.board_len(), 1, "and it is still posted");
+    }
+
+    /// Freight runs one wagon, so a goods train boards one load however deep
+    /// the works' queue somehow got. The boarding code is shared, and this is
+    /// what stops the profile cap being the only thing holding it.
+    #[test]
+    fn a_goods_train_boards_one_load() {
+        let network = line_world();
+        let mut industries = IndustryRegistry::new();
+        let saw = industries.insert_tier(
+            "Pine Sawmill",
+            TileCoord { x: 4, y: 8 },
+            IndustryTier::Yard,
+            Some(GoodKind::Lumber),
+            None,
+        );
+        let mill = industries.insert_tier(
+            "Harbor Mill",
+            TileCoord { x: 14, y: 8 },
+            IndustryTier::Yard,
+            None,
+            Some(GoodKind::Lumber),
+        );
+        let start = railhead(&network, 4);
+
+        let mut sim = Sim::new(
+            network,
+            StationRegistry::new(),
+            industries,
+            LineRegistry::new(),
+        );
+        {
+            let mut board = sim.app.world_mut().resource_mut::<JobBoard>();
+            for _ in 0..2 {
+                board.jobs.push(Job {
+                    kind: JobKind::Goods {
+                        kind: GoodKind::Lumber,
+                        from: saw,
+                        to: mill,
+                    },
+                    reward_cents: GOODS_DELIVERY_CENTS,
+                });
+            }
+        }
+        sim.spawn_consist(TrainKind::Transport, start, 1);
+        sim.app.update();
+
+        assert_eq!(sim.consist().laden, 1);
+        assert_eq!(sim.board_len(), 1);
+    }
+
+    /// **Where a queue comes from.** A departure for a pair that already has one
+    /// posted used to be dropped on the floor; the second and third now wait
+    /// their turn instead, and the fourth is still dropped.
+    ///
+    /// The demand arrives a tick at a time because
+    /// [`DistrictFlow::request_trip`](crate::peeps::DistrictFlow::request_trip)
+    /// dedupes its own queue — a pair that keeps producing travellers builds a
+    /// queue *over time*, which is precisely the signal a second carriage is
+    /// meant to answer.
+    #[test]
+    fn peep_departures_queue_up_to_three_deep_and_no_further() {
+        let network = line_world();
+        let stations = two_stops();
+        let (east, west) = (StationId(1), StationId(2));
+
+        let mut app = App::new();
+        app.init_resource::<JobBoard>()
+            .init_resource::<DistrictFlow>()
+            .insert_resource(network)
+            .insert_resource(stations)
+            .add_systems(Update, drain_peep_demand);
+
+        let mut depths = Vec::new();
+        for _ in 0..6 {
+            app.world_mut()
+                .resource_mut::<DistrictFlow>()
+                .request_trip(east, west);
+            app.update();
+            depths.push(app.world().resource::<JobBoard>().jobs.len());
+        }
+
+        assert_eq!(
+            depths,
+            vec![1, 2, 3, 3, 3, 3],
+            "the queue should deepen to the cap and stop"
+        );
+        let board = app.world().resource::<JobBoard>();
+        assert!(board.jobs.iter().all(|j| j.kind
+            == JobKind::Passenger {
+                from: east,
+                to: west
+            }));
+        assert_eq!(board.jobs.len(), MAX_PENDING_PER_PAIR);
+    }
+
+    /// The station-pair walk is a heartbeat, not a crowd: it posts **one** job
+    /// per pair however often it fires. Letting synthetic demand stack would
+    /// mint fares out of the spawn interval.
+    #[test]
+    fn the_pair_walk_still_posts_one_job_per_pair() {
+        let network = line_world();
+        let stations = two_stops();
+
+        let mut app = App::new();
+        app.init_resource::<JobBoard>()
+            .init_resource::<StationService>()
+            .insert_resource(network)
+            .insert_resource(stations)
+            .insert_resource(IndustryRegistry::new())
+            .add_systems(Update, spawn_demand_jobs);
+
+        // Long enough for many spawn waves.
+        for _ in 0..(SPAWN_EVERY_TICKS as u32 * 6) {
+            app.world_mut().resource_mut::<StationService>().tick += 1;
+            app.update();
+        }
+
+        let board = app.world().resource::<JobBoard>();
+        for job in &board.jobs {
+            let same = board.jobs.iter().filter(|j| j.kind == job.kind).count();
+            assert_eq!(same, 1, "the walk stacked a pair: {:?}", board.jobs);
+        }
+    }
+
+    /// Selling a loaded consist puts **every** carload back, not one of them.
+    #[test]
+    fn requeueing_a_consist_puts_back_a_run_per_loaded_car() {
+        let stations = two_stops();
+        let (east, west) = (StationId(1), StationId(2));
+        let mut board = JobBoard::default();
+        let cargo = TrainCargo::Passengers {
+            from: east,
+            to: west,
+        };
+
+        assert!(requeue_cargo(
+            &mut board,
+            &stations,
+            &IndustryRegistry::new(),
+            &cargo,
+            3
+        ));
+        assert_eq!(board.jobs.len(), 3, "three carriages of people, three runs");
+
+        // …and it never overfills the queue past the cap.
+        assert!(!requeue_cargo(
+            &mut board,
+            &stations,
+            &IndustryRegistry::new(),
+            &cargo,
+            2
+        ));
+        assert_eq!(board.jobs.len(), MAX_PENDING_PER_PAIR);
+    }
+
+    /// Determinism: the same board and the same trains must board the same way
+    /// every run. Boarding walks a `Vec` and the consist is read per entity, so
+    /// there is no map iteration in the path — this is the guard that keeps it
+    /// that way.
+    #[test]
+    fn boarding_a_queue_is_deterministic_across_runs() {
+        let outcome = || {
+            let network = line_world();
+            let stations = two_stops();
+            let (east, west) = (StationId(1), StationId(2));
+            let start = railhead(&network, 3);
+            let mut sim = Sim::new(
+                network,
+                stations,
+                IndustryRegistry::new(),
+                LineRegistry::new(),
+            );
+            queue_pair(&mut sim, east, west, 3);
+            queue_pair(&mut sim, west, east, 2);
+            sim.spawn_consist(TrainKind::Transit, start, 2);
+            sim.app.update();
+            let board: Vec<JobKind> = sim
+                .app
+                .world()
+                .resource::<JobBoard>()
+                .jobs
+                .iter()
+                .map(|j| j.kind.clone())
+                .collect();
+            (sim.consist(), sim.location().path, board)
+        };
+        let first = outcome();
+        for _ in 0..4 {
+            assert_eq!(outcome(), first, "the same railway boarded differently");
+        }
     }
 
     /// Without a platform, a line run straight into the works still loads.

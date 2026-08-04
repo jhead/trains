@@ -981,7 +981,7 @@ fn a_schema_4_save_still_loads() {
     use super::snapshot::{MIN_READABLE_SCHEMA, WorldSnapshotV4};
 
     assert_eq!(MIN_READABLE_SCHEMA, 4);
-    assert_eq!(SCHEMA_VERSION, 5);
+    assert_eq!(SCHEMA_VERSION, 6);
 
     let world = lived_in_world();
     let old = WorldSnapshotV4::capture(&world);
@@ -1005,6 +1005,16 @@ fn a_schema_4_save_still_loads() {
     assert_eq!(loaded.peeps, now.peeps);
     assert_eq!(loaded.track, now.track);
     assert_eq!(loaded.trains, now.trains);
+    // …including its rolling stock, which was one car per train and comes
+    // back saying so rather than saying nothing.
+    for train in &loaded.trains.placed {
+        assert_eq!(train.consist.cars, 1, "a v4 train ran one car");
+        assert_eq!(
+            train.consist.laden,
+            u8::from(!train.cargo.is_empty()),
+            "and that car was carrying whatever the cargo says it was"
+        );
+    }
     assert_eq!(loaded.lines, now.lines);
     assert_eq!(loaded.economy, now.economy);
     assert_eq!(loaded.goals, now.goals);
@@ -1026,13 +1036,127 @@ fn a_schema_4_save_still_loads() {
     assert!(report.is_clean(), "restore warnings: {:?}", report.warnings);
     assert_eq!(fresh.resource::<PathWear>().worn_count(), 0);
 
-    // Saved again, it is a v5 world with a wear section of its own.
+    // Saved again, it is a current world with a wear section of its own.
     let resaved = WorldSnapshot::capture(&fresh);
     assert_eq!(resaved.schema_version, SCHEMA_VERSION);
     let bytes = encode_save(&SaveMeta::from_snapshot(&resaved, "Migrated"), &resaved)
         .expect("encode");
     assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), SCHEMA_VERSION);
     assert!(decode_save(&bytes).is_ok());
+}
+
+/// **The consist migration**, from the schema that shipped immediately before
+/// it.
+///
+/// Schema 6 added a field *inside* the trains section, which is the kind of
+/// change [`WorldSnapshotV4`]'s own note said would end the mirror-the-top-level
+/// shortcut. This is the proof that the frozen [`TrainsSnapshotV5`] reads real
+/// v5 bytes — encoded here through the same bincode config the shipped v5
+/// encoder used — and that a world which never had consists comes back as one
+/// where every train runs exactly the single car it was running.
+#[test]
+fn a_schema_5_save_still_loads_and_its_trains_run_one_car() {
+    use super::codec::encode_save_v5;
+    use super::snapshot::WorldSnapshotV5;
+    use crate::trains::TrainConsist;
+
+    let world = lived_in_world();
+    let old = WorldSnapshotV5::capture(&world);
+    assert_eq!(old.schema_version, 5);
+    assert_eq!(old.trains.placed.len(), 2, "the fixture has two trains");
+
+    let meta = SaveMeta::from_snapshot(&WorldSnapshot::capture(&world), "A v5 world");
+    let bytes = encode_save_v5(&meta, &old).expect("encode v5");
+    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 5);
+
+    let (read_meta, loaded) = decode_save(&bytes).expect("a v5 save must still open");
+    assert_eq!(read_meta.label, "A v5 world");
+    assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+
+    // v5 carried the wear map, so unlike v4 this migration keeps it.
+    let now = WorldSnapshot::capture(&world);
+    assert_eq!(loaded.paths, now.paths, "v5 already knew about desire paths");
+    assert_eq!(loaded.stations, now.stations);
+    assert_eq!(loaded.economy, now.economy);
+    assert_eq!(loaded.trains, now.trains);
+
+    // Every train is one car, laden iff it was carrying something.
+    let laden: Vec<TrainConsist> = loaded.trains.placed.iter().map(|t| t.consist).collect();
+    assert_eq!(
+        laden,
+        vec![
+            TrainConsist { cars: 1, laden: 1 },
+            TrainConsist { cars: 1, laden: 1 }
+        ],
+        "both fixture trains were loaded, in one car each"
+    );
+
+    // It restores into a playable world, and the components are really there.
+    let mut fresh = World::new();
+    let report = loaded.restore(&mut fresh);
+    assert!(report.is_clean(), "restore warnings: {:?}", report.warnings);
+    let mut query = fresh
+        .try_query::<&TrainConsist>()
+        .expect("consists registered by the restore");
+    assert_eq!(query.iter(&fresh).count(), 2);
+
+    // Saved again it is schema 6, and it round-trips as one.
+    let resaved = WorldSnapshot::capture(&fresh);
+    assert_eq!(resaved.schema_version, SCHEMA_VERSION);
+    let bytes = encode_save(&SaveMeta::from_snapshot(&resaved, "Migrated"), &resaved)
+        .expect("encode");
+    let (_, again) = decode_save(&bytes).expect("decode");
+    assert_eq!(again.trains, resaved.trains);
+}
+
+/// A consist survives the round trip with the length the player paid for.
+///
+/// The migration above proves an old world is read *as* one car; this proves a
+/// new one is not quietly flattened *to* one. Both halves are needed — a save
+/// that always writes `cars: 1` would pass the migration test perfectly.
+#[test]
+fn a_multi_car_consist_round_trips() {
+    use crate::trains::TrainConsist;
+
+    let mut world = lived_in_world();
+    let entity = world
+        .try_query::<(Entity, &Train)>()
+        .expect("trains registered")
+        .iter(&world)
+        .find(|(_, t)| t.kind == TrainKind::Transit)
+        .map(|(e, _)| e)
+        .expect("a transit");
+    world
+        .entity_mut(entity)
+        .insert(TrainConsist { cars: 3, laden: 2 });
+
+    let snapshot = WorldSnapshot::capture(&world);
+    let three = snapshot
+        .trains
+        .placed
+        .iter()
+        .find(|t| t.train.kind == TrainKind::Transit)
+        .expect("the transit");
+    assert_eq!(three.consist, TrainConsist { cars: 3, laden: 2 });
+
+    let bytes = encode_save(&SaveMeta::from_snapshot(&snapshot, "Three cars"), &snapshot)
+        .expect("encode");
+    let (_, loaded) = decode_save(&bytes).expect("decode");
+    assert_eq!(loaded.trains, snapshot.trains, "the consist crossed the wire");
+
+    let mut fresh = World::new();
+    loaded.restore(&mut fresh);
+    let mut query = fresh
+        .try_query::<(&Train, &TrainConsist)>()
+        .expect("consists registered");
+    let restored: Vec<(TrainKind, u8, u8)> = query
+        .iter(&fresh)
+        .map(|(t, c)| (t.kind, c.cars, c.laden))
+        .collect();
+    assert!(
+        restored.contains(&(TrainKind::Transit, 3, 2)),
+        "the three-car transit came back as {restored:?}"
+    );
 }
 
 #[test]

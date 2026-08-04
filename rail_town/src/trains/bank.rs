@@ -75,6 +75,27 @@ const CENTER: i32 = (CELL / 2) as i32;
 const BODY_LEN: f32 = 18.0;
 /// Body width across the rail, in texels.
 const BODY_WID: f32 = 8.0;
+/// A trailing car is shorter than the engine that pulls it, so a consist reads
+/// as *one engine and its train* rather than as a row of identical blocks.
+const CAR_LEN: f32 = 13.0;
+
+/// Which vehicle in a consist a cell draws.
+///
+/// 07 §5 wants a train to be *"composed of a locomotive and cars, with the
+/// length visible in the world"*. Length alone is not composition: three
+/// identical bodies in a line read as three trains queueing, which is a state
+/// this game genuinely has and must not be confused with. So the leading
+/// vehicle keeps its headlamp and its full length, and a car is a shorter body
+/// with no lamp — the same hue, so the pair still reads as one train of one
+/// kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainPart {
+    /// The engine, at the head of the consist.
+    Loco,
+    /// A trailing carriage or wagon.
+    Car,
+}
+
 /// Sub-texel step when walking the body, so a body at 26.57° leaves no holes.
 const WALK_STEP: f32 = 0.5;
 
@@ -153,9 +174,10 @@ pub fn facing_entry(previous: Option<usize>, dir: usize, next: Option<usize>, t:
 /// cost one cell.
 #[derive(Default)]
 pub struct TrainBank {
-    /// Keyed on `(kind index, entry)`. `TrainKind` lives in `rail_sim` and is
-    /// not `Hash`, and presentation does not get to change sim types.
-    cache: HashMap<(u8, usize), Handle<Image>>,
+    /// Keyed on `(kind index, part index, entry)`. `TrainKind` lives in
+    /// `rail_sim` and is not `Hash`, and presentation does not get to change sim
+    /// types.
+    cache: HashMap<(u8, u8, usize), Handle<Image>>,
 }
 
 /// Cache key half for a kind.
@@ -167,19 +189,38 @@ fn kind_index(kind: TrainKind) -> u8 {
     }
 }
 
+#[inline]
+fn part_index(part: TrainPart) -> u8 {
+    match part {
+        TrainPart::Loco => 0,
+        TrainPart::Car => 1,
+    }
+}
+
 impl TrainBank {
+    /// The leading vehicle's cell — what a single-car train has always drawn.
     pub fn get(
         &mut self,
         images: &mut Assets<Image>,
         kind: TrainKind,
         entry: usize,
     ) -> Handle<Image> {
+        self.get_part(images, kind, TrainPart::Loco, entry)
+    }
+
+    pub fn get_part(
+        &mut self,
+        images: &mut Assets<Image>,
+        kind: TrainKind,
+        part: TrainPart,
+        entry: usize,
+    ) -> Handle<Image> {
         let entry = entry % BANK_ENTRIES;
-        let key = (kind_index(kind), entry);
+        let key = (kind_index(kind), part_index(part), entry);
         if let Some(handle) = self.cache.get(&key) {
             return handle.clone();
         }
-        let handle = images.add(cell_image(paint_facing(kind, entry)));
+        let handle = images.add(cell_image(paint_facing(kind, part, entry)));
         self.cache.insert(key, handle.clone());
         handle
     }
@@ -267,7 +308,7 @@ fn ramp(kind: TrainKind) -> [Color; 3] {
 
 /// Paint one facing: the body walked along the entry's bearing, in its own
 /// axes, one texel at a time.
-fn paint_facing(kind: TrainKind, entry: usize) -> Canvas {
+fn paint_facing(kind: TrainKind, part: TrainPart, entry: usize) -> Canvas {
     let mut canvas = Canvas::new();
     let theta = bank_bearing_deg(entry).to_radians();
     // Bearings run clockwise from north, so north is +y and east is +x.
@@ -275,7 +316,8 @@ fn paint_facing(kind: TrainKind, entry: usize) -> Canvas {
     let across = Vec2::new(along.y, -along.x);
 
     let [dark, mid, light] = ramp(kind);
-    let half_len = BODY_LEN * 0.5;
+    let leading = part == TrainPart::Loco;
+    let half_len = if leading { BODY_LEN } else { CAR_LEN } * 0.5;
     let half_wid = BODY_WID * 0.5;
 
     let mut t = -half_len;
@@ -285,11 +327,13 @@ fn paint_facing(kind: TrainKind, entry: usize) -> Canvas {
             let color = if t.abs() > half_len - 1.0 || s.abs() > half_wid - 1.0 {
                 // The one outline colour in the game (brief 01 §3.1).
                 OUTLINE
-            } else if t > half_len - 3.0 {
+            } else if leading && t > half_len - 3.0 {
                 // Headlamp glass at the leading end, so a facing reads which way
-                // round it is and not merely which axis it is on.
+                // round it is and not merely which axis it is on. Only the
+                // engine carries one — a lamp on every car would read as a line
+                // of separate trains.
                 PLASTER_L
-            } else if t > half_len - 6.0 {
+            } else if leading && t > half_len - 6.0 {
                 dark
             } else if s.abs() <= 1.0 {
                 // The roof line, and the only light step on the body.
@@ -511,7 +555,7 @@ mod tests {
     fn every_facing_is_a_distinct_sprite() {
         for kind in [TrainKind::Transit, TrainKind::Transport] {
             let cells: Vec<Vec<u8>> = (0..BANK_ENTRIES)
-                .map(|entry| paint_facing(kind, entry).px)
+                .map(|entry| paint_facing(kind, TrainPart::Loco, entry).px)
                 .collect();
             for a in 0..BANK_ENTRIES {
                 for b in (a + 1)..BANK_ENTRIES {
@@ -526,8 +570,8 @@ mod tests {
     fn the_two_kinds_do_not_draw_alike() {
         for entry in 0..BANK_ENTRIES {
             assert_ne!(
-                paint_facing(TrainKind::Transit, entry).px,
-                paint_facing(TrainKind::Transport, entry).px,
+                paint_facing(TrainKind::Transit, TrainPart::Loco, entry).px,
+                paint_facing(TrainKind::Transport, TrainPart::Loco, entry).px,
                 "entry {entry} draws the same for both kinds"
             );
         }
@@ -538,8 +582,8 @@ mod tests {
     #[test]
     fn the_bake_is_deterministic() {
         for entry in [0usize, 1, 7, 18, 31] {
-            let a = paint_facing(TrainKind::Transit, entry);
-            let b = paint_facing(TrainKind::Transit, entry);
+            let a = paint_facing(TrainKind::Transit, TrainPart::Loco, entry);
+            let b = paint_facing(TrainKind::Transit, TrainPart::Loco, entry);
             assert_eq!(a.px, b.px, "entry {entry} baked differently twice");
         }
     }
@@ -548,7 +592,7 @@ mod tests {
     /// outline rings it, and nothing spills outside the cell.
     #[test]
     fn a_facing_is_a_drawn_body_not_a_rectangle() {
-        let canvas = paint_facing(TrainKind::Transit, entry_for_dir(2));
+        let canvas = paint_facing(TrainKind::Transit, TrainPart::Loco, entry_for_dir(2));
         assert_eq!(canvas.at(8, 0), rgba(PLASTER_L), "no lamp at the leading end");
         assert_eq!(canvas.at(-9, 0), rgba(OUTLINE), "no outline at the tail");
         assert_eq!(canvas.at(0, 0), rgba(ROOF_SLATE_L), "no roof line");
@@ -587,7 +631,7 @@ mod tests {
     #[test]
     fn a_facing_cell_honours_the_pixel_contract() {
         assert_eq!(CELL, rail_map::TILE_SIZE as u32);
-        let image = cell_image(paint_facing(TrainKind::Transport, 5));
+        let image = cell_image(paint_facing(TrainKind::Transport, TrainPart::Loco, 5));
         assert_eq!(image.width(), CELL);
         assert_eq!(image.height(), CELL);
         assert!(matches!(image.sampler, ImageSampler::Descriptor(_)));

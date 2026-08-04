@@ -20,21 +20,45 @@
 //! §4.1): a held train freezes on its stop line and raises a stop indicator, and
 //! its smoke goes idle because puffs are emitted per tile crossed and a held
 //! train crosses nothing. A row of held trains therefore reads as a queue.
+//!
+//! # A consist follows the track, not the locomotive
+//!
+//! 07 §6: *"Cars follow the locomotive along the path it took, so a train
+//! articulates correctly through curves."* Each car is placed by walking
+//! **backwards along the train's own path** by a fixed coupling distance — not
+//! by offsetting from the engine, which would cut the corner and put a carriage
+//! through the inside of every curve. A car on a different leg to its engine
+//! therefore holds that leg's bearing, and the consist bends.
+//!
+//! Every vehicle carries its own [`GroundAnchor`], which is what makes a
+//! consist crossing a change of level read as following the ground: the
+//! projection lifts each car by the height of the tile *it* is over, and a
+//! projection flip moves all of them without this module knowing it happened.
+//! Nothing here projects anything by hand.
 
 use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
-use rail_map::{tile_to_world, TILE_SIZE};
+use rail_map::{tile_to_ground, tile_to_world, TILE_SIZE};
+use rail_sim::ids::TileCoord;
 use rail_sim::track::dir_index;
 use rail_sim::{
-    commands::TrainKind, ticks_for_piece, SimClock, TileOccupancy, TrackNetwork, TrackPiece, Train,
-    TrainId, TrainLocation,
+    cars_of, commands::TrainKind, ticks_for_consist_piece, SimClock, TileOccupancy, TrackNetwork,
+    TrackPiece, Train, TrainConsist, TrainId, TrainLocation,
 };
 
-use super::bank::{entry_for_dir, facing_entry, TrainBank};
+use super::bank::{entry_for_dir, facing_entry, TrainBank, TrainPart};
+use crate::map::GroundAnchor;
 use crate::palette::{ROCK_L, WARN};
 
 const TRAIN_Z: f32 = 3.0;
+
+/// Coupling distance between vehicle centres, in tiles.
+///
+/// The engine body is 0.56 of a tile long and a car is 0.41, so 0.55 leaves a
+/// texel or two of daylight at the coupling — enough that a consist reads as
+/// separate vehicles, close enough that it never reads as two trains.
+const CAR_SPACING_TILES: f32 = 0.55;
 /// Facing when a train has nowhere to go and no history: east, the default axis.
 const DEFAULT_DIR: usize = 2;
 
@@ -60,6 +84,15 @@ pub struct TrainSprite {
     pub id: TrainId,
 }
 
+/// One trailing car of a consist. `index` is 1 for the first car behind the
+/// engine, and a car whose index is past the train's length is despawned — so
+/// selling a car takes its sprite with it.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct TrainCarSprite {
+    pub id: TrainId,
+    pub index: u8,
+}
+
 /// Held-train marker riding above its train sprite.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct TrainStopIndicator {
@@ -73,6 +106,7 @@ pub struct SmokePuff {
     drift: f32,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sync_train_sprites(
     mut commands: Commands,
     network: Res<TrackNetwork>,
@@ -81,8 +115,24 @@ pub fn sync_train_sprites(
     fixed_time: Res<Time<Fixed>>,
     mut images: ResMut<Assets<Image>>,
     mut bank: Local<TrainBank>,
-    trains: Query<(&Train, &TrainLocation)>,
-    mut sprites: Query<(Entity, &TrainSprite, &mut Transform, &mut Sprite)>,
+    trains: Query<(&Train, &TrainLocation, Option<&TrainConsist>)>,
+    mut sprites: Query<(
+        Entity,
+        &TrainSprite,
+        &mut Transform,
+        &mut Sprite,
+        &mut GroundAnchor,
+    )>,
+    mut cars: Query<
+        (
+            Entity,
+            &TrainCarSprite,
+            &mut Transform,
+            &mut Sprite,
+            &mut GroundAnchor,
+        ),
+        Without<TrainSprite>,
+    >,
 ) {
     let _perf = crate::overlays::perf::scope("sync_train_sprites");
     let overstep = if clock.paused {
@@ -92,40 +142,48 @@ pub fn sync_train_sprites(
     };
 
     let mut by_id: HashMap<TrainId, Entity> = HashMap::with_capacity(sprites.iter().len());
-    for (entity, sprite, _, _) in sprites.iter() {
+    for (entity, sprite, ..) in sprites.iter() {
         by_id.insert(sprite.id, entity);
+    }
+    let mut car_by_slot: HashMap<(TrainId, u8), Entity> = HashMap::with_capacity(cars.iter().len());
+    for (entity, car, ..) in cars.iter() {
+        car_by_slot.insert((car.id, car.index), entity);
     }
 
     let mut seen = HashSet::with_capacity(trains.iter().len());
-    for (train, loc) in trains.iter() {
+    // Every `(train, car index)` still drawn this frame. A consist that grew
+    // gains a slot here and a train that was sold loses all of them.
+    let mut seen_cars: HashSet<(TrainId, u8)> = HashSet::new();
+    for (train, loc, consist) in trains.iter() {
         seen.insert(train.id);
         let Some(piece) = network.piece(loc.track) else {
             continue;
         };
         let held = occupancy.is_blocked(train.id);
-        let pose = present_train(train.kind, piece, loc, &network, overstep, held);
+        let length = cars_of(consist);
+        let pose = present_train(train.kind, length, piece, loc, &network, overstep, held);
         let image = bank.get(&mut images, train.kind, pose.facing);
 
         if let Some(&entity) = by_id.get(&train.id) {
-            let Ok((_, _, mut tf, mut sprite)) = sprites.get_mut(entity) else {
+            let Ok((_, _, mut tf, mut sprite, mut anchor)) = sprites.get_mut(entity) else {
                 continue;
             };
-            tf.translation.x = pose.x;
-            tf.translation.y = pose.y;
-            tf.translation.z = TRAIN_Z;
+            place(&mut tf, &mut anchor, &pose, TRAIN_Z);
             // Turning is picking a different cell out of the bank. Nothing else
             // about the sprite moves — no rotation, no mirror, no stretch.
             if sprite.image != image {
                 sprite.image = image;
             }
         } else {
+            let anchor = pose.anchor();
             commands
                 .spawn((
                     Sprite {
                         image,
                         ..default()
                     },
-                    Transform::from_xyz(pose.x, pose.y, TRAIN_Z),
+                    anchor.transform(TRAIN_Z),
+                    anchor,
                     TrainSprite { id: train.id },
                 ))
                 .with_children(|train_sprite| {
@@ -137,13 +195,67 @@ pub fn sync_train_sprites(
                     ));
                 });
         }
+
+        for index in 1..length {
+            let pose = present_car(&pose, index, loc, &network);
+            let image = bank.get_part(&mut images, train.kind, TrainPart::Car, pose.facing);
+            seen_cars.insert((train.id, index));
+            if let Some(&entity) = car_by_slot.get(&(train.id, index)) {
+                let Ok((_, _, mut tf, mut sprite, mut anchor)) = cars.get_mut(entity) else {
+                    continue;
+                };
+                // A car sits a hair below its engine so a consist overlapping at
+                // a curve stacks the way a train does: engine on top.
+                place(&mut tf, &mut anchor, &pose, TRAIN_Z - 0.01);
+                if sprite.image != image {
+                    sprite.image = image;
+                }
+            } else {
+                let anchor = pose.anchor();
+                commands.spawn((
+                    Sprite {
+                        image,
+                        ..default()
+                    },
+                    anchor.transform(TRAIN_Z - 0.01),
+                    anchor,
+                    TrainCarSprite {
+                        id: train.id,
+                        index,
+                    },
+                ));
+            }
+        }
     }
 
-    for (entity, sprite, _, _) in sprites.iter() {
+    for (entity, sprite, ..) in sprites.iter() {
         if !seen.contains(&sprite.id) {
             commands.entity(entity).despawn();
         }
     }
+    // A car whose train was sold, or whose slot was shortened, goes with it.
+    for (entity, car, ..) in cars.iter() {
+        if !seen_cars.contains(&(car.id, car.index)) {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Put a vehicle where its pose says, on layer `z`.
+///
+/// Writes the anchor *and* the transform the anchor implies, so the sprite is
+/// correct on this frame rather than on the one after
+/// [`anchor_world_sprites`](crate::map::projection::anchor_world_sprites) next
+/// runs — and both agree exactly, because both ask the projection.
+fn place(transform: &mut Transform, anchor: &mut GroundAnchor, pose: &TrainPose, z: f32) {
+    let wanted = pose.anchor();
+    if *anchor != wanted {
+        *anchor = wanted;
+    }
+    let world = wanted.world();
+    transform.translation.x = world.x;
+    transform.translation.y = world.y;
+    transform.translation.z = z;
 }
 
 /// Raise the stop indicator on trains the sim is holding.
@@ -237,43 +349,59 @@ fn puff_drift(id: TrainId, step: usize) -> f32 {
     ((mixed >> 40) as f32 / 8_388_608.0) - 1.0
 }
 
+/// Where one vehicle stands, on the ground plane, and which cell it shows.
+///
+/// Ground rather than world: the projection turns it into a screen position and
+/// applies whatever lift the tile underneath has, which is the only way a
+/// consist on a grade reads as standing on it. See [`GroundAnchor`].
 struct TrainPose {
-    x: f32,
-    y: f32,
+    ground: Vec2,
     /// Index into the facing bank — the sprite to show, not an angle to apply.
     facing: usize,
 }
 
+impl TrainPose {
+    fn anchor(&self) -> GroundAnchor {
+        GroundAnchor::new(self.ground.x, self.ground.y)
+    }
+}
+
+/// Ground-plane centre of a tile.
+fn ground_of(tile: TileCoord) -> Vec2 {
+    let (gx, gy) = tile_to_ground(tile);
+    Vec2::new(gx, gy)
+}
+
 fn present_train(
     kind: TrainKind,
+    cars: u8,
     piece: &TrackPiece,
     loc: &TrainLocation,
     network: &TrackNetwork,
     overstep: f32,
     held: bool,
 ) -> TrainPose {
-    let (cx, cy) = tile_to_world(piece.tile);
+    let here = ground_of(piece.tile);
     // The direction the train arrived on, which is the facing to hold when it
     // has nowhere left to go — a train at the end of its path should not swing
     // round to east.
     let arrived = leg_dir(network, loc, loc.path_index.checked_sub(1));
 
+    let standing = TrainPose {
+        ground: here,
+        facing: entry_for_dir(arrived.unwrap_or(DEFAULT_DIR)),
+    };
     let Some(&next_id) = loc.path.get(loc.path_index.saturating_add(1)) else {
-        return TrainPose {
-            x: cx,
-            y: cy,
-            facing: entry_for_dir(arrived.unwrap_or(DEFAULT_DIR)),
-        };
+        return standing;
     };
     let Some(next) = network.piece(next_id) else {
-        return TrainPose {
-            x: cx,
-            y: cy,
-            facing: entry_for_dir(arrived.unwrap_or(DEFAULT_DIR)),
-        };
+        return standing;
     };
 
-    let needed = ticks_for_piece(kind, piece.max_grade, piece.curve);
+    // The consist's own pace: a longer train crosses a tile in more ticks, and
+    // interpolating against the single-car figure would run the sprite ahead of
+    // the simulation and snap it back at every tile boundary.
+    let needed = ticks_for_consist_piece(kind, cars, piece.max_grade, piece.curve);
     // A held train sits dead still on its stop line: adding overstep would creep
     // it forward every frame and snap it back, which reads as a shuffling queue.
     let step = if loc.parked || loc.dwell_remaining > 0 || held {
@@ -282,7 +410,6 @@ fn present_train(
         overstep
     };
     let t = lerp_fraction(loc.progress, needed, step);
-    let (nx, ny) = tile_to_world(next.tile);
 
     // The leg being run, and the one after it: a curve is a sweep through the
     // node between two legs, so the facing needs both ends of it.
@@ -290,9 +417,81 @@ fn present_train(
     let leaving = leg_dir(network, loc, Some(loc.path_index + 1));
 
     TrainPose {
-        x: cx + (nx - cx) * t,
-        y: cy + (ny - cy) * t,
+        ground: here.lerp(ground_of(next.tile), t),
         facing: facing_entry(arrived, dir, leaving, t.clamp(0.0, 1.0)),
+    }
+}
+
+/// Where the `index`-th car sits, walking back along the path the train took.
+///
+/// `index` counts from 1 (the vehicle immediately behind the engine). The walk
+/// is along the **route**, so a car still on the previous leg holds the previous
+/// leg's bearing and the consist bends through the curve rather than skidding
+/// across its inside.
+///
+/// A train that has not travelled far enough to have a tail — one just placed,
+/// or one on the first tile of its path — bunches its cars up at the start of
+/// the route rather than inventing track behind itself. That is a second of
+/// overlap when a train enters service, against the alternative of a carriage
+/// standing on the grass.
+fn present_car(
+    head: &TrainPose,
+    index: u8,
+    loc: &TrainLocation,
+    network: &TrackNetwork,
+) -> TrainPose {
+    let mut remaining = CAR_SPACING_TILES * TILE_SIZE * f32::from(index.max(1));
+    let mut point = head.ground;
+    // `path_index` is the tile the engine is leaving; everything before it is
+    // ground the train has already covered.
+    let mut leg = loc.path_index;
+    let mut facing = head.facing;
+
+    loop {
+        let Some(previous) = loc.path.get(leg).and_then(|id| network.piece(*id)) else {
+            break;
+        };
+        let behind = ground_of(previous.tile);
+        let span = point.distance(behind);
+        if span >= remaining {
+            let t = if span > f32::EPSILON {
+                remaining / span
+            } else {
+                0.0
+            };
+            let at = point.lerp(behind, t);
+            // The bearing of the leg this car is standing on, swept through the
+            // nodes at either end exactly as the engine's is.
+            let ahead = loc
+                .path
+                .get(leg + 1)
+                .copied()
+                .unwrap_or(loc.track);
+            if let Some(next) = network.piece(ahead) {
+                if let Some(dir) = dir_index(previous.tile, next.tile) {
+                    let along = 1.0 - t;
+                    facing = facing_entry(
+                        leg_dir(network, loc, leg.checked_sub(1)),
+                        dir,
+                        leg_dir(network, loc, Some(leg + 1)),
+                        along.clamp(0.0, 1.0),
+                    );
+                }
+            }
+            return TrainPose { ground: at, facing };
+        }
+        remaining -= span;
+        point = behind;
+        let Some(earlier) = leg.checked_sub(1) else {
+            break;
+        };
+        leg = earlier;
+    }
+
+    // Ran out of travelled path: sit on the oldest tile the route knows.
+    TrainPose {
+        ground: point,
+        facing,
     }
 }
 
@@ -502,6 +701,296 @@ mod tests {
                 "{projection:?}: the freight cell is blank"
             );
         }
+    }
+
+    // ─ Consists ────────────────────────────────────────────
+
+    use rail_sim::track::{try_place_track, TrackTerrain};
+    use rail_sim::{Money, MoneyLedger, GROUND_LAYER};
+
+    /// A world with `tiles` of track laid in order, and one train on it.
+    fn consist_app(tiles: &[(i32, i32)], cars: u8, at: usize) -> (App, Vec<TileCoord>) {
+        let terrain = TrackTerrain::new(24, 24, (0..24 * 24).map(|_| (false, 0i8)));
+        let mut network = TrackNetwork::new();
+        let mut money = Money::new(10_000_000);
+        let mut ledger = MoneyLedger::default();
+        let mut ids = Vec::new();
+        let mut coords = Vec::new();
+        for &(x, y) in tiles {
+            let tile = TileCoord { x, y };
+            ids.push(
+                try_place_track(
+                    &mut network,
+                    &mut money,
+                    &mut ledger,
+                    &terrain,
+                    tile,
+                    GROUND_LAYER,
+                )
+                .expect("track")
+                .id,
+            );
+            coords.push(tile);
+        }
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Assets<Image>>()
+            .init_resource::<SimClock>()
+            .init_resource::<TileOccupancy>()
+            .insert_resource(network)
+            .add_systems(Update, sync_train_sprites);
+        let mut loc = TrainLocation::at_track(ids[0]);
+        loc.set_path(ids.clone());
+        loc.track = ids[at];
+        loc.path_index = at;
+        app.world_mut().spawn((
+            Train {
+                id: TrainId(1),
+                kind: TrainKind::Transit,
+            },
+            loc,
+            TrainConsist { cars, laden: 0 },
+        ));
+        (app, coords)
+    }
+
+    /// Every vehicle the app drew, in consist order: the engine first.
+    fn consist_ground(app: &mut App) -> Vec<Vec2> {
+        let engine = app
+            .world_mut()
+            .query_filtered::<&GroundAnchor, With<TrainSprite>>()
+            .single(app.world())
+            .map(|a| a.0)
+            .expect("an engine");
+        let mut cars: Vec<(u8, Vec2)> = app
+            .world_mut()
+            .query::<(&TrainCarSprite, &GroundAnchor)>()
+            .iter(app.world())
+            .map(|(car, anchor)| (car.index, anchor.0))
+            .collect();
+        cars.sort_by_key(|(index, _)| *index);
+        std::iter::once(engine).chain(cars.into_iter().map(|(_, at)| at)).collect()
+    }
+
+    /// **The owner's ask, drawn.** A three-car train is three vehicles on the
+    /// map, coupled in a line behind the engine — not one sprite with a number
+    /// on it.
+    #[test]
+    fn a_consist_draws_one_vehicle_per_car_trailing_the_engine() {
+        let _guard = crate::map::tests::ProjectionGuard::new(rail_map::Projection::TopDown);
+        let straight: Vec<(i32, i32)> = (4..=12).map(|x| (x, 8)).collect();
+        let (mut app, _) = consist_app(&straight, 3, 4);
+        app.update();
+
+        let vehicles = consist_ground(&mut app);
+        assert_eq!(vehicles.len(), 3, "an engine and two cars");
+
+        // Each one is behind the last, along the way the train came (west).
+        for pair in vehicles.windows(2) {
+            assert!(
+                pair[1].x < pair[0].x,
+                "a car must trail the vehicle in front of it: {vehicles:?}"
+            );
+        }
+        // Coupled, not scattered: the spacing is the coupling distance.
+        let want = CAR_SPACING_TILES * TILE_SIZE;
+        for pair in vehicles.windows(2) {
+            let gap = pair[0].distance(pair[1]);
+            assert!(
+                (gap - want).abs() < 0.5,
+                "coupling gap {gap} should be about {want}"
+            );
+        }
+        // A single-car train is exactly what it always was: one sprite.
+        let (mut app, _) = consist_app(&straight, 1, 4);
+        app.update();
+        assert_eq!(consist_ground(&mut app).len(), 1);
+    }
+
+    /// **Articulation** (07 §6). A car on the leg before the engine's holds
+    /// *that* leg's bearing, so a consist bends through a curve instead of
+    /// sliding across the inside of it.
+    #[test]
+    fn cars_follow_the_path_round_a_corner_rather_than_cutting_it() {
+        let _guard = crate::map::tests::ProjectionGuard::new(rail_map::Projection::TopDown);
+        // An L: east along y=8 to x=10, then south down x=10.
+        let mut tiles: Vec<(i32, i32)> = (4..=10).map(|x| (x, 8)).collect();
+        tiles.extend((9..=13).map(|y| (10, y)));
+        // Two tiles past the corner, so the engine is southbound and the tail is
+        // still on the eastbound leg.
+        let corner_index = 6;
+        let (mut app, coords) = consist_app(&tiles, 3, corner_index + 1);
+        app.update();
+
+        let vehicles = consist_ground(&mut app);
+        let corner = {
+            let (gx, gy) = tile_to_ground(coords[corner_index]);
+            Vec2::new(gx, gy)
+        };
+        // The engine is south of the corner; the last car is west of it. A
+        // straight-line offset from the engine would have put that car *inside*
+        // the corner, south-west of it, on no track at all.
+        assert!(vehicles[0].y > corner.y, "the engine has turned south");
+        let tail = *vehicles.last().expect("a tail");
+        assert!(
+            tail.x < corner.x - 1.0,
+            "the tail should still be on the eastbound leg: {vehicles:?}"
+        );
+        assert!(
+            (tail.y - corner.y).abs() < 1.0,
+            "and level with the leg it is on, not cutting the corner"
+        );
+
+        // The facings say the same thing: a vehicle on the eastbound leg is not
+        // pointing the way the engine on the southbound leg is pointing.
+        let (loc, network) = {
+            let network = app.world().resource::<TrackNetwork>().clone();
+            let loc = app
+                .world_mut()
+                .query::<&TrainLocation>()
+                .single(app.world())
+                .cloned()
+                .expect("the train");
+            (loc, network)
+        };
+        let piece = network.piece(loc.track).expect("a tile under it");
+        let engine = present_train(TrainKind::Transit, 3, piece, &loc, &network, 0.0, false);
+        let tail = present_car(&engine, 2, &loc, &network);
+        assert_ne!(
+            engine.facing, tail.facing,
+            "a consist through a curve holds two bearings at once, or it is not \
+             articulating"
+        );
+    }
+
+    /// **Both projections, on the consist.** Every vehicle stands on the ground
+    /// its anchor names, in either view — the class invariant `map::projection`
+    /// sweeps for, checked here because the sweep's app has no trains in it.
+    #[test]
+    fn every_car_stands_on_its_own_ground_in_both_projections() {
+        let straight: Vec<(i32, i32)> = (4..=12).map(|x| (x, 8)).collect();
+        for projection in [rail_map::Projection::TopDown, rail_map::Projection::Iso] {
+            let _guard = crate::map::tests::ProjectionGuard::new(projection);
+            let (mut app, coords) = consist_app(&straight, 3, 5);
+            app.update();
+
+            let drawn: Vec<(Vec2, Vec3)> = app
+                .world_mut()
+                .query::<(&GroundAnchor, &Transform)>()
+                .iter(app.world())
+                .map(|(anchor, tf)| (anchor.0, tf.translation))
+                .collect();
+            assert_eq!(drawn.len(), 3, "{projection:?}: three vehicles");
+
+            for (ground, at) in &drawn {
+                // The transform is exactly what the projection makes of the
+                // anchor — nothing here is projected by hand.
+                let (wx, wy) = rail_map::ground_to_world(ground.x, ground.y);
+                assert_eq!(
+                    (at.x, at.y),
+                    (wx, wy),
+                    "{projection:?}: a vehicle anchored at {ground:?} is drawn at \
+                     ({}, {})",
+                    at.x,
+                    at.y
+                );
+                // …and it resolves back to a tile the train is actually on.
+                let tile = rail_map::world_to_tile(at.x, at.y);
+                assert!(
+                    coords.contains(&tile),
+                    "{projection:?}: a vehicle at {tile:?} is off the railway"
+                );
+            }
+        }
+    }
+
+    /// A consist that grows gains a car; one that is sold takes its cars with
+    /// it. A sprite for a car nobody owns is the same class of bug as a train
+    /// the player cannot find.
+    #[test]
+    fn car_sprites_appear_and_leave_with_the_cars_they_draw() {
+        let _guard = crate::map::tests::ProjectionGuard::new(rail_map::Projection::TopDown);
+        let straight: Vec<(i32, i32)> = (4..=12).map(|x| (x, 8)).collect();
+        let (mut app, _) = consist_app(&straight, 1, 4);
+        app.update();
+        assert_eq!(consist_ground(&mut app).len(), 1);
+
+        // Couple a car on.
+        {
+            let mut q = app.world_mut().query::<&mut TrainConsist>();
+            let world = app.world_mut();
+            for mut consist in q.iter_mut(world) {
+                consist.cars = 3;
+            }
+        }
+        app.update();
+        assert_eq!(consist_ground(&mut app).len(), 3, "the cars appear");
+
+        // Shorten it again: the extra sprite has to go.
+        {
+            let mut q = app.world_mut().query::<&mut TrainConsist>();
+            let world = app.world_mut();
+            for mut consist in q.iter_mut(world) {
+                consist.cars = 2;
+            }
+        }
+        app.update();
+        app.update();
+        assert_eq!(consist_ground(&mut app).len(), 2);
+
+        // Sell the train: everything it was made of leaves the map.
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<Train>>()
+            .single(app.world())
+            .expect("the train");
+        app.world_mut().entity_mut(entity).despawn();
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&TrainCarSprite>()
+                .iter(app.world())
+                .count(),
+            0,
+            "a sold train leaves no carriages behind"
+        );
+    }
+
+    /// A car draws a *car*, not a second engine: shorter, and no headlamp.
+    /// Three identical bodies in a line would read as three trains queueing,
+    /// which is a state this game genuinely has.
+    #[test]
+    fn a_car_is_drawn_as_a_car_and_not_as_another_engine() {
+        let _guard = crate::map::tests::ProjectionGuard::new(rail_map::Projection::TopDown);
+        let straight: Vec<(i32, i32)> = (4..=12).map(|x| (x, 8)).collect();
+        let (mut app, _) = consist_app(&straight, 2, 4);
+        app.update();
+
+        let engine = app
+            .world_mut()
+            .query_filtered::<&Sprite, With<TrainSprite>>()
+            .single(app.world())
+            .map(|s| s.image.clone())
+            .expect("an engine");
+        let car = app
+            .world_mut()
+            .query_filtered::<&Sprite, With<TrainCarSprite>>()
+            .single(app.world())
+            .map(|s| s.image.clone())
+            .expect("a car");
+
+        let images = app.world().resource::<Assets<Image>>();
+        let engine_px = images.get(&engine).and_then(|i| i.data.clone()).expect("baked");
+        let car_px = images.get(&car).and_then(|i| i.data.clone()).expect("baked");
+        assert_ne!(engine_px, car_px, "a car must not draw as the engine");
+        let painted = |px: &Vec<u8>| px.chunks_exact(4).filter(|t| t[3] > 0).count();
+        assert!(painted(&car_px) > 0, "the car cell is blank");
+        assert!(
+            painted(&car_px) < painted(&engine_px),
+            "a car is shorter than the engine that pulls it"
+        );
     }
 
     #[test]

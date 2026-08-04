@@ -50,7 +50,9 @@ use crate::stations::{
 };
 use crate::town::TownDensity;
 use crate::track::{TrackNetwork, TrackTerrain};
-use crate::trains::{TileOccupancy, Train, TrainCargo, TrainLocation, TrainOnLine, TrainYard};
+use crate::trains::{
+    TileOccupancy, Train, TrainCargo, TrainConsist, TrainLocation, TrainOnLine, TrainYard,
+};
 use crate::WorldAnchorsSeeded;
 
 /// Save schema version. Bump on any change to the blob shape.
@@ -59,16 +61,27 @@ use crate::WorldAnchorsSeeded;
 /// [`SaveError::VersionMismatch`](super::SaveError::VersionMismatch); there is
 /// no silent partial read. Older versions down to [`MIN_READABLE_SCHEMA`] are
 /// migrated on load — see [`super::codec`].
-pub const SCHEMA_VERSION: u16 = 5;
+pub const SCHEMA_VERSION: u16 = 6;
 
 /// Oldest schema this build can still open.
 ///
-/// Version 4 is here because desire paths ([`docs/design/16-desire-paths.md`])
-/// added one field to the top level of [`WorldSnapshot`] and changed nothing
-/// nested. That is the cheap kind of schema change — a v4 payload decodes
-/// through [`WorldSnapshotV4`], gains an empty wear map and comes back as a v5
-/// world with unmarked ground, which is exactly the truth about it. A change
-/// that reshaped anything nested would not get this treatment.
+/// Two migrations stand behind this number and they are different shapes of
+/// change, which is worth keeping straight:
+///
+/// * **4 → 5** added [`WorldSnapshot::paths`] at the *top level* and touched
+///   nothing nested. That is the cheap kind: a v4 payload gains an empty wear
+///   map, which is exactly the truth about a world whose habits were never
+///   recorded.
+/// * **5 → 6** added [`TrainSnapshot::consist`], which is *nested* — and the
+///   comment on [`WorldSnapshotV4`] said in as many words that a nested change
+///   would stop the top-level-mirror shortcut working. It did. So schema 5's
+///   trains section is frozen as [`TrainsSnapshotV5`], v4 and v5 both decode
+///   through it, and both come back as worlds whose every train runs the single
+///   car it was actually running.
+///
+/// Positional bincode reads by *position*, so the only thing that makes an old
+/// payload readable is a type with the old field sequence. That is what the
+/// `V5` types are, and why they must never be "tidied" to follow the live ones.
 pub const MIN_READABLE_SCHEMA: u16 = 4;
 
 /// Terrain generator revision recorded with the map.
@@ -270,6 +283,10 @@ pub struct TrainSnapshot {
     pub location: TrainLocation,
     pub cargo: TrainCargo,
     pub on_line: Option<TrainOnLine>,
+    /// How long the train is and how much of it is loaded. **Added in schema
+    /// 6** — every train in an older save was one car, and that is what one
+    /// loads as.
+    pub consist: TrainConsist,
 }
 
 // ---------------------------------------------------------------------------
@@ -607,20 +624,226 @@ impl Default for WorldSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Schema 4 compatibility
+// Schema 4 / 5 compatibility
 // ---------------------------------------------------------------------------
+
+/// Schema 5's trains section, frozen.
+///
+/// Schema 6 added [`TrainSnapshot::consist`], which is a change *inside* the
+/// snapshot rather than at its top level — the case [`WorldSnapshotV4`]'s
+/// original note warned would end the mirror-the-top-level shortcut. So this is
+/// the field sequence v5 (and v4, which had the same one) actually wrote, and it
+/// is frozen: it must never be edited to follow [`TrainsSnapshot`], because the
+/// bytes it reads are not going to change their minds.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TrainsSnapshotV5 {
+    pub yard: TrainYard,
+    pub placed: Vec<TrainSnapshotV5>,
+    pub occupancy: TileOccupancy,
+}
+
+/// One placed train, as schema 5 wrote it — no consist.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrainSnapshotV5 {
+    pub train: Train,
+    pub location: TrainLocation,
+    pub cargo: TrainCargo,
+    pub on_line: Option<TrainOnLine>,
+}
+
+impl TrainsSnapshotV5 {
+    /// Read an old rolling stock section forward.
+    ///
+    /// Every train in a pre-6 world ran one car, and its cargo — if it had any —
+    /// was that one car's load. Both are true statements about the save rather
+    /// than defaults chosen for convenience, which is the whole test of a
+    /// migration.
+    fn upgrade(self) -> TrainsSnapshot {
+        let Self {
+            yard,
+            placed,
+            occupancy,
+        } = self;
+        TrainsSnapshot {
+            yard,
+            placed: placed
+                .into_iter()
+                .map(|t| {
+                    let TrainSnapshotV5 {
+                        train,
+                        location,
+                        cargo,
+                        on_line,
+                    } = t;
+                    let laden = u8::from(!cargo.is_empty());
+                    TrainSnapshot {
+                        train,
+                        location,
+                        cargo,
+                        on_line,
+                        consist: TrainConsist { cars: 1, laden },
+                    }
+                })
+                .collect(),
+            occupancy,
+        }
+    }
+
+    /// The current world in schema 5's shape — test-only, so both migrations are
+    /// proved against bytes this crate really wrote.
+    #[cfg(test)]
+    fn capture(world: &World) -> Self {
+        let TrainsSnapshot {
+            yard,
+            placed,
+            occupancy,
+        } = capture_trains(world);
+        Self {
+            yard,
+            placed: placed
+                .into_iter()
+                .map(|t| {
+                    let TrainSnapshot {
+                        train,
+                        location,
+                        cargo,
+                        on_line,
+                        consist: _,
+                    } = t;
+                    TrainSnapshotV5 {
+                        train,
+                        location,
+                        cargo,
+                        on_line,
+                    }
+                })
+                .collect(),
+            occupancy,
+        }
+    }
+}
+
+/// [`WorldSnapshot`] as schema 5 laid it out, for reading old saves.
+///
+/// Positional bincode has no field names in it, so a v5 payload can only be read
+/// by a type with v5's *exact* field sequence. Every field here is still the
+/// live type except [`Self::trains`], which schema 6 reshaped and which is
+/// therefore frozen alongside this.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldSnapshotV5 {
+    pub schema_version: u16,
+    pub map: MapSnapshot,
+    pub track: TrackNetwork,
+    pub stations: StationsSnapshot,
+    pub lines: LineRegistry,
+    pub trains: TrainsSnapshotV5,
+    pub town: TownSnapshot,
+    pub peeps: PeepsSnapshot,
+    pub paths: PathsSnapshot,
+    pub economy: EconomySnapshot,
+    pub demand: DemandSpawner,
+    pub goals: GoalBoard,
+    pub borders: BorderRegistry,
+    pub clock: ClockSnapshot,
+    pub money_cents: i64,
+    pub anchors_seeded: bool,
+}
+
+impl WorldSnapshotV5 {
+    /// Read this old world forward into the current one.
+    ///
+    /// Exhaustively destructured with no `..` rest pattern, on purpose: a field
+    /// added to v5's shape by accident will not compile rather than silently
+    /// going missing on every old save anyone opens.
+    pub fn upgrade(self) -> WorldSnapshot {
+        let Self {
+            schema_version: _,
+            map,
+            track,
+            stations,
+            lines,
+            trains,
+            town,
+            peeps,
+            paths,
+            economy,
+            demand,
+            goals,
+            borders,
+            clock,
+            money_cents,
+            anchors_seeded,
+        } = self;
+
+        WorldSnapshot {
+            schema_version: SCHEMA_VERSION,
+            map,
+            track,
+            stations,
+            lines,
+            trains: trains.upgrade(),
+            town,
+            peeps,
+            paths,
+            economy,
+            demand,
+            goals,
+            borders,
+            clock,
+            money_cents,
+            anchors_seeded,
+        }
+    }
+
+    /// Capture the current world in v5's shape — test-only.
+    #[cfg(test)]
+    pub fn capture(world: &World) -> Self {
+        let now = WorldSnapshot::capture(world);
+        let WorldSnapshot {
+            schema_version: _,
+            map,
+            track,
+            stations,
+            lines,
+            trains: _,
+            town,
+            peeps,
+            paths,
+            economy,
+            demand,
+            goals,
+            borders,
+            clock,
+            money_cents,
+            anchors_seeded,
+        } = now;
+        Self {
+            schema_version: 5,
+            map,
+            track,
+            stations,
+            lines,
+            trains: TrainsSnapshotV5::capture(world),
+            town,
+            peeps,
+            paths,
+            economy,
+            demand,
+            goals,
+            borders,
+            clock,
+            money_cents,
+            anchors_seeded,
+        }
+    }
+}
 
 /// [`WorldSnapshot`] as schema 4 laid it out, for reading old saves.
 ///
-/// Positional bincode has no field names in it, so a v4 payload can only be
-/// read by a type with v4's *exact* field sequence. This is that type, and it is
-/// deliberately a mirror of the top level only: schema 5 added
-/// [`WorldSnapshot::paths`] and touched nothing nested, so every field below is
-/// the same type it always was and stays in step automatically.
-///
-/// **If a future schema reshapes anything nested, this shortcut stops working**
-/// and that version needs its own frozen copy of whatever it changed. The test
-/// `a_schema_4_save_still_loads` is what notices.
+/// v4 is v5 without [`WorldSnapshot::paths`], and its trains section is the same
+/// one v5 wrote — so it borrows [`TrainsSnapshotV5`] and upgrades *through* v5
+/// rather than jumping straight to the current shape. One migration path, tested
+/// end to end from both starting points.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorldSnapshotV4 {
     pub schema_version: u16,
@@ -628,7 +851,7 @@ pub struct WorldSnapshotV4 {
     pub track: TrackNetwork,
     pub stations: StationsSnapshot,
     pub lines: LineRegistry,
-    pub trains: TrainsSnapshot,
+    pub trains: TrainsSnapshotV5,
     pub town: TownSnapshot,
     pub peeps: PeepsSnapshot,
     pub economy: EconomySnapshot,
@@ -641,7 +864,7 @@ pub struct WorldSnapshotV4 {
 }
 
 impl WorldSnapshotV4 {
-    /// Read this old world forward into the current one.
+    /// Read this old world forward into the current one, via v5.
     ///
     /// Exhaustively destructured with no `..` rest pattern, on purpose: a field
     /// added to v4's shape by accident will not compile rather than silently
@@ -665,8 +888,8 @@ impl WorldSnapshotV4 {
             anchors_seeded,
         } = self;
 
-        WorldSnapshot {
-            schema_version: SCHEMA_VERSION,
+        WorldSnapshotV5 {
+            schema_version: 5,
             map,
             track,
             stations,
@@ -685,6 +908,7 @@ impl WorldSnapshotV4 {
             money_cents,
             anchors_seeded,
         }
+        .upgrade()
     }
 
     /// Capture the current world in v4's shape — test-only, so the migration is
@@ -692,8 +916,7 @@ impl WorldSnapshotV4 {
     /// hand-rolled fixture that could drift.
     #[cfg(test)]
     pub fn capture(world: &World) -> Self {
-        let now = WorldSnapshot::capture(world);
-        let WorldSnapshot {
+        let WorldSnapshotV5 {
             schema_version: _,
             map,
             track,
@@ -710,7 +933,7 @@ impl WorldSnapshotV4 {
             clock,
             money_cents,
             anchors_seeded,
-        } = now;
+        } = WorldSnapshotV5::capture(world);
         Self {
             schema_version: 4,
             map,
@@ -934,17 +1157,33 @@ fn capture_stations(world: &World, service_tick: u64) -> StationsSnapshot {
 
 fn capture_trains(world: &World) -> TrainsSnapshot {
     let mut placed = Vec::new();
+    // The consist is read per entity rather than joined into the query, and the
+    // reason is a trap worth naming: `try_query` gives back `None` when *any*
+    // component in it is unregistered, including an `Option<&T>` one. A world
+    // whose trains all predate consists — every save-test fixture, and every
+    // world loaded from schema 5 — would have captured **no trains at all**.
+    // `World::get` has no such edge: an unregistered component is simply absent.
     if let Some(mut query) = world.try_query::<(
+        Entity,
         &Train,
         &TrainLocation,
         Option<&TrainCargo>,
         Option<&TrainOnLine>,
     )>() {
-        for (train, location, cargo, on_line) in query.iter(world) {
+        for (entity, train, location, cargo, on_line) in query.iter(world) {
+            let cargo = cargo.cloned().unwrap_or_default();
             placed.push(TrainSnapshot {
                 train: *train,
                 location: location.clone(),
-                cargo: cargo.cloned().unwrap_or_default(),
+                // A train with no consist component is the single car it always
+                // was, carrying the one load its cargo names.
+                consist: world.get::<TrainConsist>(entity).copied().unwrap_or(
+                    TrainConsist {
+                        cars: 1,
+                        laden: u8::from(!cargo.is_empty()),
+                    },
+                ),
+                cargo,
                 on_line: on_line.copied(),
             });
         }
@@ -1224,6 +1463,7 @@ fn restore_trains(snapshot: &WorldSnapshot, world: &mut World) {
             train.train,
             train.location.clone(),
             train.cargo.clone(),
+            train.consist,
         ));
         if let Some(on_line) = train.on_line {
             entity.insert(on_line);

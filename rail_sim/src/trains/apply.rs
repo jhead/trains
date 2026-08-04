@@ -23,7 +23,11 @@ use crate::peeps::{ComplaintEntry, ComplaintFeed, TalkKind};
 use crate::stations::{IndustryRegistry, StationRegistry, StationService};
 use crate::track::{step, TrackNetwork, DIR8, GROUND_LAYER};
 
-use super::train::{buy_cost, Train, TrainCargo, TrainLocation, TrainOnLine, TrainYard};
+use super::profile::TrainProfile;
+use super::train::{
+    buy_cost, car_cost, consist_cost, Train, TrainCargo, TrainConsist, TrainLocation, TrainOnLine,
+    TrainYard,
+};
 
 /// Presentation hook when a train is bought, enters the map, or is sold.
 #[derive(Message, Debug, Clone, PartialEq, Eq)]
@@ -41,8 +45,14 @@ pub enum TrainEdit {
     Sold {
         id: TrainId,
         kind: TrainKind,
-        /// What came back — the full purchase price.
+        /// What came back — the full purchase price of the whole consist.
         refund_cents: i64,
+    },
+    /// A car was coupled on; `cars` is the length the train now runs.
+    CarAdded {
+        id: TrainId,
+        kind: TrainKind,
+        cars: u8,
     },
 }
 
@@ -94,7 +104,7 @@ pub fn apply_train_commands(
     industries: Res<IndustryRegistry>,
     service: Res<StationService>,
     network: Res<TrackNetwork>,
-    trains: Query<(Entity, &Train, &TrainCargo)>,
+    mut trains: Query<(Entity, &Train, &TrainCargo, Option<&mut TrainConsist>)>,
     mut commands: Commands,
     mut edits: MessageWriter<TrainEdit>,
 ) {
@@ -188,6 +198,11 @@ pub fn apply_train_commands(
                     },
                     TrainLocation::at_track(track),
                     TrainCargo::Empty,
+                    // Every train enters service as one car. Spawning the
+                    // component rather than leaving it off means the save, the
+                    // panels and the sprite all read a real number from the
+                    // first tick instead of an implied one.
+                    TrainConsist::default(),
                 ));
                 if let Some(line) = lines.line_for_train(p.train) {
                     entity.insert(TrainOnLine {
@@ -225,23 +240,27 @@ pub fn apply_train_commands(
             // id would point at nothing. A full refund is its own undo: the
             // money is back and the player can buy again.
             CommandKind::SellTrain(s) => {
-                let placed = trains.iter().find(|(_, t, _)| t.id == s.train);
-                let kind = match placed {
-                    Some((entity, train, cargo)) => {
-                        // The run it was carrying is not the player's to lose:
-                        // `assign_jobs` took it off the board, so put it back.
-                        requeue_cargo(&mut board, &stations, &industries, cargo);
+                let placed = trains.iter().find(|(_, t, _, _)| t.id == s.train);
+                let (kind, cars) = match placed {
+                    Some((entity, train, cargo, consist)) => {
+                        let laden = consist.as_ref().map(|c| c.laden).unwrap_or(1).max(1);
+                        // The runs it was carrying are not the player's to lose:
+                        // `assign_jobs` took them off the board, so put them
+                        // back — all of them, one per loaded car.
+                        requeue_cargo(&mut board, &stations, &industries, cargo, laden);
                         commands.entity(entity).despawn();
-                        train.kind
+                        (train.kind, consist.map(|c| c.cars).unwrap_or(1))
                     }
-                    // Unplaced stock sells straight out of the yard.
+                    // Unplaced stock sells straight out of the yard, and yard
+                    // stock is always a single car — cars are coupled to trains
+                    // in service (see [`CommandKind::AddTrainCar`]).
                     None => match yard.take(s.train) {
-                        Some(kind) => kind,
+                        Some(kind) => (kind, 1),
                         None => continue,
                     },
                 };
                 lines.unassign_train(s.train);
-                let refund = buy_cost(kind);
+                let refund = consist_cost(kind, cars);
                 ledger.credit(&mut money, MoneyCategory::RollingStock, refund);
                 say(
                     &mut talk,
@@ -257,6 +276,108 @@ pub fn apply_train_commands(
                     id: s.train,
                     kind,
                     refund_cents: refund,
+                });
+            }
+            // **The later-game capacity lever** (07 §3). Every refusal here says
+            // so out loud: this verb costs money and changes how a train runs,
+            // and a player who presses it and sees nothing has been told their
+            // railway is broken.
+            CommandKind::AddTrainCar(a) => {
+                let found = trains
+                    .iter()
+                    .find(|(_, t, _, _)| t.id == a.train)
+                    .map(|(entity, train, _, consist)| {
+                        (
+                            entity,
+                            *train,
+                            consist.map(|c| c.cars.max(1)).unwrap_or(1),
+                            consist.map(|c| c.laden).unwrap_or(0),
+                        )
+                    });
+                let Some((entity, train, cars, laden)) = found else {
+                    // Stock the player owns but has not put on the map. The
+                    // Trains window never offers the button on a yard row, so
+                    // this is a click that raced a placement — say where the
+                    // train is rather than pretending the verb failed.
+                    if yard.unplaced().iter().any(|(id, _)| *id == a.train) {
+                        say(
+                            &mut talk,
+                            TalkKind::Warning,
+                            tick,
+                            None,
+                            format!(
+                                "Train {} is still in the yard - place it before adding a car",
+                                a.train.0
+                            ),
+                        );
+                    }
+                    continue;
+                };
+
+                let profile = TrainProfile::for_kind(train.kind);
+                if cars >= profile.max_cars.max(1) {
+                    // The cap is a property of the kind, and freight's is one —
+                    // so the sentence has to explain the rule rather than quote
+                    // a number the player has never been shown.
+                    let line = match train.kind {
+                        TrainKind::Transport => format!(
+                            "Train {} hauls one wagon - a works has no stock waiting for a second",
+                            a.train.0
+                        ),
+                        TrainKind::Transit => format!(
+                            "Train {} already runs {} cars - the longest a transit couples",
+                            a.train.0, cars
+                        ),
+                    };
+                    say(&mut talk, TalkKind::Warning, tick, None, line);
+                    continue;
+                }
+
+                let cost = car_cost(train.kind);
+                if ledger
+                    .try_debit(&mut money, MoneyCategory::RollingStock, cost)
+                    .is_err()
+                {
+                    say(
+                        &mut talk,
+                        TalkKind::Warning,
+                        tick,
+                        None,
+                        format!("Not enough in the bank for another car on Train {}", a.train.0),
+                    );
+                    continue;
+                }
+
+                let now = cars.saturating_add(1);
+                match trains.get_mut(entity) {
+                    Ok((_, _, _, Some(mut consist))) => consist.cars = now,
+                    // A train that predates the component — a save from before
+                    // consists, or a test spawn. It was always a single car;
+                    // give it the component that says so, keeping whatever it
+                    // is carrying.
+                    _ => {
+                        commands
+                            .entity(entity)
+                            .insert(TrainConsist { cars: now, laden });
+                    }
+                }
+                say(
+                    &mut talk,
+                    TalkKind::Praise,
+                    tick,
+                    None,
+                    format!(
+                        "{} train {} now runs {} cars - slower, and carries {} loads",
+                        kind_label(train.kind),
+                        a.train.0,
+                        now,
+                        now
+                    ),
+                );
+                edits.write(TrainEdit::CarAdded {
+                    id: a.train,
+                    kind: train.kind,
+                    cars: now,
                 });
             }
             _ => {}
@@ -291,12 +412,14 @@ mod tests {
     use super::*;
     use bevy_app::{App, FixedUpdate};
 
-    use crate::commands::{BuyTrain, PlaceTrain, SellTrain};
+    use crate::commands::{AddTrainCar, BuyTrain, PlaceTrain, SellTrain};
     use crate::command_buffer::CommandBuffer;
     use crate::economy::{passenger_fare_cents, JobKind};
     use crate::stations::GoodKind;
     use crate::track::{try_place_track, TrackTerrain};
-    use crate::trains::train::{TRANSIT_COST_CENTS, TRANSPORT_COST_CENTS};
+    use crate::trains::train::{
+        TRANSIT_CAR_COST_CENTS, TRANSIT_COST_CENTS, TRANSPORT_COST_CENTS,
+    };
     use crate::{SimClock, SimPlugin};
 
     /// A paused world with one east-west line and two stops on it.
@@ -777,6 +900,288 @@ mod tests {
             undo_before,
             "selling is money-reversible and is its own undo"
         );
+    }
+
+    // ─ Consists ────────────────────────────────────────────
+
+    fn place_a_transit(app: &mut App, at: StationId) {
+        push(
+            app,
+            CommandKind::BuyTrain(BuyTrain {
+                kind: TrainKind::Transit,
+            }),
+        );
+        push(
+            app,
+            CommandKind::PlaceTrain(PlaceTrain {
+                train: TrainId(1),
+                at_station: at,
+            }),
+        );
+    }
+
+    fn consist_of(app: &mut App, id: TrainId) -> Option<TrainConsist> {
+        let mut q = app.world_mut().query::<(&Train, &TrainConsist)>();
+        q.iter(app.world())
+            .find(|(t, _)| t.id == id)
+            .map(|(_, c)| *c)
+    }
+
+    /// **The owner's ask, applied.** A car is bought through the command the
+    /// window pushes, charged for, and the train is longer afterwards — and it
+    /// says so, because a purchase that changes how a train runs is news.
+    #[test]
+    fn adding_a_car_charges_for_it_and_lengthens_the_train() {
+        let (mut app, east, _) = world();
+        place_a_transit(&mut app, east);
+        let before = cash(&app);
+        assert_eq!(consist_of(&mut app, TrainId(1)).map(|c| c.cars), Some(1));
+
+        push(
+            &mut app,
+            CommandKind::AddTrainCar(AddTrainCar {
+                train: TrainId(1),
+            }),
+        );
+
+        assert_eq!(
+            consist_of(&mut app, TrainId(1)),
+            Some(TrainConsist { cars: 2, laden: 0 })
+        );
+        assert_eq!(
+            cash(&app),
+            before - TRANSIT_CAR_COST_CENTS,
+            "a car costs half a train"
+        );
+        let lines = talk_lines(&app);
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("Transit train 1 now runs 2 cars - slower, and carries 2 loads"),
+            "{lines:?}"
+        );
+        assert!(lines.iter().all(|l| l.is_ascii()), "{lines:?}");
+
+        // And again, up to the cap.
+        push(
+            &mut app,
+            CommandKind::AddTrainCar(AddTrainCar {
+                train: TrainId(1),
+            }),
+        );
+        assert_eq!(consist_of(&mut app, TrainId(1)).map(|c| c.cars), Some(3));
+    }
+
+    /// The cap speaks the rule rather than going quiet — a player who presses
+    /// the button at three cars has to learn *why*, not wonder whether the
+    /// window is broken.
+    #[test]
+    fn a_transit_at_its_limit_says_what_the_limit_is() {
+        let (mut app, east, _) = world();
+        place_a_transit(&mut app, east);
+        for _ in 0..2 {
+            push(
+                &mut app,
+                CommandKind::AddTrainCar(AddTrainCar {
+                    train: TrainId(1),
+                }),
+            );
+        }
+        let before = cash(&app);
+
+        push(
+            &mut app,
+            CommandKind::AddTrainCar(AddTrainCar {
+                train: TrainId(1),
+            }),
+        );
+
+        assert_eq!(consist_of(&mut app, TrainId(1)).map(|c| c.cars), Some(3));
+        assert_eq!(cash(&app), before, "a refused car is not a charged car");
+        assert_eq!(
+            talk_lines(&app).first().map(String::as_str),
+            Some("Train 1 already runs 3 cars - the longest a transit couples")
+        );
+    }
+
+    /// Freight runs one wagon, and the sentence says why it is a rule about the
+    /// world rather than a number the player can raise.
+    #[test]
+    fn a_goods_train_says_freight_hauls_one_wagon() {
+        let (mut app, east, _) = world();
+        push(
+            &mut app,
+            CommandKind::BuyTrain(BuyTrain {
+                kind: TrainKind::Transport,
+            }),
+        );
+        push(
+            &mut app,
+            CommandKind::PlaceTrain(PlaceTrain {
+                train: TrainId(1),
+                at_station: east,
+            }),
+        );
+        let before = cash(&app);
+
+        push(
+            &mut app,
+            CommandKind::AddTrainCar(AddTrainCar {
+                train: TrainId(1),
+            }),
+        );
+
+        assert_eq!(cash(&app), before);
+        assert_eq!(consist_of(&mut app, TrainId(1)).map(|c| c.cars), Some(1));
+        assert_eq!(
+            talk_lines(&app).first().map(String::as_str),
+            Some("Train 1 hauls one wagon - a works has no stock waiting for a second")
+        );
+    }
+
+    /// A purchase the bank cannot cover is refused **out loud**, in the same
+    /// shape the train purchase uses.
+    #[test]
+    fn a_car_the_bank_cannot_cover_says_so_instead_of_going_quiet() {
+        let (mut app, east, _) = world();
+        place_a_transit(&mut app, east);
+        app.world_mut()
+            .insert_resource(Money::new(TRANSIT_CAR_COST_CENTS - 1));
+
+        push(
+            &mut app,
+            CommandKind::AddTrainCar(AddTrainCar {
+                train: TrainId(1),
+            }),
+        );
+
+        assert_eq!(consist_of(&mut app, TrainId(1)).map(|c| c.cars), Some(1));
+        assert_eq!(
+            talk_lines(&app).first().map(String::as_str),
+            Some("Not enough in the bank for another car on Train 1")
+        );
+    }
+
+    /// Stock in the yard is not a train yet. The window never offers the verb
+    /// there, so this only happens to a click that raced a placement — and it
+    /// still gets an answer.
+    #[test]
+    fn a_car_for_a_train_still_in_the_yard_says_where_the_train_is() {
+        let (mut app, _, _) = world();
+        push(
+            &mut app,
+            CommandKind::BuyTrain(BuyTrain {
+                kind: TrainKind::Transit,
+            }),
+        );
+        let before = cash(&app);
+
+        push(
+            &mut app,
+            CommandKind::AddTrainCar(AddTrainCar {
+                train: TrainId(1),
+            }),
+        );
+
+        assert_eq!(cash(&app), before);
+        assert_eq!(
+            talk_lines(&app).first().map(String::as_str),
+            Some("Train 1 is still in the yard - place it before adding a car")
+        );
+
+        // A train that does not exist at all changes nothing and says nothing:
+        // there is no player action to answer.
+        let feed_len = app.world().resource::<ComplaintFeed>().iter().count();
+        push(
+            &mut app,
+            CommandKind::AddTrainCar(AddTrainCar {
+                train: TrainId(77),
+            }),
+        );
+        assert_eq!(app.world().resource::<ComplaintFeed>().iter().count(), feed_len);
+    }
+
+    /// **Reversibility covers the whole consist.** Selling a lengthened train
+    /// hands back the engine *and* its cars, and puts every carload back on the
+    /// board.
+    #[test]
+    fn selling_a_consist_refunds_every_car_and_requeues_every_load() {
+        let (mut app, east, west) = world();
+        let before = cash(&app);
+        place_a_transit(&mut app, east);
+        for _ in 0..2 {
+            push(
+                &mut app,
+                CommandKind::AddTrainCar(AddTrainCar {
+                    train: TrainId(1),
+                }),
+            );
+        }
+        assert_eq!(
+            cash(&app),
+            before - TRANSIT_COST_CENTS - 2 * TRANSIT_CAR_COST_CENTS
+        );
+
+        // Load it up, the way `assign_jobs` would have.
+        {
+            let entity = {
+                let mut q = app.world_mut().query::<(Entity, &Train)>();
+                let world = app.world();
+                q.iter(world)
+                    .find(|(_, t)| t.id == TrainId(1))
+                    .map(|(e, _)| e)
+                    .expect("the train")
+            };
+            let mut entity = app.world_mut().entity_mut(entity);
+            entity.insert(TrainCargo::Passengers {
+                from: east,
+                to: west,
+            });
+            entity.insert(TrainConsist { cars: 3, laden: 3 });
+        }
+
+        push(
+            &mut app,
+            CommandKind::SellTrain(SellTrain {
+                train: TrainId(1),
+            }),
+        );
+
+        assert_eq!(
+            cash(&app),
+            before,
+            "the whole consist comes back, exactly like a demolished tile"
+        );
+        let board = app.world().resource::<JobBoard>();
+        assert_eq!(
+            board.jobs.len(),
+            3,
+            "three carriages of people are three runs the town still wants"
+        );
+        assert!(board.jobs.iter().all(|j| j.kind
+            == JobKind::Passenger {
+                from: east,
+                to: west
+            }));
+    }
+
+    /// A car changes how the train runs, and the profile is where that lives:
+    /// slower over the ground and slower at the platform, in that order.
+    #[test]
+    fn a_lengthened_train_is_slower_over_the_ground_and_at_the_platform() {
+        let (mut app, east, _) = world();
+        place_a_transit(&mut app, east);
+        let single = crate::trains::TRANSIT_PROFILE.for_consist(1);
+        push(
+            &mut app,
+            CommandKind::AddTrainCar(AddTrainCar {
+                train: TrainId(1),
+            }),
+        );
+        let cars = consist_of(&mut app, TrainId(1)).expect("a consist").cars;
+        let longer = crate::trains::TRANSIT_PROFILE.for_consist(cars);
+
+        assert!(longer.ticks_for_piece(0, 0) > single.ticks_for_piece(0, 0));
+        assert!(longer.dwell_ticks > single.dwell_ticks);
     }
 
     #[test]

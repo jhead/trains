@@ -14,11 +14,13 @@ pub use congestion::{
     YIELD_COOLDOWN_TICKS,
 };
 pub use movement::{
-    advance_trains, blocker_for, ticks_for_piece, TileOccupancy, POLISH_MEMORY_TICKS,
+    advance_trains, blocker_for, ticks_for_consist_piece, ticks_for_piece, TileOccupancy,
+    POLISH_MEMORY_TICKS,
 };
 pub use path::{find_path, find_path_avoiding, find_path_for_kind};
 pub use profile::{TrainProfile, TRANSIT_PROFILE, TRANSPORT_PROFILE};
 pub use train::{
-    buy_cost, Train, TrainCargo, TrainLocation, TrainOnLine, TrainYard, TRANSPORT_COST_CENTS,
-    TRANSIT_COST_CENTS,
+    buy_cost, car_cost, cars_of, consist_cost, Train, TrainCargo, TrainConsist, TrainLocation,
+    TrainOnLine, TrainYard, TRANSIT_CAR_COST_CENTS, TRANSIT_COST_CENTS, TRANSPORT_CAR_COST_CENTS,
+    TRANSPORT_COST_CENTS,
 };

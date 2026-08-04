@@ -10,7 +10,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use rail_sim::{CommandBuffer, TrainYard};
+use rail_sim::{CommandBuffer, CommandKind, TrainYard};
 
 use crate::lines::LineToolState;
 use crate::stations::StationToolState;
@@ -67,6 +67,17 @@ impl ToolStates<'_> {
             &mut self.line,
             &mut self.station,
         );
+    }
+
+    /// Queue an intent on the same buffer the tools use.
+    ///
+    /// A system that already takes `ToolStates` holds `ResMut<CommandBuffer>`
+    /// inside it, and asking Bevy for a second one is a conflicting access it
+    /// refuses at run time (B0002). So the buffer is reached through here
+    /// rather than beside it — the Trains window's *Add car* row is the caller
+    /// that found this out.
+    pub fn queue(&mut self, kind: CommandKind) {
+        self.buffer.push(kind);
     }
 }
 

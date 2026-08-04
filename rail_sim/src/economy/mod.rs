@@ -13,7 +13,7 @@ pub use alerts::{
 };
 pub use jobs::{
     assign_jobs, drain_peep_demand, requeue_cargo, spawn_demand_jobs, sync_peep_platform_pressure,
-    Job, JobBoard, JobKind,
+    Job, JobBoard, JobKind, MAX_PENDING_PER_PAIR,
 };
 pub use ledger::{
     tick_money_ledger, MoneyCategory, MoneyLedger, LEDGER_HISTORY_LEN, LEDGER_RATE_SAMPLES,

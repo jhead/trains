@@ -212,8 +212,25 @@ pub fn advance_town_growth(
     tiles.sort_by_key(|t| (t.y, t.x));
     tiles.dedup();
 
+    let ground = terrain.as_deref();
     for tile in tiles {
-        let target = density_target_at(tile, &stations, &service);
+        // A house needs ground to stand on: water and the impassable band are
+        // not habitable, however good the service is (playtest: "houses should
+        // not spawn on water tiles"). Forcing the *target* to zero rather than
+        // skipping the tile means density a stale save already put there
+        // recedes through the same approach rate as everything else — the
+        // misplaced houses move out instead of squatting forever. Fixture
+        // worlds with no terrain resource keep the old behaviour: no terrain,
+        // no opinion.
+        let habitable = ground.map_or(true, |t| {
+            !t.is_water(tile)
+                && t.height_at(tile).unwrap_or(0) < crate::track::MOUNTAIN_HEIGHT_MIN
+        });
+        let target = if habitable {
+            density_target_at(tile, &stations, &service)
+        } else {
+            0.0
+        };
         let current = density.get(tile);
         let next = current + (target - current) * APPROACH_RATE;
         density.set(tile, next);
@@ -395,6 +412,74 @@ mod tests {
                 tile.y
             );
         }
+    }
+
+    #[test]
+    fn houses_never_stand_on_water_or_the_impassable_band() {
+        // The reported bug: a well-served catchment grew homes straight across
+        // a lake, because the growth pass never asked the ground's opinion. A
+        // lake tile and a cliff tile sit inside the catchment here; both must
+        // stay empty while the land around them fills in.
+        let mut app = App::new();
+        let (stations, id) = registry_with(TileCoord { x: 8, y: 8 }, "Lakeside");
+        let mut service = StationService::default();
+        service.scores.insert(
+            id,
+            StationServiceScore {
+                score: 100,
+                ..Default::default()
+            },
+        );
+        let water = TileCoord { x: 9, y: 8 };
+        let cliff = TileCoord { x: 8, y: 9 };
+        let terrain = TrackTerrain::new(
+            16,
+            16,
+            (0..16i32).flat_map(|y| {
+                (0..16i32).map(move |x| {
+                    if (TileCoord { x, y }) == water {
+                        (true, -2i8)
+                    } else if (TileCoord { x, y }) == cliff {
+                        (false, crate::track::MOUNTAIN_HEIGHT_MIN)
+                    } else {
+                        (false, 0i8)
+                    }
+                })
+            }),
+        );
+        // Stale-save shape: density already sits on the water before the first
+        // tick, as a save written before this rule would have it.
+        let mut density = TownDensity::default();
+        density.set_bounds(16, 16);
+        density.set(water, 0.8);
+
+        app.insert_resource(stations)
+            .insert_resource(service)
+            .insert_resource(terrain)
+            .insert_resource(density)
+            .add_systems(bevy_app::Update, advance_town_growth);
+
+        // The approach rate drains ~4% per pass; 160 passes takes the seeded
+        // 0.8 under 0.01 — receding, not teleporting, is the designed shape.
+        for _ in 0..160 {
+            app.update();
+        }
+
+        let density = app.world().resource::<TownDensity>();
+        assert!(
+            density.get(TileCoord { x: 7, y: 8 }) > 0.1,
+            "the land beside the station has to actually grow"
+        );
+        assert!(
+            density.get(water) < 0.01,
+            "the lake kept its houses: {}",
+            density.get(water)
+        );
+        assert!(
+            density.get(cliff) < 0.01,
+            "the cliff face kept its houses: {}",
+            density.get(cliff)
+        );
     }
 
     #[test]

@@ -49,9 +49,24 @@ use super::ledger::{MoneyCategory, MoneyLedger};
 
 /// Passenger fare per tile of distance carried, before the super-linear term.
 ///
-/// Sized so the fifteen-tile first line still pays about `$31` a run, which is
-/// where the flat `$30` fare it replaces left the opening minutes.
-pub const PASSENGER_FARE_CENTS_PER_TILE: i64 = 150;
+/// A fifteen-tile first line pays about `$62` a run.
+///
+/// # Why it doubled with the timetable
+///
+/// Brief 17 §4 halved train speed, which halves how many fares a train collects
+/// in a real minute — and **every cost in this game is charged per real
+/// minute** (design 08 §3, [`crate::economy::opex`]). A fare is paid per
+/// journey, so leaving it alone would not have been "unchanged": it would have
+/// halved the income side of a ledger whose cost side never moved, and the
+/// opening beat design 02 §4.1 pins is measured in exactly those minutes.
+///
+/// Measured on the cold-start harness, before and after: the opening line ran
+/// 57 paid runs a minute at `$21` a fare and now runs 28 at `$42`. The rate the
+/// player sees is the same rate, which is the point — this is a
+/// re-denomination, not a buff. Every relationship design 08 §2 asks for is
+/// untouched: the quadratic divisor, the boarding term's share, and the 3:1
+/// goods-to-passenger split are all ratios, and all three scaled with it.
+pub const PASSENGER_FARE_CENTS_PER_TILE: i64 = 300;
 
 /// Divisor on the squared term of a passenger fare. Lower = steeper.
 ///
@@ -101,8 +116,10 @@ pub const PASSENGER_FARE_BOARDING_TILES: i64 = 2;
 /// Goods payout per tile of distance carried, before the super-linear term.
 ///
 /// Roughly three times a fare, per design 08 §2's split: passengers are small
-/// and frequent, freight is large and lumpy.
-pub const GOODS_DELIVERY_CENTS_PER_TILE: i64 = 400;
+/// and frequent, freight is large and lumpy. Doubled alongside the fare when
+/// brief 17 §4 halved train speed — see [`PASSENGER_FARE_CENTS_PER_TILE`]; the
+/// ratio between the two is the design decision and it has not moved.
+pub const GOODS_DELIVERY_CENTS_PER_TILE: i64 = 800;
 
 /// Divisor on the squared term of a goods payout — half the passenger divisor,
 /// so freight rewards distance twice as steeply.
@@ -310,22 +327,35 @@ mod tests {
         assert_eq!(passenger_fare_cents(-5), passenger_fare_cents(1));
     }
 
-    /// A first line's run is worth about what it always was.
+    /// A first line's run is worth about what it should be.
     ///
     /// The band was `2_800..=3_400` against the flat `$30` fare this curve
-    /// replaced, and adding [`PASSENGER_FARE_BOARDING_TILES`] put a
-    /// fifteen-tile run at `$33.90` — ten cents inside a bound it was never
-    /// meant to be tested against. Widened to `3_600` and re-anchored on the
-    /// thing that actually matters: the opening beat is paced by what a run
-    /// pays, and `rail_sim/tests/economy_cold_start.rs` measures that pacing
-    /// end to end (capital cleared in minute seven). This is the cheap guard
-    /// that notices an order-of-magnitude slip before that suite has to run.
+    /// replaced, then `3_600` once [`PASSENGER_FARE_BOARDING_TILES`] arrived.
+    /// It doubled with brief 17 §4's timetable, because a fare is paid per
+    /// journey and a train now makes half as many of them in the real minute
+    /// every cost is charged in — see [`PASSENGER_FARE_CENTS_PER_TILE`].
+    ///
+    /// The number that actually matters is unchanged, and it is measured rather
+    /// than asserted here: `rail_sim/tests/economy_cold_start.rs` still clears
+    /// the opening line's capital in minute seven. This is the cheap guard that
+    /// notices an order-of-magnitude slip before that suite has to run.
     #[test]
     fn the_opening_line_still_pays_about_what_it_used_to() {
         let fare = passenger_fare_cents(15);
         assert!(
-            (2_800..=3_600).contains(&fare),
+            (5_600..=7_200).contains(&fare),
             "a first-line run pays {fare}c"
+        );
+        // Per *real* minute — the only comparison that means anything — the
+        // opening line is where it was: half the runs at twice the fare.
+        let runs_per_min_before = 57;
+        let runs_per_min_now = 28;
+        let before = runs_per_min_before * (fare / 2);
+        let now = runs_per_min_now * fare;
+        assert!(
+            (now * 10 / before).abs_diff(10) <= 1,
+            "the timetable was re-denominated, not re-balanced: {before}c/min \
+             before against {now}c/min now"
         );
     }
 
@@ -457,8 +487,13 @@ mod tests {
             "a halt boards slower than an interchange turns around \
              (halt {halt}, interchange {interchange})"
         );
-        assert_eq!(halt, 3, "150% of the transit profile's 2 ticks");
-        assert_eq!(interchange, 1, "60% of 2, floored, never zero");
+        // Stated against the profile, not against the number it happens to
+        // produce: base dwell is a pacing constant (brief 17 §4) and it moves
+        // with train speed.
+        let base = crate::trains::TRANSIT_PROFILE.dwell_ticks;
+        assert_eq!(halt, base * 150 / 100, "150% of the transit profile's dwell");
+        assert_eq!(interchange, base * 60 / 100, "60% of it, floored, never zero");
+        assert!(interchange >= 1);
     }
 
     #[test]

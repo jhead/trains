@@ -32,8 +32,10 @@ For where the build actually stands, see [`docs/BURNDOWN.md`](../BURNDOWN.md) �
 | 13 | [Shadows](13-shadows.md) | How does light fall on the world? Sun quantisation, what casts, what it costs. |
 | 14 | [Music](14-music.md) | What does the score actually play? Mode, harmony, melody, form, synthesis. |
 | 15 | [Isometric Track](15-isometric-track.md) | What does a railway do where the ground steps? Ramps, earthworks, what "connected" means. |
+| 16 | [Desire Paths](16-desire-paths.md) | How does the ground admit it has been walked on? Footfalls, wear, regrowth. |
+| 17 | [Time & Pacing](17-time-and-pacing.md) | How long is a day, how fast is a train, and what does the clock face say? |
 
-**01 and 03 are binding standards** — the pixel contract, the palette and the UI kit are constraints, not suggestions. 02 and 04–10 are feature design. 11 sequences them. 13, 14 and 15 are subordinate to 01, 10 and 01 respectively: where a brief and its parent disagree, the parent wins.
+**01, 03 and 17 are binding standards** — the pixel contract, the palette, the UI kit and the time model are constraints, not suggestions. 02 and 04–10 are feature design. 11 sequences them. 13, 14, 15 and 16 are subordinate to 01, 10, 01 and 06 respectively: where a brief and its parent disagree, the parent wins.
 
 ---
 

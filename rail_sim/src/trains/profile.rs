@@ -3,6 +3,33 @@
 //! Price alone is not a profile — speed, grade tolerance, opex, and dwell
 //! differ so the two kinds want different routes across the same terrain.
 //! See `docs/design/07-trains-and-lines.md` §3.
+//!
+//! # How fast a train is
+//!
+//! Binding standard: [`docs/design/17-time-and-pacing.md`](../../../docs/design/17-time-and-pacing.md) §4.
+//!
+//! Speed is stated in **ticks to cross a flat straight tile**, and a tick is
+//! 1/64 of a real second at 1x. Transit's `base_ticks` is therefore two numbers
+//! at once and both are load-bearing:
+//!
+//! | | value |
+//! | --- | --- |
+//! | Sim time per tile | **one sim-minute** (`6` ticks x 10 sim-seconds) |
+//! | Real time per tile | 0.094 s — **10.7 tiles a real second** at 1x |
+//!
+//! It used to be `3`, which is 21.3 tiles a real second: a transit crossed a
+//! standard 64-tile map in three seconds and ran the opening line's twenty-tile
+//! round trip 57 times a minute. The owner's report was *"insanely fast"*, and
+//! the sim agreed — half a sim-minute a tile is an express doing about 70 km/h
+//! between stops a few hundred metres apart.
+//!
+//! **A tile a minute is the model, and the ceiling on slowing further is the
+//! peep on the platform.** A peep walks at
+//! [`WALK_TICKS_PER_TILE`](crate::peeps::WALK_TICKS_PER_TILE) = 24 ticks a
+//! tile, so transit is exactly four times walking pace. Taking trains much
+//! below that would put a railway on a par with going on foot, on screen and in
+//! the fiction both. Going slower than a tile a minute means slowing the walk
+//! first, and that is a peep-model change, not a train one.
 
 use crate::commands::TrainKind;
 
@@ -33,23 +60,28 @@ pub struct TrainProfile {
 }
 
 /// Transit: brisk, climbs well, cheap to run, short dwell.
+///
+/// One sim-minute a tile — see the module docs for why that number and not a
+/// smaller one. Everything else here is the old profile at the same halved
+/// pace, so grade, curve and dwell cost the same *share* of a journey as
+/// before: only the clock moved.
 pub const TRANSIT_PROFILE: TrainProfile = TrainProfile {
-    base_ticks: 3,
-    grade_tick_cost: 1,
-    curve_div: 32,
+    base_ticks: 6,
+    grade_tick_cost: 2,
+    curve_div: 16,
     max_grade: 4, // matches track [`MAX_GRADE`](crate::track::MAX_GRADE)
     opex_cents_per_real_min: 14_000,
-    dwell_ticks: 2,
+    dwell_ticks: 4,
 };
 
 /// Transport: slow, poor grade tolerance, expensive, long dwell.
 pub const TRANSPORT_PROFILE: TrainProfile = TrainProfile {
-    base_ticks: 5,
-    grade_tick_cost: 2,
-    curve_div: 16,
+    base_ticks: 10,
+    grade_tick_cost: 4,
+    curve_div: 8,
     max_grade: 1,
     opex_cents_per_real_min: 24_000,
-    dwell_ticks: 6,
+    dwell_ticks: 12,
 };
 
 impl TrainProfile {
@@ -170,18 +202,54 @@ mod tests {
         let t = TRANSIT_PROFILE.ticks_for_piece(0, 0);
         let f = TRANSPORT_PROFILE.ticks_for_piece(0, 0);
         assert!(t < f, "transit {t} should be < transport {f}");
-        assert_eq!(t, 3);
-        assert_eq!(f, 5);
+        assert_eq!(t, 6);
+        assert_eq!(f, 10);
     }
 
     #[test]
     fn transport_penalises_grade_harder() {
         let t = TRANSIT_PROFILE.ticks_for_piece(2, 0);
         let f = TRANSPORT_PROFILE.ticks_for_piece(2, 0);
-        // Transit: 3 + 2*1 = 5; Transport: 5 + 2*2 = 9
-        assert_eq!(t, 5);
-        assert_eq!(f, 9);
+        // Transit: 6 + 2*2 = 10; Transport: 10 + 2*4 = 18
+        assert_eq!(t, 10);
+        assert_eq!(f, 18);
         assert!(f > t);
+    }
+
+    /// **The speed claim.** Brief 17 §4: a transit covers one tile per
+    /// sim-minute, which is 10.7 tiles a real second at 1x.
+    #[test]
+    fn a_transit_covers_one_tile_per_sim_minute() {
+        use crate::economy::TICKS_PER_SIM_MINUTE;
+        assert_eq!(
+            i64::from(TRANSIT_PROFILE.ticks_for_piece(0, 0)),
+            TICKS_PER_SIM_MINUTE,
+            "brief 17 states a tile a sim-minute; the profile has to be that"
+        );
+
+        // Ten tiles is the opening beat's separation (design 02 §4.1).
+        let ten_tiles = u32::from(TRANSIT_PROFILE.ticks_for_piece(0, 0)) * 10;
+        assert_eq!(ten_tiles, 60, "ten tiles is ten sim-minutes");
+        // …and 0.94 real seconds of watching, at 64 Hz.
+        assert!(
+            (0.9..=1.0).contains(&(f64::from(ten_tiles) / 64.0)),
+            "a ten-tile journey should take about a real second at 1x, got {}",
+            f64::from(ten_tiles) / 64.0
+        );
+    }
+
+    /// The floor on slowing trains: a railway has to beat walking, visibly.
+    #[test]
+    fn a_train_is_four_times_walking_pace() {
+        let walk = crate::peeps::WALK_TICKS_PER_TILE;
+        let transit = u32::from(TRANSIT_PROFILE.ticks_for_piece(0, 0));
+        let transport = u32::from(TRANSPORT_PROFILE.ticks_for_piece(0, 0));
+        assert_eq!(walk / transit, 4, "transit should be four times the walk");
+        assert!(
+            transport * 2 < walk,
+            "even freight has to comfortably beat going on foot: {transport} \
+             against {walk}"
+        );
     }
 
     #[test]

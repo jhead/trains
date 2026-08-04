@@ -277,6 +277,69 @@ mod tests {
         assert_eq!(LOT_TEXELS * 2, TILE_TEXELS);
     }
 
+    /// **The pacing claim, end to end.** Brief 17 §5.
+    ///
+    /// The sim owns a *rate* and this module owns the *thresholds*, and neither
+    /// half means anything on its own: a growth rate is only "over a few days"
+    /// if the density it produces crosses the numbers that put a building on a
+    /// lot. This is the one place both halves are in scope at once.
+    ///
+    /// The block modelled is the heart of a fully served town — target density
+    /// `1.0` — which is the fastest any block in the game grows. Everything
+    /// further out is slower, because `town_falloff` caps its target.
+    #[test]
+    fn a_block_fills_over_days_and_the_first_house_lands_promptly() {
+        use rail_sim::{GROWTH_APPROACH_RATE, GROWTH_PASSES_PER_DAY};
+
+        /// Sim days a block at target `1.0` needs to reach `d`, at the sim's
+        /// own rate — the closed form of "close `GROWTH_APPROACH_RATE` of the gap,
+        /// `GROWTH_PASSES_PER_DAY` times a day".
+        fn days_to(d: f32) -> f32 {
+            let per_day = (1.0 - GROWTH_APPROACH_RATE).powi(GROWTH_PASSES_PER_DAY as i32);
+            (1.0 - d).ln() / per_day.ln()
+        }
+
+        let days: Vec<f32> = LOT_UP.iter().map(|d| days_to(*d)).collect();
+
+        // A stake goes in inside the first sim day, so the player can connect
+        // the building to the line they just built (brief 06 §1)…
+        assert!(
+            (0.3..=1.0).contains(&days[0]),
+            "the first lot should be claimed inside the first sim day, not {} \
+             days in",
+            days[0]
+        );
+        // …and the block is not finished for the better part of a working week,
+        // which is the owner's "over a few days".
+        assert!(
+            (4.0..=8.0).contains(&days[3]),
+            "a full block should take several sim days, not {}",
+            days[3]
+        );
+        // Monotone, and no two lots land on the same day — a block that gains
+        // three lots at once is a town that appears rather than grows.
+        for pair in days.windows(2) {
+            assert!(
+                pair[1] > pair[0] + 0.4,
+                "lots must arrive separately: {pair:?}"
+            );
+        }
+
+        // In the minutes the player is actually sitting there (brief 17 §1: a
+        // sim day is 2.25 real minutes at 1x).
+        let real_minutes = |d: f32| d * 2.25;
+        assert!(
+            (0.7..=2.5).contains(&real_minutes(days[0])),
+            "first house at {} real minutes",
+            real_minutes(days[0])
+        );
+        assert!(
+            (9.0..=18.0).contains(&real_minutes(days[3])),
+            "full block at {} real minutes",
+            real_minutes(days[3])
+        );
+    }
+
     #[test]
     fn density_takes_up_lots_one_at_a_time() {
         let d = District::Residential;

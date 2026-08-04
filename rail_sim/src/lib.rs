@@ -103,7 +103,10 @@ pub use stations::{
     StationTierSpec, UpgradeStation, GOODS_PLATFORM_COST_CENTS, HALT_COST_CENTS,
     INTERCHANGE_COST_CENTS, MIN_STATION_SPACING, STATION_COST_CENTS, TERMINUS_COST_CENTS,
 };
-pub use town::{TownDensity, TownPlugin, GROWTH_RADIUS, MAX_DENSITY};
+pub use town::{
+    town_falloff, TownDensity, TownPlugin, GROWTH_APPROACH_RATE, GROWTH_PASSES_PER_DAY,
+    GROWTH_RADIUS, MAX_DENSITY,
+};
 pub use track::{
     apply_track_commands, bridge_cost_for_span, local_slope, path_bridge_spans_ok, path_grades_ok,
     piece_maintenance_weight, straight_line, tile_build_cost, tile_cost, validate_tile_empty,

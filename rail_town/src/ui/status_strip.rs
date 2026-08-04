@@ -16,17 +16,32 @@
 //!
 //! # The clock
 //!
-//! [`crate::atmosphere::TimeOfDay`] drives the day tint. Before this strip
-//! existed the player would watch the world turn warm with no way to know why.
-//! Season, day, time and the phase name are all derived from the same
-//! `fraction`, so the readout can never disagree with the light.
+//! Binding standard: [`docs/design/17-time-and-pacing.md`](../../../docs/design/17-time-and-pacing.md) §3.
+//!
+//! Two fields, and they answer different questions from different sources:
+//!
+//! - **`Spring 3`** — the date, counted in the **sim's own days**
+//!   ([`rail_sim::day_index`]). That is the day the Goals panel deals its
+//!   deadlines in (*"by day 4"*) and the day the Peep card counts tenure in
+//!   (*"lived here 14 days"*), so it is the only day the game can afford to
+//!   have. It used to count wraps of the twelve-minute light cycle instead,
+//!   which meant the strip and the panels disagreed by a factor of five and a
+//!   third about what a day was — and the strip's day reset to `Spring 1` on
+//!   every load, because nothing saved it. The sim tick is saved.
+//! - **`Morning`** — which part of the day the light is in, derived from
+//!   [`crate::atmosphere::TimeOfDay`], the same `fraction` that drives the tint.
+//!   03 §6's rule holds: what the strip says about the light comes from the
+//!   light.
+//!
+//! **There is no `HH:MM`, deliberately** — see [`crate::ui::format`] for why a
+//! minute-resolution clock made the railway look absurd.
 
 use bevy::prelude::*;
 use rail_sim::{AlertBoard, CommandBuffer, CommandKind, Money, MoneyLedger, SimClock, StationService};
 
 use crate::atmosphere::TimeOfDay;
 use crate::palette::{HI, OK, OUTLINE, WARN};
-use crate::ui::format::{clock_label, date_label, money_rate, money_whole};
+use crate::ui::format::{date_label, money_rate, money_whole, part_of_day};
 use crate::ui::health::{actionable_alert_count, alerts_are_bad_news};
 use crate::ui::kit::{
     body_font, chrome_button_node, control_border, display_font, micro_font, text_accent,
@@ -60,39 +75,25 @@ pub struct SpeedButton {
     pub multiplier: u8,
 }
 
-/// The in-game calendar.
+/// The in-game calendar — a read of the sim's day counter, nothing more.
 ///
-/// [`TimeOfDay`] is a position inside one day and nothing more, so the day
-/// counter lives here: it advances when the cycle fraction wraps. That keeps the
-/// atmosphere module free of a calendar it has no use for, and keeps the two
-/// from ever drifting apart, because there is only one clock.
-#[derive(Resource, Debug, Clone, Copy)]
+/// It holds no state of its own on purpose. The day is `tick / TICKS_PER_DAY`,
+/// the tick is saved with the world, and a derived readout cannot drift from
+/// the thing it is derived from. The previous version counted wraps of the
+/// light cycle in a resource of its own, which drifted from the sim's day by
+/// construction and reset to `Spring 1` whenever a save was loaded.
+#[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct GameCalendar {
     pub day: u32,
-    last_fraction: f32,
-}
-
-impl Default for GameCalendar {
-    fn default() -> Self {
-        Self {
-            day: 0,
-            last_fraction: 0.0,
-        }
-    }
 }
 
 impl GameCalendar {
-    /// Feed the current cycle position; returns `true` on a new day.
-    pub fn observe(&mut self, fraction: f32) -> bool {
-        // The cycle only ever moves forward, so a fall means it wrapped past
-        // first light. The half-cycle guard keeps a load or a rewind from
-        // counting as a day.
-        let wrapped = fraction + 0.5 < self.last_fraction;
-        self.last_fraction = fraction;
-        if wrapped {
-            self.day = self.day.saturating_add(1);
-        }
-        wrapped
+    /// Take the day from a sim tick; returns `true` when the date changed.
+    pub fn observe_tick(&mut self, tick: u64) -> bool {
+        let day = rail_sim::day_index(tick) as u32;
+        let changed = day != self.day;
+        self.day = day;
+        changed
     }
 
     pub fn label(&self) -> String {
@@ -154,7 +155,7 @@ pub fn spawn_status_row(parent: &mut ChildSpawnerCommands, starting_cents: i64) 
 
             strip.spawn((
                 StatusClockText,
-                Text::new("Spring 1  05:00"),
+                Text::new("Spring 1"),
                 body_font(),
                 text_primary(),
                 Node {
@@ -200,13 +201,15 @@ pub fn spawn_status_row(parent: &mut ChildSpawnerCommands, starting_cents: i64) 
         });
 }
 
-/// Advance the calendar. One resource read, one compare — cheap enough to run
-/// every frame, and it has to, because the wrap can happen on any frame.
-pub fn advance_calendar(tod: Res<TimeOfDay>, mut calendar: ResMut<GameCalendar>) {
-    if !tod.is_changed() {
-        return;
-    }
-    calendar.observe(tod.fraction);
+/// Advance the calendar. One resource read, one divide — cheap enough to run
+/// every frame, and it has to, because the day can turn over on any frame.
+///
+/// [`StationService::tick`] is the sim's master tick counter (it is what the
+/// save snapshot stores as `service_tick`), and it only advances while the sim
+/// is running — so a paused game holds its date, which is what a paused game
+/// should do.
+pub fn advance_calendar(service: Res<StationService>, mut calendar: ResMut<GameCalendar>) {
+    calendar.observe_tick(service.tick);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -275,7 +278,7 @@ pub fn update_status_strip(
         }
     }
 
-    let clock_str = format!("{}  {}", calendar.label(), clock_label(tod.fraction));
+    let clock_str = calendar.label();
     if clock_str != cache.clock {
         cache.clock = clock_str.clone();
         if let Ok(mut text) = clock_q.single_mut() {
@@ -283,7 +286,7 @@ pub fn update_status_strip(
         }
     }
 
-    let phase_str = tod.phase.label().to_string();
+    let phase_str = part_of_day(tod.fraction).to_string();
     if phase_str != cache.phase {
         cache.phase = phase_str.clone();
         if let Ok(mut text) = phase_q.single_mut() {
@@ -390,32 +393,53 @@ pub fn alert_bell_clicks(
 mod tests {
     use super::*;
 
+    use rail_sim::TICKS_PER_DAY;
+
     #[test]
-    fn the_calendar_advances_when_the_cycle_wraps() {
+    fn the_calendar_turns_over_with_the_sim_day() {
         let mut calendar = GameCalendar::default();
-        assert!(!calendar.observe(0.20));
-        assert!(!calendar.observe(0.99));
-        assert!(calendar.observe(0.01), "past first light is a new day");
+        assert!(!calendar.observe_tick(0));
+        assert!(!calendar.observe_tick(TICKS_PER_DAY - 1), "still day one");
+        assert_eq!(calendar.label(), "Spring 1");
+        assert!(calendar.observe_tick(TICKS_PER_DAY), "a sim day has passed");
         assert_eq!(calendar.day, 1);
         assert_eq!(calendar.label(), "Spring 2");
     }
 
+    /// **The date is the same day the rest of the game speaks in.** The Goals
+    /// panel says "by day 4" and the Peep card says "lived here 14 days"; both
+    /// are `tick / TICKS_PER_DAY`, and so is this.
     #[test]
-    fn a_small_step_backwards_is_not_a_new_day() {
-        // Loading a save can move the clock back; that is not a day passing.
+    fn the_strip_and_the_panels_agree_about_what_day_it_is() {
         let mut calendar = GameCalendar::default();
-        calendar.observe(0.60);
-        assert!(!calendar.observe(0.55));
-        assert_eq!(calendar.day, 0);
+        for day in [0u64, 1, 7, 40] {
+            let tick = day * TICKS_PER_DAY + TICKS_PER_DAY / 3;
+            calendar.observe_tick(tick);
+            assert_eq!(
+                u64::from(calendar.day),
+                rail_sim::day_index(tick),
+                "the strip must count the sim's own days"
+            );
+        }
+    }
+
+    /// Loading a save restores the tick, so it restores the date. The old
+    /// counter lived only in this resource and always reopened at Spring 1.
+    #[test]
+    fn a_loaded_world_keeps_its_date() {
+        let mut calendar = GameCalendar::default();
+        calendar.observe_tick(TICKS_PER_DAY * 30);
+        assert_eq!(calendar.label(), "Autumn 7");
+
+        let mut reloaded = GameCalendar::default();
+        reloaded.observe_tick(TICKS_PER_DAY * 30);
+        assert_eq!(reloaded.label(), calendar.label());
     }
 
     #[test]
     fn a_full_season_of_days_reaches_summer() {
         let mut calendar = GameCalendar::default();
-        for _ in 0..12 {
-            calendar.observe(0.99);
-            calendar.observe(0.01);
-        }
+        calendar.observe_tick(TICKS_PER_DAY * 12);
         assert_eq!(calendar.day, 12);
         assert_eq!(calendar.label(), "Summer 1");
     }

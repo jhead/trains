@@ -154,6 +154,7 @@ tests.**
 | "Really confused by the Lines mechanic... clicked the train but nothing happens" | A designed-but-never-wired flow: the Line tool switched out of Look mode and never switched back; only Look selects; the assign button fails silently with nothing selected; no dedupe; no delete; the intended click-to-assign helper sat as dead code. Now the tool returns to Look on every exit (Enter *and* Esc), the new line auto-focuses, a fresh train pick assigns to the focused line and says so in Town Talk, the button states its precondition out loud, duplicates (including reversed — an out-and-back is one service) are refused at both layers, rows carry a Remove button through the confirm dialog (X stays demolish: sticky focus would have turned it into a trap), and "Westbroo" got its name back. |
 | "Can the prototype run as a mode inside the game?" | Yes — `iso-mode` merged. The projection is a runtime flag at the coords choke point; `I` (or Settings > Display) flips it live via the same presentation rebuild a new world runs. Top-down default is asserted byte-identical; flip costs 0.3 ms into iso, ~16 ms back (the chunk compositor, priced the same as a world swap); Map View works in both; sim-hash asserted unchanged across mid-play flips. Known iso gaps stand: no autotiling (shoreline staircases), top-down sprites read as stickers, and the calm worldgen means most of a stock map is flat — the projection's best argument now only appears where a landform does. |
 
+<<<<<<< HEAD
 ## Fourth wave (2026-08-04): five agents, five landings, one dead promise found
 
 Five worktree agents ran concurrently against explicit file fences and landed in
@@ -175,6 +176,34 @@ agent widened the toolbar's arm path to carry `StationToolState`, which the
 trains window's minimal test app didn't provide; one `init_resource` line. The
 pacing agent (in flight) was told mid-run that its growth baselines were
 measurements of the broken scorer.
+
+## Time model (2026-08-04): the clock stopped lying, the town slowed down
+
+Two reports, one root cause — **nothing in the game agreed about how long
+anything took.** New binding standard, [17 — Time & Pacing](design/17-time-and-pacing.md).
+
+| Report | Root cause and landing |
+| --- | --- |
+| "Trains go between ~10 tiles in ~1 in-game minute at 1x which is insanely fast" | Both halves were true and they were **two separate faults**. The status strip's `HH:MM` ran on the twelve-real-minute *light* cycle — a clock-minute every half a real second — while the Goals panel and the Peep card counted the 2¼-minute *sim* day, so the game had two days 5⅓ apart, both called "day", and the visible one made every journey look instant. And the train really was doing 21.3 tiles a real second: a 64-tile map crossed in three seconds, 57 round trips a minute on the opening line. Now: **the strip shows `Season Day` and a part of the day, and no minutes at all** (RCT's answer, and the only one that cannot be caught lying), the date is the sim's own day so there is one day in the game — saved with the world, where the old counter reset to Spring 1 on every load — and transit runs **a tile per sim-minute**, 10.7 tiles a real second, exactly 4× a walking peep, which is the floor. |
+| "House growth happens too quickly, within a few in-game minutes — it should be over a few days" | The growth pass ran **every tick** at 4% of the gap: half the target in seventeen ticks, full inside one real second. Denominated in the day now — 24 passes a sim day at 1.25% — so a served block takes its first lot half a day in and its fourth on day five (1.1 → 12 real minutes), and a district that loses its service sheds half its buildings over 2½ days. The pass also costs a 360th of what it did. |
+
+Fares and goods payouts **doubled**, which is arithmetic rather than balance:
+costs are billed per *real* minute and a fare is paid per journey, so halving
+the timetable halves income against a fixed cost side. Measured either side of
+the change, the opening line earns $1,239 → $1,218/min and clears its capital in
+real minute **seven** both times; the compact local line holds 2.47× its costs
+and pays back in minute 13 both times. Every 02 §4.1 bar holds with the margin
+it had. 1,418 → **1,426 tests.**
+
+Left deliberately: `SIM_SECONDS_PER_TICK` (every per-sim-time claim in the
+codebase and in briefs 06/08/16 hangs off it, and brief 16's day-denominated
+wear rates stay true untouched); the eight-second scaffold (06 §3.1 is a
+*real*-seconds spec about holding the eye); the service-score decay constants
+(set deliberately elsewhere and under owner review — 17 §5.1 records that the
+120-tick idle grace is now under one lap of the opening line rather than two).
+One seam is recorded rather than hidden: the light cycle is 12 real minutes and
+a sim day is 2¼, so the sun goes round once every 5⅓ days of the date — 17 §3.1
+names the one-number fix and whose it is.
 
 ## Carried debt
 

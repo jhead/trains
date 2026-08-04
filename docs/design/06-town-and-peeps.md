@@ -51,6 +51,10 @@ That last one matters as much as the others. The unserved parts of the map must 
 
 The single most important change in this brief: **growth is something the player watches happen.**
 
+**Over days.** Playtest (2026-08-04): *"house growth happens too quickly, within a few in-game minutes. It should be more gradual, e.g. over a few days."* It was worse than that — density approached its target every tick, so a served block filled inside a real second and the whole town was finished before the player let go of the mouse. Growth is denominated in **sim days** now: a lot at the heart of a served town is claimed half a day in, and the block reaches its fourth lot on day five. [17 — Time & Pacing](17-time-and-pacing.md) §5 carries the table and the arithmetic.
+
+The first cottage inside the first day is deliberate. §1 wants growth *visibly caused*, and a consequence the player cannot connect to their decision has not been caused as far as they are concerned — so the **district** is what takes days, while the first hint that it has started is prompt. The sequence below is unaffected: those are real seconds, and they are about how long a small event should hold the eye.
+
 ### 3.1 Construction
 
 1. A lot is chosen. A **surveyor's stake** appears — tiny, easy to miss, and the first hint.

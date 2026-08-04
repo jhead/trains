@@ -33,9 +33,15 @@ use super::routine::{clock_label, Routine, DAY_MINUTES};
 use super::walk::{walk_step, WalkRoute, WalkRouter, WalkStep, WalkWorld};
 use super::{day_index, minute_of_day};
 
-/// Ticks a peep takes to walk one tile. Transit crosses a tile in 3 ticks, so
-/// walking is deliberately eight times slower — giving up and walking has to
-/// *feel* like a worse deal, not just score like one.
+/// Ticks a peep takes to walk one tile — four sim-minutes.
+///
+/// Walking is deliberately slower than the railway: giving up and walking has
+/// to *feel* like a worse deal, not just score like one. It is now **four**
+/// times slower than a transit rather than eight, because brief 17 §4 halved
+/// train speed for watchability — and this constant is the floor that stopped
+/// it going further. A railway that a pedestrian can keep up with is not a
+/// railway, on screen or in the fiction, so any further slowing of trains
+/// starts here.
 pub const WALK_TICKS_PER_TILE: u32 = 24;
 
 /// Tiles covered per Advance tick while walking.
@@ -1322,7 +1328,7 @@ mod tests {
         }
         assert_eq!(pos.tile(), tile(5, 0));
         assert_eq!(pos.facing, Facing::East);
-        // Eight times slower than a transit train's 3 ticks per tile.
+        // Four times slower than a transit train's tile a sim-minute.
         assert!(ticks >= 5 * (WALK_TICKS_PER_TILE as i32 - 2));
     }
 

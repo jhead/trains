@@ -26,10 +26,15 @@ use rail_sim::{
 
 /// Ticks the railway is given to turn a new platform into houses.
 ///
-/// Jobs are posted every 45 ticks and a transit covers a tile in ~3, so this is
-/// tens of round trips — generous, but bounded: a promise that only comes true
-/// eventually is not a promise.
-const HORIZON_TICKS: u32 = 9_000;
+/// Jobs are posted every 45 ticks and a transit covers a tile in a sim-minute
+/// (brief 17 §4), so this is tens of round trips — generous, but bounded: a
+/// promise that only comes true eventually is not a promise.
+///
+/// It is also **just over one sim day**, which is the unit growth is now
+/// denominated in (17 §5): a served block takes its first lot half a day in, so
+/// a day of running is the shortest horizon on which this claim can be true at
+/// all. Stated in days rather than in a round number of ticks for that reason.
+const HORIZON_TICKS: u32 = (rail_sim::TICKS_PER_DAY + rail_sim::TICKS_PER_DAY / 25) as u32;
 
 /// How far out of the new stop's ring the growth is measured.
 const MEASURE_RADIUS: i32 = 3;

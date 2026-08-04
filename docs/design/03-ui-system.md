@@ -99,7 +99,7 @@ Colour never carries meaning alone. Every state that uses colour also changes sh
 │ Look Track Demolish Line Transit Transport │ Network Town Talk Ledger     │  ← menu row, 24
 │ Alerts Goals Neighbours Map Overlay │ Settings                            │
 ├──────────────────────────────────────────────────────────────────────────┤
-│ $12,480  +$340/min           Spring 14  17:57 Dusk        ‖ 1x 2x 3x  ! 2 │  ← status strip, 20
+│ $12,480  +$340/min           Spring 14  Evening           ‖ 1x 2x 3x  ! 2 │  ← status strip, 20
 ├──────────────────────────────────────────────────────────────────────────┤
 │ NET 62 ▰▰▰▱▱  1 blocked 2 unserved │ Westbrook 18 ▰▱▱ │ Eastgate 44 ▰▰▱   │  ← health strip, 20
 ├──────────────────────────────────────────────────────────────────────────┤
@@ -163,12 +163,16 @@ The centre of the screen is never occupied by default. If a panel needs to be bi
 Always visible, minimal, and it never moves.
 
 ```
-  $12,480  +$340/min            Spring 14  17:57 Dusk        ‖ 1x 2x 3x   ! 2
+  $12,480  +$340/min            Spring 14  Evening           ‖ 1x 2x 3x   ! 2
 ```
 
 - **Money. Whole dollars.** Fares land in cents, so a balance shown to the cent changes every second or two; a number that ticks pulls the eye, and this one is read constantly. It is Display size, `hi`, with a `min_width` so rolling from `$999` to `$1,000` does not shove the strip sideways.
 - **Rate.** Net income per minute, `ok` above zero and `warn` below. **Whole dollars, except below $1/min**, where the cents are the only thing distinguishing "barely earning" from "not earning". This is the number that says whether the player is overextended, so it is permanent and not buried in a ledger.
-- **Date and time.** `Season Day` and `HH:MM`, plus the **phase name** — `Dawn` / `Day` / `Dusk` / `Night`. Derived from `atmosphere::TimeOfDay::fraction`, the same value that drives the day tint, so the readout can never disagree with the light. Without it the world turns warm for no visible reason, which reads as a rendering fault rather than as evening.
+- **Date and part of day.** `Season Day` and one of `Dawn` / `Morning` / `Midday` / `Afternoon` / `Evening` / `Night`. Without it the world turns warm for no visible reason, which reads as a rendering fault rather than as evening.
+
+  **There is no `HH:MM`, and adding one back is a regression.** This field carried a minute-resolution clock, and because it ran on the twelve-minute light cycle a clock-minute went by every half a real second — so a train crossing ten tiles appeared to take one. The world runs 640× the wall clock; a clock face that resolves to the minute is a claim the game cannot make truthfully, and it is not a claim anybody needs it to make. See [17 — Time & Pacing](17-time-and-pacing.md) §3.
+
+  The **date** is the sim's own day, the same day the Goals panel deals deadlines in and the Peep card counts tenure in — one day in the game, saved with the world. The **part of day** is still derived from `atmosphere::TimeOfDay::fraction`, the same value that drives the day tint, and its boundaries refine the tint's own phases: the rule that the readout can never disagree with the light is unchanged.
 - **Speed.** Pause / 1× / 2× / 3× as a segmented control, clickable, with the active segment in `hi`.
 - **Alert bell.** Count of *actionable* alerts (§6.1). Clicking opens the Alerts window. `-` when there is nothing, `*` in `hi` when the news is only opportunity, `!` in `warn` when something is actually wrong — the glyph carries the tone as well as the colour.
 

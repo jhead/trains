@@ -38,6 +38,22 @@ use rail_sim::{
 /// Ticks in one real minute, as a loop count.
 const REAL_MINUTE: u32 = TICKS_PER_REAL_MINUTE as u32;
 
+/// Real minutes a rate is averaged over before it is compared to another rate.
+///
+/// A window is a **sample**, and how good a sample it is depends on how many
+/// paid runs fall inside it — the network's jobs are a mix of long and short
+/// hauls, so a window holding few of them reports a rate with real spread in
+/// it, and comparing two such rates amplifies the spread again because upkeep
+/// is a fixed subtraction.
+///
+/// This was `2`, which held about ninety runs when a transit crossed a tile in
+/// three ticks. Brief 17 §4 halved train speed, and a two-minute window then
+/// held forty-five: the same claim, measured half as well. Measured at six, the
+/// working and pruned windows of the test below read `$2,401` and `$2,402` a
+/// minute — flat, the way they were before. **It is the sample size being held
+/// constant here, not the answer.**
+const RATE_WINDOW_MINUTES: u32 = 6;
+
 /// Flat, dry, buildable ground — the network is the variable, not the terrain.
 fn flat_terrain(w: u32, h: u32) -> TrackTerrain {
     TrackTerrain::new(w, h, (0..w * h).map(|_| (false, 2i8)))
@@ -409,8 +425,17 @@ fn a_mid_session_network_is_profitable_at_a_larger_scale() {
 #[test]
 fn dead_track_sinks_the_network_and_pruning_brings_it_back() {
     let mut app = mid_network();
-    run(&mut app, REAL_MINUTE);
-    let working = measure(&mut app, 2);
+    // Settle before sampling. The claim is about *steady-state* rates, and the
+    // job board takes a few real minutes to reach one: it posts work on its own
+    // cadence and the trains take it off at theirs, so the queue depth — and
+    // with it the mix of long and short hauls a train is choosing between —
+    // is still moving for the first few minutes of a fresh network. A single
+    // minute of warmup was enough when trains ran at twice this speed and
+    // emptied the board as fast as it filled; at brief 17 §4's timetable it
+    // leaves the first window measuring the transient and the last one
+    // measuring the steady state, and then compares them.
+    run(&mut app, REAL_MINUTE * 6);
+    let working = measure(&mut app, RATE_WINDOW_MINUTES);
     eprintln!("{}", working.describe("mid, working"));
     assert!(working.net() > 0, "baseline must be profitable");
 
@@ -423,7 +448,7 @@ fn dead_track_sinks_the_network_and_pruning_brings_it_back() {
         overextended_tiles - before_tiles
     );
 
-    let overextended = measure(&mut app, 2);
+    let overextended = measure(&mut app, RATE_WINDOW_MINUTES);
     eprintln!("{}", overextended.describe("mid + 200 dead tiles"));
     assert!(
         overextended.net() < 0,
@@ -442,7 +467,7 @@ fn dead_track_sinks_the_network_and_pruning_brings_it_back() {
         network_len(&app) <= before_tiles,
         "pruning should leave the working network only"
     );
-    let pruned = measure(&mut app, 2);
+    let pruned = measure(&mut app, RATE_WINDOW_MINUTES);
     eprintln!("{}", pruned.describe("mid, pruned"));
     assert!(
         pruned.net() > 0,
@@ -499,7 +524,7 @@ fn the_on_screen_rate_follows_the_network_within_a_couple_of_minutes() {
 fn paving_the_whole_map_costs_more_than_any_railway_earns() {
     let mut app = mid_network();
     run(&mut app, REAL_MINUTE);
-    let working = measure(&mut app, 2);
+    let working = measure(&mut app, RATE_WINDOW_MINUTES);
 
     // A 64x64 map is 4,096 tiles. The claim is about the *rate*, so charge the
     // standing upkeep of that directly rather than laying four thousand tiles.
@@ -603,7 +628,7 @@ fn reaching_further_earns_more_than_running_more_short_hops() {
         station(&mut app, "Brackwell", TileCoord { x: 9, y: 10 });
         train(&mut app, 1, TrainKind::Transit, ids[0]);
         run(&mut app, REAL_MINUTE);
-        measure(&mut app, 2)
+        measure(&mut app, RATE_WINDOW_MINUTES)
     };
     let long = {
         let mut app = world(64, 64);
@@ -612,7 +637,7 @@ fn reaching_further_earns_more_than_running_more_short_hops() {
         station(&mut app, "Brackwell", TileCoord { x: 62, y: 10 });
         train(&mut app, 1, TrainKind::Transit, ids[0]);
         run(&mut app, REAL_MINUTE);
-        measure(&mut app, 2)
+        measure(&mut app, RATE_WINDOW_MINUTES)
     };
     eprintln!("{}", short.describe("4-tile shuttle"));
     eprintln!("{}", long.describe("60-tile haul"));

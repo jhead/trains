@@ -478,10 +478,40 @@ mod tests {
 
     #[test]
     fn profile_tick_helper_matches() {
-        assert_eq!(ticks_for_piece(TrainKind::Transit, 0, 0), 3);
-        assert_eq!(ticks_for_piece(TrainKind::Transport, 0, 0), 5);
+        assert_eq!(ticks_for_piece(TrainKind::Transit, 0, 0), 6);
+        assert_eq!(ticks_for_piece(TrainKind::Transport, 0, 0), 10);
         assert!(
             ticks_for_piece(TrainKind::Transport, 1, 0) > ticks_for_piece(TrainKind::Transit, 1, 0)
+        );
+    }
+
+    /// **The speed claim, measured on a running line** rather than read off the
+    /// profile: brief 17 §4 says ten tiles is ten sim-minutes and about one real
+    /// second of watching at 1x.
+    #[test]
+    fn ten_tiles_takes_ten_sim_minutes_of_running() {
+        let terrain = land(16, 6);
+        let mut network = TrackNetwork::new();
+        let tiles: Vec<(i32, i32)> = (1..=11).map(|x| (x, 3)).collect();
+        let main = lay(&mut network, &terrain, &tiles);
+
+        let mut sim = Sim::new(network);
+        let a = sim.spawn(1, TrainKind::Transit, main.clone());
+
+        let mut ticks = 0u32;
+        while !sim.arrived(a) && ticks < 10_000 {
+            sim.run(1);
+            ticks += 1;
+        }
+
+        // Eleven tiles of track is ten steps between them.
+        assert_eq!(ticks, 60, "ten tiles should take sixty ticks of running");
+        let sim_minutes = ticks * crate::peeps::SIM_SECONDS_PER_TICK / 60;
+        assert_eq!(sim_minutes, 10, "ten tiles, ten sim-minutes");
+        assert!(
+            (0.9..=1.0).contains(&(f64::from(ticks) / 64.0)),
+            "and about a real second at 1x, got {}",
+            f64::from(ticks) / 64.0
         );
     }
 

@@ -1,10 +1,46 @@
 //! Building density rings around stations, driven by service scores.
+//!
+//! # A town grows over days, not seconds
+//!
+//! Binding standard: [`docs/design/17-time-and-pacing.md`](../../../docs/design/17-time-and-pacing.md).
+//!
+//! This pass used to run **every tick** at 4% of the remaining gap, which put a
+//! block at half its target in seventeen ticks — a quarter of a real second —
+//! and full inside one. The player laid a line and the town was finished before
+//! they let go of the mouse, which is the owner's report: *"house growth happens
+//! too quickly, within a few in-game minutes. It should be more gradual, e.g.
+//! over a few days."*
+//!
+//! Growth is therefore denominated in **sim days** and nothing else. It
+//! advances [`GROWTH_PASSES_PER_DAY`] times a day, by [`GROWTH_APPROACH_RATE`]
+//! of the remaining gap each time, which is an exponential approach with a time
+//! constant of `1/0.302` ≈ 3.3 sim days. Against the lot thresholds it uses
+//! (`rail_town::town::lots::LOT_UP` = 0.14 / 0.32 / 0.56 / 0.80) a fully served
+//! block therefore takes up its lots on this schedule:
+//!
+//! | Lot | Sim days | Real minutes at 1x |
+//! | --- | --- | --- |
+//! | first — a stake, then a cottage | 0.5 | 1.1 |
+//! | second | 1.3 | 2.9 |
+//! | third | 2.7 | 6.1 |
+//! | fourth | 5.3 | 12.0 |
+//!
+//! The first cottage inside the first sim day is deliberate and is not a
+//! loophole in "over a few days": brief 06 §1 wants growth to be *visibly
+//! caused*, and a consequence the player cannot connect to their decision has
+//! not been caused as far as they are concerned. The **district** is the thing
+//! that takes days; the first hint that it has started is prompt.
+//!
+//! Decline runs on the same rate in the same units, so a district that loses its
+//! service sheds half its buildings over about two and a half sim days — brief
+//! 06 §3.2's *"legible and gradual"* in the units that brief's promise implies.
 
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 
 use crate::ids::TileCoord;
+use crate::peeps::TICKS_PER_DAY;
 use crate::stations::{catchment_influence, StationRegistry, StationService};
 use crate::track::TrackTerrain;
 
@@ -14,8 +50,34 @@ pub const GROWTH_RADIUS: i32 = 5;
 /// Maximum stored density per tile (`1.0` = fully built-up).
 pub const MAX_DENSITY: f32 = 1.0;
 
-/// How quickly density approaches its service-driven target (per tick).
-const APPROACH_RATE: f32 = 0.04;
+/// Growth passes in one sim day — once a sim-hour.
+///
+/// The cadence is the *resolution* of growth, not its speed:
+/// [`GROWTH_APPROACH_RATE`] is derived from it so that changing one without the
+/// other is a visible mistake rather than a silent re-pacing. An hour is fine
+/// enough that a block crossing a lot threshold does so at a moment nobody can
+/// predict, and coarse enough that the pass costs a 360th of what it used to.
+pub const GROWTH_PASSES_PER_DAY: u64 = 24;
+
+/// Ticks between growth passes.
+pub const GROWTH_INTERVAL_TICKS: u64 = TICKS_PER_DAY / GROWTH_PASSES_PER_DAY;
+
+/// How much of the remaining gap to its target a cell closes each pass.
+///
+/// Derived, not chosen: the target is a **half-life of about 2.3 sim days**, so
+/// `1 - (1 - r)^24 = 1 - e^-0.302` over one day. That puts the first cottage
+/// half a day after service starts and the fourth lot on day five, which is the
+/// table in the module docs.
+pub const GROWTH_APPROACH_RATE: f32 = 0.0125;
+
+/// True on ticks the growth pass is due.
+///
+/// Public because the cadence is part of the pacing contract: tests that want
+/// "a sim day of growth" should step the tick and ask, rather than counting
+/// system runs, so they keep meaning the same thing if the cadence moves.
+pub fn growth_due(tick: u64) -> bool {
+    tick.is_multiple_of(GROWTH_INTERVAL_TICKS)
+}
 
 /// Steepness of the fall from a town's core to its edge.
 ///
@@ -187,6 +249,13 @@ pub fn advance_town_growth(
         density.set_bounds(terrain.width(), terrain.height());
     }
 
+    // The bounds sweep above is a world-identity check and has to run on every
+    // tick — a swapped world must be honoured by whoever ticks next. Growth
+    // itself is on the day clock (module docs), so it is gated after it.
+    if !growth_due(service.tick) {
+        return;
+    }
+
     if stations.is_empty() {
         return;
     }
@@ -232,7 +301,7 @@ pub fn advance_town_growth(
             0.0
         };
         let current = density.get(tile);
-        let next = current + (target - current) * APPROACH_RATE;
+        let next = current + (target - current) * GROWTH_APPROACH_RATE;
         density.set(tile, next);
     }
 }
@@ -245,10 +314,63 @@ mod tests {
     use crate::track::GROUND_LAYER;
     use bevy_app::App;
 
+    /// Density at which presentation takes up each successive lot of a block.
+    ///
+    /// The authority is `rail_town::town::lots::LOT_UP`; `rail_sim` cannot
+    /// depend on `rail_town`, so it is restated here and the two halves are
+    /// pinned together in that module's
+    /// `a_block_fills_over_days_and_the_first_house_lands_promptly`.
+    /// These are what make the pacing table in the module docs *visible*.
+    const LOT_UP: [f32; 4] = [0.14, 0.32, 0.56, 0.80];
+
     fn registry_with(tile: TileCoord, name: &str) -> (StationRegistry, StationId) {
         let mut reg = StationRegistry::new();
         let id = reg.insert(name, tile, GROUND_LAYER);
         (reg, id)
+    }
+
+    /// A world of one perfectly served station on flat ground.
+    fn served_world(tile: TileCoord, map: u32) -> App {
+        let mut app = App::new();
+        let (stations, id) = registry_with(tile, "Eastgate");
+        let mut service = StationService::default();
+        service.scores.insert(
+            id,
+            StationServiceScore {
+                score: 100,
+                ..Default::default()
+            },
+        );
+        app.insert_resource(stations)
+            .insert_resource(service)
+            .insert_resource(flat_terrain(map, map))
+            .init_resource::<TownDensity>()
+            .add_systems(bevy_app::Update, advance_town_growth);
+        app
+    }
+
+    /// Advance `days` **sim days** of growth.
+    ///
+    /// Growth tests are written in sim days rather than in iteration counts on
+    /// purpose: the cadence is a pacing decision that may move, and a test that
+    /// counts system runs quietly stops asking the question it was written to
+    /// ask when it does.
+    ///
+    /// The clock is stepped one [`GROWTH_INTERVAL_TICKS`] at a time rather than
+    /// one tick at a time — the pass does nothing on the ticks in between, and
+    /// stepping through them costs a hundredfold for no extra coverage. That
+    /// the idle ticks really are idle is
+    /// [`growth_only_advances_on_its_own_cadence`]'s job.
+    fn run_days(app: &mut App, days: f32) {
+        let passes = (days * GROWTH_PASSES_PER_DAY as f32).round() as u64;
+        for _ in 0..passes {
+            app.update();
+            app.world_mut().resource_mut::<StationService>().tick += GROWTH_INTERVAL_TICKS;
+        }
+    }
+
+    fn density_at(app: &App, tile: TileCoord) -> f32 {
+        app.world().resource::<TownDensity>().get(tile)
     }
 
     #[test]
@@ -283,32 +405,91 @@ mod tests {
     }
 
     #[test]
-    fn growth_tick_moves_density_toward_higher_service() {
+    fn growth_moves_density_toward_higher_service() {
         let tile = TileCoord { x: 5, y: 5 };
-        let (stations, id) = registry_with(tile, "Eastgate");
-        let mut service = StationService::default();
-        service.scores.insert(
-            id,
-            StationServiceScore {
-                score: 100,
-                ..Default::default()
-            },
-        );
+        let mut app = served_world(tile, 16);
+        assert_eq!(density_at(&app, tile), 0.0);
 
-        let mut density = TownDensity::default();
-        assert_eq!(density.get(tile), 0.0);
-
-        // Simulate several growth ticks without Bevy scheduling.
-        for _ in 0..40 {
-            let target = density_target_at(tile, &stations, &service);
-            let current = density.get(tile);
-            density.set(tile, current + (target - current) * APPROACH_RATE);
-        }
+        // Two and a half sim days — the half-life in the module docs.
+        run_days(&mut app, 2.5);
 
         assert!(
-            density.get(tile) > 0.5,
+            density_at(&app, tile) > 0.5,
             "sustained high service should thicken buildings (got {})",
-            density.get(tile)
+            density_at(&app, tile)
+        );
+    }
+
+    /// **The pacing claim.** Brief 17: a served block takes up its four lots
+    /// over about five sim days, and the first of them inside the first day.
+    ///
+    /// Stated against `rail_town`'s lot thresholds, because those are what turn
+    /// a density value into a building the player can see. A model that reaches
+    /// the right number on the wrong day is the bug this test exists to catch.
+    #[test]
+    fn a_served_block_fills_its_lots_over_days_not_seconds() {
+        let tile = TileCoord { x: 8, y: 8 };
+        let expected_by: [(f32, usize); 4] = [(1.0, 0), (2.0, 1), (3.5, 2), (6.0, 3)];
+
+        for (day, lot) in expected_by {
+            let mut app = served_world(tile, 24);
+            run_days(&mut app, day);
+            let d = density_at(&app, tile);
+            assert!(
+                d >= LOT_UP[lot],
+                "lot {} should be taken up by sim day {day}, density was {d} \
+                 against a threshold of {}",
+                lot + 1,
+                LOT_UP[lot],
+            );
+        }
+
+        // …and not before. The whole complaint was a town that finished while
+        // the player was still holding the mouse.
+        let mut app = served_world(tile, 24);
+        run_days(&mut app, 0.25);
+        assert!(
+            density_at(&app, tile) < LOT_UP[0],
+            "a quarter of a sim day in, the block is still open ground; got {}",
+            density_at(&app, tile)
+        );
+
+        let mut app = served_world(tile, 24);
+        run_days(&mut app, 2.0);
+        assert!(
+            density_at(&app, tile) < LOT_UP[2],
+            "the third lot must not arrive on day two — that is the whole \
+             district built in under five real minutes; got {}",
+            density_at(&app, tile)
+        );
+    }
+
+    /// The gate is the day clock, not the frame rate.
+    #[test]
+    fn growth_only_advances_on_its_own_cadence() {
+        let tile = TileCoord { x: 6, y: 6 };
+        let mut app = served_world(tile, 16);
+
+        // Tick zero is due, so one pass lands; the rest of the interval is idle.
+        app.update();
+        let after_first = density_at(&app, tile);
+        assert!(after_first > 0.0, "the first pass should land");
+
+        for _ in 0..(GROWTH_INTERVAL_TICKS - 1) {
+            app.world_mut().resource_mut::<StationService>().tick += 1;
+            app.update();
+        }
+        assert_eq!(
+            density_at(&app, tile),
+            after_first,
+            "growth ran between passes — the cadence is not holding"
+        );
+
+        app.world_mut().resource_mut::<StationService>().tick += 1;
+        app.update();
+        assert!(
+            density_at(&app, tile) > after_first,
+            "the next due tick should advance growth"
         );
     }
 
@@ -336,12 +517,29 @@ mod tests {
         let low = density_target_at(tile, &stations, &service);
 
         assert!(low < high);
-        // A cell sitting at `high` would shrink toward `low` each tick.
+        // A cell sitting at `high` sheds toward `low` on the same day clock it
+        // grew on: roughly half the gap over two and a half sim days.
+        let passes = (2.5 * GROWTH_PASSES_PER_DAY as f32) as u32;
         let mut density = high;
-        for _ in 0..30 {
-            density += (low - density) * APPROACH_RATE;
+        for _ in 0..passes {
+            density += (low - density) * GROWTH_APPROACH_RATE;
         }
-        assert!(density < high * 0.7);
+        assert!(
+            density < high * 0.7,
+            "two and a half sim days of neglect should visibly thin the \
+             district: {density} against {high}"
+        );
+
+        // …and it is *gradual*: a single sim day must not empty a street.
+        let mut after_a_day = high;
+        for _ in 0..GROWTH_PASSES_PER_DAY {
+            after_a_day += (low - after_a_day) * GROWTH_APPROACH_RATE;
+        }
+        assert!(
+            after_a_day > high * 0.7,
+            "brief 06 §3.2 wants decline legible and gradual, not a demolition: \
+             {after_a_day} against {high} after one sim day"
+        );
     }
 
     #[test]
@@ -382,25 +580,8 @@ mod tests {
         // the map edge, because the ring walked `tile +/- radius` with nothing
         // to stop it. Two tiles in is a legal seed position, and the catchment
         // reaches further than that.
-        let mut app = App::new();
-        let (stations, id) = registry_with(TileCoord { x: 2, y: 2 }, "Edgewater");
-        let mut service = StationService::default();
-        service.scores.insert(
-            id,
-            StationServiceScore {
-                score: 100,
-                ..Default::default()
-            },
-        );
-        app.insert_resource(stations)
-            .insert_resource(service)
-            .insert_resource(flat_terrain(16, 16))
-            .init_resource::<TownDensity>()
-            .add_systems(bevy_app::Update, advance_town_growth);
-
-        for _ in 0..80 {
-            app.update();
-        }
+        let mut app = served_world(TileCoord { x: 2, y: 2 }, 16);
+        run_days(&mut app, 4.0);
 
         let density = app.world().resource::<TownDensity>();
         assert!(!density.is_empty(), "the town has to actually grow");
@@ -459,11 +640,10 @@ mod tests {
             .insert_resource(density)
             .add_systems(bevy_app::Update, advance_town_growth);
 
-        // The approach rate drains ~4% per pass; 160 passes takes the seeded
-        // 0.8 under 0.01 — receding, not teleporting, is the designed shape.
-        for _ in 0..160 {
-            app.update();
-        }
+        // Receding, not teleporting, is the designed shape — so this is stated
+        // in sim days. Sixteen of them takes the seeded 0.8 under 0.01 at the
+        // model's rate, and the land beside the station is built by then.
+        run_days(&mut app, 16.0);
 
         let density = app.world().resource::<TownDensity>();
         assert!(

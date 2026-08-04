@@ -16,7 +16,8 @@
 mod growth;
 
 pub use growth::{
-    advance_town_growth, density_target_at, TownDensity, GROWTH_RADIUS, MAX_DENSITY,
+    advance_town_growth, density_target_at, growth_due, town_falloff, TownDensity,
+    GROWTH_APPROACH_RATE, GROWTH_INTERVAL_TICKS, GROWTH_PASSES_PER_DAY, GROWTH_RADIUS, MAX_DENSITY,
 };
 
 use bevy_app::{App, FixedUpdate, Plugin};

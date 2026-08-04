@@ -7,26 +7,63 @@
 //! feel like a countdown. Cents survive in exactly one place — a net rate under
 //! a dollar a minute, where rounding to zero would be a lie.
 //!
-//! # Clock (03 §6)
+//! # Clock (03 §6, and [17 — Time & Pacing](../../../docs/design/17-time-and-pacing.md) §3)
 //!
-//! [`crate::atmosphere::TimeOfDay`] owns the day cycle and exposes a `fraction`
-//! where `0.0` is first light. That is the only clock in the game, so the
-//! readout is derived from it rather than counted separately — the warm dusk
-//! cast and the time on the strip can never disagree.
+//! **The strip shows a date and a part of the day. It does not show `HH:MM`,
+//! and it must not.**
 //!
-//! `fraction` is mapped onto a 24-hour day with first light at [`FIRST_LIGHT_MINUTES`],
-//! which puts the atmosphere module's own phase boundaries at plausible clock
-//! times (day from ~08:20, dusk from ~17:55, night from ~20:50).
-
-/// Clock time at cycle position `0.0`, in minutes past midnight.
-pub const FIRST_LIGHT_MINUTES: u32 = 5 * 60;
+//! It used to. The label was minute-resolution and it was driven by the light
+//! cycle, which is twelve real minutes long — so a clock minute went by every
+//! half a real second, and a transit crossing ten tiles appeared to do it in
+//! about one. The owner's report was exactly that arithmetic: *"trains go
+//! between ~10 tiles in ~1 in-game minute at 1x speed which is insanely
+//! fast."* Nothing was wrong with the train. The **claim** was wrong, and it
+//! was a claim nobody needed the game to make.
+//!
+//! RCT and Locomotion show a month and a year for the same reason: screen time
+//! and world time cannot both be literal, and a coarse clock face is the one
+//! that never lies. Brief 17 §3 is the whole argument.
+//!
+//! ## Where each half comes from
+//!
+//! | Field | Source | Why |
+//! | --- | --- | --- |
+//! | `Spring 3` | the sim's own day, [`rail_sim::day_index`] | it is the day the Goals panel and the Peep card already count |
+//! | `Morning` | [`crate::atmosphere::TimeOfDay::fraction`] | 03 §6: the readout can never disagree with the light |
+//!
+//! The part-of-day boundaries are a **refinement** of the tint's own phases —
+//! `Dawn` and `Night` are exactly the tint's, and `Morning` / `Midday` /
+//! `Afternoon` subdivide the flat untinted middle, where there is no light
+//! change to contradict. So the word on the strip and the colour on the world
+//! agree by construction, which is the rule 03 §6 was written to protect.
 
 /// Days in one season.
 pub const DAYS_PER_SEASON: u32 = 12;
 
-/// Seasons, in order. Season affects nothing yet; the label is here because the
-/// player needs to know why the light changed, and a bare day counter does not
-/// say that (03 §6).
+/// Cycle positions where each named part of the day begins.
+///
+/// `0.0` is first light. The first, fifth and sixth boundaries are the
+/// atmosphere module's own `DAY_START` / `DUSK_START` / `NIGHT_START`; the two
+/// in between split the long flat daylight stretch, which carries no tint and
+/// so cannot be contradicted. `part_of_day_agrees_with_the_light` holds the
+/// pairing.
+const PART_STARTS: [(f32, &str); 6] = [
+    (0.00, "Dawn"),
+    (0.14, "Morning"),
+    (0.32, "Midday"),
+    (0.44, "Afternoon"),
+    (0.54, "Evening"),
+    (0.66, "Night"),
+];
+
+/// Seasons, in order. Season affects nothing yet; the label is here to give the
+/// date a shape a bare counter has not got — `Autumn 4` says how long the
+/// session has been going in a way `day 40` does not.
+///
+/// On the sim day ([`crate::ui::status_strip`]) a season is twelve days, about
+/// **27 real minutes**, and a year is four of them. Counted against the light
+/// cycle, as it was, a season took two and a half hours and nobody ever saw
+/// autumn.
 pub const SEASONS: [&str; 4] = ["Spring", "Summer", "Autumn", "Winter"];
 
 /// Whole dollars with thousands separators — `-$1,204`.
@@ -82,17 +119,19 @@ fn group_thousands(value: u64) -> String {
     out
 }
 
-/// `HH:MM` for a cycle position.
-pub fn clock_label(fraction: f32) -> String {
-    let minutes = minute_of_day(fraction);
-    format!("{:02}:{:02}", minutes / 60, minutes % 60)
-}
-
-/// Minutes past midnight for a cycle position.
-pub fn minute_of_day(fraction: f32) -> u32 {
+/// `Morning` — which part of the day the light is in.
+///
+/// Deliberately the whole of what the strip says about time. See the module
+/// docs, and brief 17 §3 for the argument.
+pub fn part_of_day(fraction: f32) -> &'static str {
     let f = fraction.rem_euclid(1.0);
-    let raw = (f * 1440.0) as u32 + FIRST_LIGHT_MINUTES;
-    raw % 1440
+    let mut label = PART_STARTS[PART_STARTS.len() - 1].1;
+    for &(start, name) in PART_STARTS.iter() {
+        if f >= start {
+            label = name;
+        }
+    }
+    label
 }
 
 /// `Spring 3` — season and day-within-season, from a day index counted from
@@ -142,24 +181,54 @@ mod tests {
     }
 
     #[test]
-    fn first_light_reads_as_early_morning() {
-        assert_eq!(clock_label(0.0), "05:00");
-        // The atmosphere module's own phase boundaries land at plausible times,
-        // which is the whole point: the warm cast now has a clock beside it.
-        assert_eq!(clock_label(0.14), "08:21");
-        assert_eq!(clock_label(0.54), "17:57");
-        assert_eq!(clock_label(0.66), "20:50");
+    fn the_day_reads_as_parts_and_never_as_minutes() {
+        assert_eq!(part_of_day(0.0), "Dawn");
+        assert_eq!(part_of_day(0.20), "Morning");
+        assert_eq!(part_of_day(0.35), "Midday");
+        assert_eq!(part_of_day(0.50), "Afternoon");
+        assert_eq!(part_of_day(0.60), "Evening");
+        assert_eq!(part_of_day(0.90), "Night");
+        // Wraps rather than clamping — the cycle has a seam and the strip is
+        // read across it.
+        assert_eq!(part_of_day(1.0), "Dawn");
+        assert_eq!(part_of_day(-0.01), "Night");
+        assert_eq!(part_of_day(1.9), "Night");
+    }
+
+    /// **The rule 03 §6 exists to protect.** The word on the strip is derived
+    /// from the same `fraction` as the tint, and its boundaries refine the
+    /// tint's own — so the strip can never say "Morning" over a dusk-lit world.
+    #[test]
+    fn part_of_day_agrees_with_the_light() {
+        use crate::atmosphere::{DayPhase, TimeOfDay};
+        for step in 0..2000 {
+            let f = step as f32 / 2000.0;
+            let phase = TimeOfDay::at(f).phase;
+            let expected = match phase {
+                DayPhase::Dawn => &["Dawn"][..],
+                DayPhase::Day => &["Morning", "Midday", "Afternoon"][..],
+                DayPhase::Dusk => &["Evening"][..],
+                DayPhase::Night => &["Night"][..],
+            };
+            let part = part_of_day(f);
+            assert!(
+                expected.contains(&part),
+                "at {f} the world is tinted {phase:?} and the strip says {part}"
+            );
+        }
     }
 
     #[test]
-    fn the_clock_wraps_rather_than_running_past_midnight() {
-        assert_eq!(clock_label(0.834), "01:00");
-        assert_eq!(clock_label(1.0), "05:00");
-        assert_eq!(clock_label(-0.01), "04:45");
-        for step in 0..1000 {
-            let minutes = minute_of_day(step as f32 / 1000.0);
-            assert!(minutes < 1440);
-        }
+    fn every_part_of_the_day_gets_a_turn() {
+        let mut seen: Vec<&str> = (0..2000)
+            .map(|s| part_of_day(s as f32 / 2000.0))
+            .collect();
+        seen.dedup();
+        assert_eq!(
+            seen,
+            vec!["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"],
+            "the parts should run in order, once each, across a cycle"
+        );
     }
 
     #[test]

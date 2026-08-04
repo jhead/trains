@@ -399,7 +399,13 @@ mod tests {
     const H: u32 = 16;
     /// Ticks for a goods train to run the eleven tiles from the railhead at
     /// `(4, 8)` out to the portal at `(15, 8)`, with headroom.
-    const RUN_TO_PORTAL_TICKS: u32 = 80;
+    ///
+    /// Derived from the profile rather than written down: how long a train
+    /// takes to cross a tile is a pacing decision (brief 17 §4) and it has
+    /// already moved once, silently breaking every test in this module that had
+    /// the old number baked into it.
+    const RUN_TO_PORTAL_TICKS: u32 =
+        11 * crate::trains::TRANSPORT_PROFILE.base_ticks as u32 + 24;
 
     /// A flat world with a line running east from `(4, 8)` to the east edge,
     /// and the east border already open.
@@ -521,7 +527,8 @@ mod tests {
         let mut app = world_with_border();
         let id = spawn_border_train(&mut app, 1);
 
-        // Long enough to run the line: eleven tiles at five ticks a tile.
+        // Long enough to run the line: eleven tiles at the freight profile's
+        // pace, whatever that currently is.
         run(&mut app, RUN_TO_PORTAL_TICKS);
         assert!(
             trains_on_map(&mut app).is_empty(),
